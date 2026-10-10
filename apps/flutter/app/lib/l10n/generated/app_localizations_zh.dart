@@ -18,7 +18,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get workspaceDiscardChanges => '放弃修改';
 
   @override
-  String get askOperitHint => '向 Operit 提问';
+  String get askOperitHint => '向 PengSong 提问';
 
   @override
   String get aiChat => 'AI聊天';

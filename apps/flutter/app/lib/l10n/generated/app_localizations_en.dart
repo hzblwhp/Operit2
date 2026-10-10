@@ -19,7 +19,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get workspaceDiscardChanges => 'Discard changes';
 
   @override
-  String get askOperitHint => 'Ask Operit';
+  String get askOperitHint => 'Ask PengSong';
 
   @override
   String get aiChat => 'AI Chat';

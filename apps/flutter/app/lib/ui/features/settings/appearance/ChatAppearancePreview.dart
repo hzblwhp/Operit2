@@ -45,7 +45,7 @@ class _ChatAppearancePreviewState extends State<ChatAppearancePreview> {
   Widget build(BuildContext context) {
     final controller = OperitTheme.of(context);
     final snapshot = controller.themePreferenceSnapshot;
-    const roleName = 'Operit';
+    const roleName = 'PengSong';
     final l10n = AppLocalizations.of(context)!;
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),

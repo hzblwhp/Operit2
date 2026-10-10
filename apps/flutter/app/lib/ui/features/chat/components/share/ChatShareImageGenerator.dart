@@ -121,7 +121,7 @@ class ChatShareImageSurface extends StatelessWidget {
                       const OperitLogoMark(size: 24, contentScale: 0.84),
                       const SizedBox(width: 8),
                       Text(
-                        'Operit',
+                        'PengSong',
                         style: theme.textTheme.titleMedium?.copyWith(
                           fontWeight: FontWeight.w700,
                         ),

@@ -119,7 +119,7 @@ abstract class AppLocalizations {
   /// No description provided for @askOperitHint.
   ///
   /// In en, this message translates to:
-  /// **'Ask Operit'**
+  /// **'Ask PengSong'**
   String get askOperitHint;
 
   /// No description provided for @aiChat.
