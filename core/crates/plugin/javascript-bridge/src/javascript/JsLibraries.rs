@@ -1075,6 +1075,13 @@ fn assembleRuntimeBootstrapScript() -> String {
                             return Promise.reject(new Error('ToolPkg.ipc requires a bound package target'));
                         }}
                         var ownerCallId = String(globalThis.__operitCurrentCallId);
+                        // Identity leaks across runtimes are silent killers: log the owner
+                        // and the ambient id so a stale borrowing shows up in operit.log.
+                        if (typeof __operitNativeLog === 'function') {{
+                            __operitNativeLog('info', ownerCallId, 'ipc-call-owner owner='
+                                + ownerCallId + ' current=' + String(globalThis.__operitCurrentCallId)
+                                + ' channel=' + normalizedChannel + ' target=' + targetRuntime);
+                        }}
                         return new Promise(function(resolve, reject) {{
                             __operitRetainCallReference(ownerCallId);
                             /** Releases this request only after the public continuation runs. */

@@ -171,7 +171,17 @@
 
     function activateCall(callId) {
         var state = getCallState(callId);
-        if (!state || state.completed) return false;
+        if (!state || state.completed) {
+            // Restoring a finalized session is expected after a cross-runtime
+            // detour; record it so identity leaks stay diagnosable.
+            if (typeof root.__operitNativeLog === 'function') {
+                root.__operitNativeLog('warn', String(callId), 'activateCall-missed hasState='
+                    + Boolean(state)
+                    + ' completed=' + Boolean(state && state.completed)
+                    + ' current=' + String(root.__operitCurrentCallId || ''));
+            }
+            return false;
+        }
         root.__operitCurrentCallId = callId;
         root.__operit_call_runtime_ref = state.callRuntime;
         return true;
