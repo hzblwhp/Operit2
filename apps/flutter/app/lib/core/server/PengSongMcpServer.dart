@@ -525,10 +525,10 @@ class PengSongMcpServer {
   static const String _identitiesRoot =
       '/data/data/app.operit/files/runtime/identities';
 
-  /// Rewrites one sandbox text file in place.
+  /// Rewrites one sandbox text file, creating parents when they are missing.
   ///
-  /// Only used to repair materialized plugin files that drifted from the shipped
-  /// source; a plugin re-materialization overwrites it again on the next launch.
+  /// Also used to seed the agent-to-agent drop box, so the directory has to be
+  /// created on demand rather than requiring a pre-existing file.
   Future<String> _writeTextFile(String path, String content) async {
     if (path.isEmpty) {
       throw StateError('write_file requires a path');
@@ -537,8 +537,9 @@ class PengSongMcpServer {
       throw StateError('write_file is limited to the app sandbox: $path');
     }
     final file = File(path);
-    if (!await file.exists()) {
-      throw StateError('No such file: $path');
+    final parent = file.parent;
+    if (!await parent.exists()) {
+      await parent.create(recursive: true);
     }
     await file.writeAsString(content, flush: true);
     final written = await file.length();
