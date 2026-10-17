@@ -427,25 +427,41 @@ class PengSongMcpServer {
           throw StateError('send_message requires text');
         }
         final rawChatId = (arguments['chatId'] as String? ?? '').trim();
-        await _clients.chatRuntimeHolderMain.sendUserMessage(
-          promptFunctionType: PromptFunctionType.chat,
-          participantId: null,
-          chatIdOverride: rawChatId.isEmpty ? null : rawChatId,
-          messageText: text,
-          proxySenderNameOverride: null,
-          chatProviderIdOverride: null,
-          chatModelIdOverride: null,
-          attachments: const [],
-          replyToMessage: null,
-          turnOptions: const ChatTurnOptions(
-            persistTurn: true,
-            notifyReply: null,
-            hideUserMessage: false,
-            disableWarning: false,
-            continuation: null,
-            chatInputSubmitRequestedHandled: true,
-          ),
-        );
+        try {
+          await _clients.chatRuntimeHolderMain.sendUserMessage(
+            promptFunctionType: PromptFunctionType.chat,
+            participantId: null,
+            chatIdOverride: rawChatId.isEmpty ? null : rawChatId,
+            messageText: text,
+            proxySenderNameOverride: null,
+            chatProviderIdOverride: null,
+            chatModelIdOverride: null,
+            attachments: const [],
+            replyToMessage: null,
+            turnOptions: const ChatTurnOptions(
+              persistTurn: true,
+              notifyReply: null,
+              hideUserMessage: false,
+              disableWarning: false,
+              continuation: null,
+              chatInputSubmitRequestedHandled: true,
+            ),
+          );
+        } on Object catch (error) {
+          // The chat runs one turn at a time. Reporting "busy" as a normal result
+          // keeps the caller from treating it as a transport failure — and, more
+          // importantly, keeps a second request from surfacing a red error banner
+          // inside the user's own chat while they are typing there.
+          final detail = error.toString();
+          if (detail.contains('Conversation is executing')) {
+            return jsonEncode({
+              'sent': false,
+              'reason': 'busy',
+              'detail': '该会话正在执行中，等当前回合结束后再试',
+            });
+          }
+          rethrow;
+        }
         return jsonEncode({
           'chatId': rawChatId.isEmpty ? 'active' : rawChatId,
           'sent': true,

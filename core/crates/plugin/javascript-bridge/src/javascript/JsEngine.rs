@@ -102,6 +102,17 @@ fn activeCallContexts() -> std::sync::MutexGuard<'static, BTreeMap<String, JsCal
 
 /// Reports the registry's address so two logs can prove they share one map.
 #[allow(non_snake_case)]
+/// Renders at most the first two ids for a bounded log line.
+#[allow(non_snake_case)]
+fn summarizeCallIds(ids: &[String]) -> String {
+    const SHOWN: usize = 2;
+    let mut parts: Vec<&str> = ids.iter().take(SHOWN).map(String::as_str).collect();
+    if ids.len() > SHOWN {
+        parts.push("…");
+    }
+    parts.join(", ")
+}
+
 fn activeCallContextsPtr() -> usize {
     ACTIVE_CALL_CONTEXTS.get_or_init(|| Mutex::new(BTreeMap::new())) as *const _ as usize
 }
@@ -1242,15 +1253,21 @@ impl JsEngineState {
             let after = contexts.keys().cloned().collect::<Vec<String>>();
             (before, after)
         };
+        // Keep this line bounded: printing every id made a single log line tens of
+        // kilobytes once the registry grew, which dominated the log file and made
+        // both grep and the UI sluggish. Counts plus the first few ids keep the
+        // diagnostic value without the volume.
         AppLogger::i(
             "ToolPkg",
             &format!(
-                "install-active build={} ptr=0x{:x} before={:?} pending={} after={:?}",
+                "install-active build={} ptr=0x{:x} before={} [{}] pending={} after={} [{}]",
                 BUILD_FINGERPRINT,
                 activeCallContextsPtr(),
-                before,
+                before.len(),
+                summarizeCallIds(&before),
                 pending,
-                after,
+                after.len(),
+                summarizeCallIds(&after),
             ),
         );
     }
