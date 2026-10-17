@@ -7,6 +7,7 @@ import '../../../../../../data/preferences/UserPreferencesManager.dart';
 import '../../../../../theme/OperitTheme.dart';
 import '../../../../../theme/OperitThemeAssets.dart';
 import '../../attachments/AttachmentViewerDialog.dart';
+import '../../ChatLayoutMetrics.dart';
 import '../bubble/BubbleSurface.dart';
 import '../../../viewmodel/ChatViewModel.dart';
 
@@ -58,7 +59,12 @@ class _UserMessageComposableState extends State<UserMessageComposable> {
             themePreferenceSnapshot.bubbleUserContentPaddingRight,
             16,
           )
-        : const EdgeInsets.fromLTRB(16, 16, 16, 16);
+        : const EdgeInsets.fromLTRB(
+            chatAreaHorizontalPadding,
+            16,
+            chatAreaHorizontalPadding,
+            16,
+          );
     final bubbleBorderRadius = BorderRadius.circular(
       themePreferenceSnapshot.bubbleUserRoundedCornersEnabled ? 12 : 4,
     );
@@ -88,7 +94,10 @@ class _UserMessageComposableState extends State<UserMessageComposable> {
         : null;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.symmetric(
+        horizontal: chatAreaHorizontalPadding,
+        vertical: 4,
+      ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[

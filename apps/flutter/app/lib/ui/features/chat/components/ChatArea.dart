@@ -230,7 +230,12 @@ class _ChatAreaState extends State<ChatArea>
                   slivers: [
                     if (centerIndex > 0)
                       SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                        padding: const EdgeInsets.fromLTRB(
+                          chatAreaHorizontalPadding,
+                          16,
+                          chatAreaHorizontalPadding,
+                          0,
+                        ),
                         sliver: ChatMessageSliverList(
                           extents: rowExtents
                               .take(centerIndex)
@@ -245,9 +250,9 @@ class _ChatAreaState extends State<ChatArea>
                     SliverPadding(
                       key: _centerSliverKey,
                       padding: EdgeInsets.fromLTRB(
-                        16,
+                        chatAreaHorizontalPadding,
                         _layoutAnchorTimestamp == null ? 16 : 0,
-                        16,
+                        chatAreaHorizontalPadding,
                         16 + widget.bottomContentInset,
                       ),
                       sliver: ChatMessageSliverList(
@@ -358,7 +363,11 @@ class _ChatAreaState extends State<ChatArea>
       child = _StatusMessage(text: widget.errorMessage!, isError: true);
     } else {
       child = const Padding(
-        padding: EdgeInsets.only(left: 16, top: 2, bottom: 2),
+        padding: EdgeInsets.only(
+          left: chatAreaHorizontalPadding,
+          top: 2,
+          bottom: 2,
+        ),
         child: StreamingCursor(),
       );
     }
@@ -1214,7 +1223,10 @@ class _MessageVariantSwitcher extends StatelessWidget {
     final hasNext = message.selectedVariantIndex < message.variantCount - 1;
     final colorScheme = Theme.of(context).colorScheme;
     return Padding(
-      padding: const EdgeInsetsDirectional.only(start: 16, top: 4),
+      padding: const EdgeInsetsDirectional.only(
+        start: chatAreaHorizontalPadding,
+        top: 4,
+      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
@@ -1289,7 +1301,10 @@ class _StatusMessage extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.symmetric(
+        horizontal: chatAreaHorizontalPadding,
+        vertical: 4,
+      ),
       child: SelectableText(
         text,
         style: theme.textTheme.bodySmall?.copyWith(

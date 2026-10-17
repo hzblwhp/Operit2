@@ -10,6 +10,7 @@ import '../../../../../common/markdown/StreamMarkdownRenderer.dart';
 import '../../../../../common/markdown/StreamMarkdownRendererState.dart';
 import '../../../../../../data/preferences/UserPreferencesManager.dart';
 import '../../../../../theme/OperitTheme.dart';
+import '../../ChatLayoutMetrics.dart';
 import '../MessageHeaderMetadata.dart';
 import '../bubble/BubbleSurface.dart';
 import '../../part/StructuredMessagePartRenderer.dart';
@@ -225,7 +226,9 @@ class _AiMessageComposableState extends State<AiMessageComposable> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: chatAreaHorizontalPadding,
+                      ),
                       child: useCardStyle
                           ? BubbleSurface(
                               color: aiBubbleColor,
@@ -257,7 +260,12 @@ class _AiMessageComposableState extends State<AiMessageComposable> {
                             ),
                     ),
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                      padding: const EdgeInsets.fromLTRB(
+                        chatAreaHorizontalPadding,
+                        6,
+                        chatAreaHorizontalPadding,
+                        0,
+                      ),
                       child: _CursorAiMessageHeader(
                         message: widget.message,
                         onTap: widget.onIdentityTap,

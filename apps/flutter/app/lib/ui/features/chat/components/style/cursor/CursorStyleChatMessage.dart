@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../../../../common/markdown/StreamMarkdownRenderer.dart';
 import '../../../viewmodel/ChatViewModel.dart';
+import '../../ChatLayoutMetrics.dart';
 import 'AiMessageComposable.dart';
 import '../SummaryMessageComposable.dart';
 import 'UserMessageComposable.dart';
@@ -64,7 +65,10 @@ class _SystemMessageComposable extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.symmetric(
+        horizontal: chatAreaHorizontalPadding,
+        vertical: 4,
+      ),
       child: SelectableText(
         message.displayText,
         style: theme.textTheme.bodySmall?.copyWith(
