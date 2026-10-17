@@ -56,7 +56,16 @@ const PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_EN: &str = r#"PACKAGE SYSTEM
 - If use_package for a package has appeared earlier in this chat, treat that package as activated
 - For package tools, call package_proxy:
   - Set tool_name to the actual package tool name (e.g. packageName:toolName)
-  - Put target tool arguments in params as a JSON object"#;
+  - Put target tool arguments in params as a JSON object
+- Example, for a tool declaring `node_id: string` and `depth: integer`:
+    <tool name="package_proxy">
+    <param name="tool_name">packageName:toolName</param>
+    <param name="params">{"node_id": "abc", "depth": 2}</param>
+    </tool>
+- Keys inside params must match the declared parameter names exactly. A misspelled,
+  extra, or missing key fails argument matching and the tool never runs.
+- If a call fails argument matching or reports a missing result, read the reported
+  reason and change the arguments. Never repeat the identical call"#;
 
 const PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_CN: &str = r#"包系统：
 - 一些额外功能通过包提供
@@ -64,7 +73,16 @@ const PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_CN: &str = r#"包系统：
 - 只要本次聊天中该包曾出现过 use_package，就视为该包已激活
 - 调用包工具请使用 package_proxy：
   - tool_name 填写真实工具名（例如 packageName:toolName）
-  - 将目标工具参数放入 params（JSON对象）"#;
+  - 将目标工具参数放入 params（JSON对象）
+- 示例（假设工具声明的参数是 node_id: string、depth: integer）：
+  <tool name="package_proxy">
+  <param name="tool_name">packageName:toolName</param>
+  <param name="params">{"node_id": "abc", "depth": 2}</param>
+  </tool>
+- params 里的键必须与工具声明的参数名逐字一致，拼错、多写或漏写都会导致参数
+  匹配失败，工具根本不会执行
+- 如果调用因参数不匹配失败，或返回“工具结果缺失”，先按返回的原因修正参数再调，
+  不要把同样的调用原样重试"#;
 
 pub const SYSTEM_PROMPT_TEMPLATE: &str = r#"BEGIN_SELF_INTRODUCTION_SECTION
 

@@ -413,12 +413,37 @@ impl ToolExecutionManager {
                     invocation.rawText.len()
                 ),
             );
-            let collected = toolHandler
+            let collected = match toolHandler
                 .executeToolInvocation(
                     &ToolCall::from(&invocation.tool),
                     ToolExecutionPolicy::Ai { exposure: toolExposureMode.clone() },
                 )
-                .await?;
+                .await
+            {
+                Ok(collected) => collected,
+                Err(error) => {
+                    // Argument-shape failures (missing or unexpected proxy params,
+                    // malformed params JSON, wrong tool_name form) are the model's
+                    // own mistake and must be reported back as the tool result.
+                    // Failing the whole request instead leaves the call without any
+                    // result, so the model only ever sees "result missing" and
+                    // repeats the identical call until the turn dies.
+                    AppLogger::d(
+                        TAG,
+                        &format!(
+                            "tool.execution.rejected tool={} error={}",
+                            displayToolName, error
+                        ),
+                    );
+                    let rejection = format!("Tool call rejected: {error}");
+                    vec![ToolResult {
+                        toolName: displayToolName.clone(),
+                        success: false,
+                        result: stringResultData(rejection.clone()),
+                        error: Some(rejection),
+                    }]
+                }
+            };
             AppLogger::d(
                 TAG,
                 &format!(
