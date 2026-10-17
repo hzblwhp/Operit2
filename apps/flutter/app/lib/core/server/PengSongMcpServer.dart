@@ -6,6 +6,8 @@ import 'dart:io';
 
 import '../bridge/ProxyCoreRuntimeBridge.dart';
 import '../proxy/generated/CoreProxyClients.g.dart';
+import '../proxy/generated/CoreProxyModels.g.dart'
+    show ChatTurnOptions, PromptFunctionType;
 
 /// Serves this device's PengSong runtime over MCP.
 ///
@@ -338,6 +340,25 @@ class PengSongMcpServer {
         'required': ['packageName', 'methodName'],
       },
     },
+    {
+      'name': 'send_message',
+      'description':
+          'Send one user message into a chat as if the user typed it. The '
+          'on-device assistant then runs a normal turn, including its tool '
+          'calls — this is the only way to exercise the real tool pipeline from '
+          'outside the app.',
+      'inputSchema': {
+        'type': 'object',
+        'properties': {
+          'text': {'type': 'string', 'description': 'Message text to send.'},
+          'chatId': {
+            'type': 'string',
+            'description': 'Target chat id; omit to use the active chat.',
+          },
+        },
+        'required': ['text'],
+      },
+    },
   ];
 
   Future<String> _invoke(String name, Map<String, Object?> arguments) async {
@@ -399,6 +420,36 @@ class PengSongMcpServer {
           'packageName': packageName,
           'methodName': methodName,
           'result': result,
+        });
+      case 'send_message':
+        final text = (arguments['text'] as String? ?? '').trim();
+        if (text.isEmpty) {
+          throw StateError('send_message requires text');
+        }
+        final rawChatId = (arguments['chatId'] as String? ?? '').trim();
+        await _clients.chatRuntimeHolderMain.sendUserMessage(
+          promptFunctionType: PromptFunctionType.chat,
+          participantId: null,
+          chatIdOverride: rawChatId.isEmpty ? null : rawChatId,
+          messageText: text,
+          proxySenderNameOverride: null,
+          chatProviderIdOverride: null,
+          chatModelIdOverride: null,
+          attachments: const [],
+          replyToMessage: null,
+          turnOptions: const ChatTurnOptions(
+            persistTurn: true,
+            notifyReply: null,
+            hideUserMessage: false,
+            disableWarning: false,
+            continuation: null,
+            chatInputSubmitRequestedHandled: true,
+          ),
+        );
+        return jsonEncode({
+          'chatId': rawChatId.isEmpty ? 'active' : rawChatId,
+          'sent': true,
+          'chars': text.length,
         });
       case 'package_log':
         return await _clients.application.packageLogText();
