@@ -433,10 +433,10 @@ fn append_line(file_system_host: &Arc<dyn FileSystemHost>, path: &str, line: &st
 }
 
 /// Size at which the live log is rolled over.
-const LOG_ROTATE_BYTES: i64 = 50 * 1024 * 1024;
+const LOG_ROTATE_BYTES: i64 = 20 * 1024 * 1024;
 
 /// Number of rotated generations kept beside the live log.
-const LOG_ROTATE_KEEP: usize = 3;
+const LOG_ROTATE_KEEP: usize = 2;
 
 /// Rolls one log file over once it outgrows the size cap.
 ///
