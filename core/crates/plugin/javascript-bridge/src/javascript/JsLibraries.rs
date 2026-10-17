@@ -574,16 +574,16 @@ fn assembleRuntimeBootstrapScript() -> String {
                     : null;
             }}
             function finalizeCall() {{
-                if (globalThis.__operitCurrentCallId === callId) {{
-                    globalThis.__operitCurrentCallId =
-                        typeof previousCallId === 'string' ? previousCallId : '';
-                }}
-                if (globalThis.__operit_call_runtime_ref === callRuntime) {{
-                    if (previousCallRuntime && typeof previousCallRuntime === 'object') {{
-                        globalThis.__operit_call_runtime_ref = previousCallRuntime;
-                    }} else {{
-                        delete globalThis.__operit_call_runtime_ref;
-                    }}
+                // A nested runtime rebinds the ambient identity to its own call while it
+                // runs. Returning must not depend on the identity still pointing at this
+                // call, otherwise the borrowed id leaks into every later continuation of
+                // the caller and its API calls fail with "execution state is unavailable".
+                globalThis.__operitCurrentCallId =
+                    typeof previousCallId === 'string' ? previousCallId : '';
+                if (previousCallRuntime && typeof previousCallRuntime === 'object') {{
+                    globalThis.__operit_call_runtime_ref = previousCallRuntime;
+                }} else {{
+                    delete globalThis.__operit_call_runtime_ref;
                 }}
                 if (callState.pendingReferences > 0) {{
                     callState.detached = true;
