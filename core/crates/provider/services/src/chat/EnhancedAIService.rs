@@ -1169,12 +1169,21 @@ impl EnhancedAIService {
                     modelId: modelId.clone(),
                 }
             }
-            (None, None) => support
-                .modelBindingForFunction(
-                    support.dataDir().map_err(AiServiceError::RequestFailed)?,
-                    options.functionType.clone(),
-                )
-                .map_err(AiServiceError::RequestFailed)?,
+            (None, None) => {
+                // The chat function must resolve through the window's own model
+                // selection: every open window may run a different model, and the
+                // global CHAT binding is only the fallback when a window has none.
+                let dataDir = support.dataDir().map_err(AiServiceError::RequestFailed)?;
+                if matches!(options.functionType, FunctionType::CHAT) {
+                    support
+                        .chatModelBindingForChat(dataDir, options.chatId.as_deref())
+                        .map_err(AiServiceError::RequestFailed)?
+                } else {
+                    support
+                        .modelBindingForFunction(dataDir, options.functionType.clone())
+                        .map_err(AiServiceError::RequestFailed)?
+                }
+            }
             _ => {
                 return Err(AiServiceError::RequestFailed(
                     "Chat provider and model override must be set together".to_string(),

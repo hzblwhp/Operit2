@@ -52,8 +52,9 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
   }
 
   /// Loads model, context, and thinking settings for the popup.
-  Future<_AgentModelSelectorData> _loadSettings() {
-    return _loadAgentModelSelectorData(_clients);
+  Future<_AgentModelSelectorData> _loadSettings() async {
+    final chatId = await widget.viewModel.watchCurrentChatId().first;
+    return _loadAgentModelSelectorData(_clients, chatId: chatId);
   }
 
   /// Applies a provider model as the chat model.
@@ -69,11 +70,23 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
       );
       return;
     }
-    await _clients.preferencesFunctionalConfigManager.setModelForFunction(
-      functionType: core_proxy.FunctionType.chat,
-      providerId: provider.id,
-      modelId: model.id,
-    );
+    // A model chosen here belongs to this window. Several windows stay open at
+    // once, so writing the global CHAT binding would silently retarget the
+    // others; only a composer with no chat yet falls back to the global default.
+    final chatId = await widget.viewModel.watchCurrentChatId().first;
+    if (chatId != null && chatId.isNotEmpty) {
+      await widget.viewModel.chatCore.setChatModelBinding(
+        chatId: chatId,
+        providerId: provider.id,
+        modelId: model.id,
+      );
+    } else {
+      await _clients.preferencesFunctionalConfigManager.setModelForFunction(
+        functionType: core_proxy.FunctionType.chat,
+        providerId: provider.id,
+        modelId: model.id,
+      );
+    }
     widget.onModelChanged(
       model.id,
       providerTypeId: provider.providerTypeId,
@@ -276,8 +289,9 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
   }
 
   /// Loads model selector state for the embedded input menu section.
-  Future<_AgentModelSelectorData> _loadSettings() {
-    return _loadAgentModelSelectorData(_clients);
+  Future<_AgentModelSelectorData> _loadSettings() async {
+    final chatId = await widget.viewModel.watchCurrentChatId().first;
+    return _loadAgentModelSelectorData(_clients, chatId: chatId);
   }
 
   /// Selects one configured model for chat from the embedded menu.
@@ -293,11 +307,21 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
       );
       return;
     }
-    await _clients.preferencesFunctionalConfigManager.setModelForFunction(
-      functionType: core_proxy.FunctionType.chat,
-      providerId: provider.id,
-      modelId: model.id,
-    );
+    // Same per-window rule as the composer path: never retarget other windows.
+    final chatId = await widget.viewModel.watchCurrentChatId().first;
+    if (chatId != null && chatId.isNotEmpty) {
+      await widget.viewModel.chatCore.setChatModelBinding(
+        chatId: chatId,
+        providerId: provider.id,
+        modelId: model.id,
+      );
+    } else {
+      await _clients.preferencesFunctionalConfigManager.setModelForFunction(
+        functionType: core_proxy.FunctionType.chat,
+        providerId: provider.id,
+        modelId: model.id,
+      );
+    }
     widget.onDismiss();
   }
 
@@ -1870,10 +1894,11 @@ class _InfoIconButton extends StatelessWidget {
 }
 
 Future<_AgentModelSelectorData> _loadAgentModelSelectorData(
-  GeneratedCoreProxyClients clients,
-) async {
+  GeneratedCoreProxyClients clients, {
+  String? chatId,
+}) async {
   final binding = await clients.preferencesFunctionalConfigManager
-      .getModelBindingForFunction(functionType: core_proxy.FunctionType.chat);
+      .chatModelBindingFor(chatId: chatId);
   final config = await clients.preferencesModelConfigManager
       .getResolvedModelConfig(
         providerId: binding.providerId,
