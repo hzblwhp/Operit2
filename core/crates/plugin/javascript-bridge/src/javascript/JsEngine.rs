@@ -1837,6 +1837,23 @@ impl JsEngineState {
     /// Settles one asynchronous result through the owning host Promise registry.
     #[allow(non_snake_case)]
     fn deliverAsyncCallback(&mut self, callback: JsAsyncCallback) -> Result<(), String> {
+        // Callbacks arrive on the engine thread carrying no ambient call context.
+        // The continuation they resume still belongs to its call and may issue
+        // further tool calls (storage_request and friends), which resolve their
+        // owning context out of CURRENT_ACTIVE_CALL_CONTEXTS. Without re-seeding
+        // those entries the resumed script fails with
+        // "Tool call requires an active owning call".
+        let inflight: Vec<(String, JsCallContext)> = self
+            .pendingScriptExecutions
+            .iter()
+            .map(|(callId, pending)| (callId.clone(), pending.context.clone()))
+            .collect();
+        for (callId, context) in inflight {
+            CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
+                contexts.borrow_mut().insert(callId, context.clone());
+            });
+            installThreadLocalCallContext(&context);
+        }
         match callback {
             JsAsyncCallback::Promise { requestId, result, reject } => {
                 self.runtime.settleHostJavaScriptPromise(requestId, &result, reject)
