@@ -282,6 +282,88 @@ impl FunctionalConfigManager {
         })
     }
 
+    /// Returns the preference key that stores per-window model binding overrides.
+    pub fn CHAT_MODEL_BINDING_OVERRIDE() -> operit_store::PreferencesDataStore::PreferencesKey {
+        stringPreferencesKey("chat_model_binding_override")
+    }
+
+    /// Reads every explicit per-window model binding override.
+    fn readChatModelBindingOverrides(
+        &self,
+    ) -> Result<HashMap<String, FunctionModelBinding>, FunctionalConfigError> {
+        let preferences = self
+            .functionalConfigDataStore
+            .dataFlow()
+            .first()
+            .map_err(|error| FunctionalConfigError::ModelConfigManager(error.to_string()))?;
+        let Some(raw) = preferences.get(&Self::CHAT_MODEL_BINDING_OVERRIDE()) else {
+            return Ok(HashMap::new());
+        };
+        serde_json::from_value(raw.clone())
+            .map_err(|error| FunctionalConfigError::ModelConfigManager(error.to_string()))
+    }
+
+    /// Resolves one window's effective model binding, preferring its own override.
+    ///
+    /// Several windows stay open at once and each may run a different model, so a
+    /// per-window choice must never mutate the global CHAT binding.
+    pub fn chatModelBindingFor(
+        &self,
+        chatId: Option<&str>,
+    ) -> Result<FunctionModelBinding, FunctionalConfigError> {
+        let global = self.getModelBindingForFunction(FunctionType::CHAT)?;
+        let Some(chatId) = chatId.map(str::trim).filter(|id| !id.is_empty()) else {
+            return Ok(global);
+        };
+        Ok(self
+            .readChatModelBindingOverrides()?
+            .remove(chatId)
+            .unwrap_or(global))
+    }
+
+    /// Stores or clears one window's explicit model binding override.
+    pub fn saveChatModelBindingFor(
+        &self,
+        chatId: &str,
+        binding: Option<FunctionModelBinding>,
+    ) -> Result<(), FunctionalConfigError> {
+        let chatId = chatId.trim();
+        if chatId.is_empty() {
+            return Err(FunctionalConfigError::ModelConfigManager(
+                "chat model binding requires a window identity".to_string(),
+            ));
+        }
+        if let Some(value) = &binding {
+            self.modelConfigManager
+                .getModelProfile(&value.providerId, &value.modelId)
+                .map_err(|error| FunctionalConfigError::ModelConfigManager(error.to_string()))?;
+        }
+        let mut overrides = self.readChatModelBindingOverrides()?;
+        match binding {
+            Some(value) => {
+                overrides.insert(
+                    chatId.to_string(),
+                    FunctionModelBinding {
+                        providerId: value.providerId,
+                        modelId: value.modelId,
+                        followsChat: false,
+                    },
+                );
+            }
+            None => {
+                overrides.remove(chatId);
+            }
+        }
+        self.functionalConfigDataStore
+            .try_edit_result(|preferences| {
+                let encoded = serde_json::to_value(&overrides)?;
+                preferences.set(&Self::CHAT_MODEL_BINDING_OVERRIDE(), encoded);
+                Ok::<(), operit_store::PreferencesDataStore::PreferencesDataStoreError>(())
+            })
+            .map_err(|error| FunctionalConfigError::ModelConfigManager(error.to_string()))?;
+        Ok(())
+    }
+
     /// Assigns one runtime function to the specified provider and model.
     pub fn setModelForFunction(
         &self,

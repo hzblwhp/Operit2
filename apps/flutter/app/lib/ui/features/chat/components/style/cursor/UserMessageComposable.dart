@@ -59,12 +59,7 @@ class _UserMessageComposableState extends State<UserMessageComposable> {
             themePreferenceSnapshot.bubbleUserContentPaddingRight,
             16,
           )
-        : const EdgeInsets.fromLTRB(
-            chatAreaHorizontalPadding,
-            16,
-            chatAreaHorizontalPadding,
-            16,
-          );
+        : const EdgeInsets.fromLTRB(0, 16, 0, 16);
     final bubbleBorderRadius = BorderRadius.circular(
       themePreferenceSnapshot.bubbleUserRoundedCornersEnabled ? 12 : 4,
     );

@@ -137,6 +137,15 @@ impl ProviderRuntimeSupport for TestRuntimeSupport {
         Err("test runtime does not expose model bindings".to_string())
     }
 
+    /// Returns no per-window binding in the isolated test runtime.
+    fn chatModelBindingForChat(
+        &self,
+        _rootDir: PathBuf,
+        _chatId: Option<&str>,
+    ) -> Result<ProviderFunctionModelBinding, String> {
+        Err("test runtime does not expose model bindings".to_string())
+    }
+
     /// Returns no model configuration in the isolated test runtime.
     fn resolvedModelConfig(
         &self,

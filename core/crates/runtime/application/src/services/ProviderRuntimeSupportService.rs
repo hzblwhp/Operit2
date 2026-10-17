@@ -542,6 +542,24 @@ impl ProviderRuntimeSupport for RuntimeProviderSupport {
         })
     }
 
+    /// Returns the chat model binding for one window, preferring its own selection.
+    ///
+    /// Each open window may run a different model, so the chat function resolves
+    /// through the per-window override before falling back to the global choice.
+    fn chatModelBindingForChat(
+        &self,
+        rootDir: PathBuf,
+        chatId: Option<&str>,
+    ) -> Result<ProviderFunctionModelBinding, String> {
+        let binding = FunctionalConfigManager::new(rootDir)
+            .chatModelBindingFor(chatId)
+            .map_err(|error| error.to_string())?;
+        Ok(ProviderFunctionModelBinding {
+            providerId: binding.providerId,
+            modelId: binding.modelId,
+        })
+    }
+
     /// Returns the resolved model config for a provider/model pair.
     fn resolvedModelConfig(
         &self,

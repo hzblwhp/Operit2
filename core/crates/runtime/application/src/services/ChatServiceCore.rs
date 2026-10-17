@@ -2,6 +2,7 @@ use operit_tools::tools::packTool::RuntimePackageManager::RuntimePackageManager;
 use crate::core::chat::AIMessageManager::AIMessageManager;
 use crate::data::preferences::ApiPreferences::ApiPreferences;
 use crate::data::preferences::FunctionalConfigManager::FunctionalConfigManager;
+use crate::data::preferences::FunctionalConfigManager::FunctionModelBinding;
 use crate::data::preferences::ModelConfigManager::ModelConfigManager;
 use crate::plugins::toolpkg::ToolPkgChatInputHookBridge::{
     ChatInputHookContext, ChatInputHookResult, ToolPkgChatInputHookBridge,
@@ -1080,7 +1081,7 @@ impl ChatServiceCore {
             messageExtension: None,
             participantId: None,
             promptFunctionType: PromptFunctionType::CHAT,
-            defaultModelBinding: support.modelBindingForFunction(support.dataDir()?,FunctionType::CHAT)?,
+            defaultModelBinding: support.chatModelBindingForChat(support.dataDir()?, Some(chatId.as_str()))?,
             defaultTtsConfigId: support.defaultTtsConfigId()?,
         }).await?;
         self.chatHistoryDelegate
@@ -1119,13 +1120,13 @@ impl ChatServiceCore {
         let support = service.provider_runtime_context.support();
         api.resolve(ChatConfigurationRequest {
             purpose: ChatConfigurationPurpose::Execution,
-            chatId: Some(chatId),
+            chatId: Some(chatId.clone()),
             chatExtension: None,
             messageExtension: Some(snapshot),
             participantId: None,
             promptFunctionType: PromptFunctionType::CHAT,
             defaultModelBinding: support
-                .modelBindingForFunction(support.dataDir()?, FunctionType::CHAT)?,
+                .chatModelBindingForChat(support.dataDir()?, Some(chatId.as_str()))?,
             defaultTtsConfigId: support.defaultTtsConfigId()?,
         })
         .await
@@ -2760,7 +2761,7 @@ impl ChatServiceCore {
         chatId: Option<String>,
     ) -> Result<ChatInputMenuSummary, String> {
         let binding = FunctionalConfigManager::default()
-            .getModelBindingForFunction(FunctionType::CHAT)
+            .chatModelBindingFor(chatId.as_deref())
             .map_err(|e| e.to_string())?;
         let config = ModelConfigManager::default()
             .getResolvedModelConfig(&binding.providerId, &binding.modelId)
@@ -2779,6 +2780,30 @@ impl ChatServiceCore {
             outputTokenCount: chat.as_ref().map(|c| c.outputTokens).unwrap_or(0),
             maxContextLength: f64::from(config.context.maxContextLength),
         })
+    }
+
+    /// Selects or clears one window's own chat model without touching the global binding.
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn setChatModelBinding(
+        &self,
+        chatId: String,
+        providerId: Option<String>,
+        modelId: Option<String>,
+    ) -> Result<(), String> {
+        let selection = match (providerId, modelId) {
+            (Some(providerId), Some(modelId)) => {
+                Some(FunctionModelBinding::new(providerId, modelId))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(
+                    "A window model selection needs both a provider and a model".to_string(),
+                )
+            }
+        };
+        FunctionalConfigManager::default()
+            .saveChatModelBindingFor(&chatId, selection)
+            .map_err(|error| error.to_string())
     }
 
     /// Responds to a tool permission request through the owning chat route.

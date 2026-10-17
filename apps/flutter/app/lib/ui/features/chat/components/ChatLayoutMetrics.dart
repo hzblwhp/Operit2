@@ -7,7 +7,7 @@ const double chatWideContentMaxWidth = themeChatWideContentMaxWidth;
 
 /// Horizontal gap between transcript content and the screen edge.
 ///
-/// The transcript is meant to use the full width of the device: on a phone the
-/// former 16dp gutter on each side visibly wasted screen estate, so the gutter
-/// is dropped and the content runs edge to edge. Vertical rhythm is untouched.
-const double chatAreaHorizontalPadding = 0;
+/// Edge-to-edge with zero gutter felt cramped, so the transcript keeps a small
+/// inset of roughly 1 mm on each side: that reads as "uses the full screen"
+/// without the glyphs touching the bezel. Vertical rhythm is untouched.
+const double chatAreaHorizontalPadding = 5;
