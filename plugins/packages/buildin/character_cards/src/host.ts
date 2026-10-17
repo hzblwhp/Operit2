@@ -23,8 +23,9 @@ export function register(definition: Definition, screen: (ctx: ComposeDslContext
   ToolPkg.registerUiRoute({ id: "group-execution", route: `toolpkg:${definition.id}:ui:group-execution`, screen: groupExecutionScreen, runtime: "compose_dsl", keepAlive: false, title: { zh: "群组执行", en: "Group execution" } });
   ToolPkg.registerUiRoute({ id: "memory", route: memoryRoute, screen: memoryScreen, runtime: "compose_dsl", keepAlive: true, title: { zh: "记忆", en: "Memory" } });
   ToolPkg.registerNavigationEntry({ id: "sidebar-characters", route: sidebarRoute, surface: "chat_sidebar_tabs", title: { zh: "角色卡", en: "Characters" }, icon: "Badge", order: definition.order, params: { view: "characters" } });
-  ToolPkg.registerNavigationEntry({ id: "sidebar", route, surface: "main_sidebar_plugins", title: { zh: definition.title, en: "Characters" }, icon: definition.icon, order: definition.order });
-  ToolPkg.registerNavigationEntry({ id: "memory-settings", route: memoryRoute, surface: "main_sidebar_plugins", title: { zh: "记忆", en: "Memory" }, icon: "Memory", order: definition.order + 1 });
+  // 侧栏（main_sidebar_plugins）不再挂"角色卡 / 记忆"两个入口：
+  // 它们属于插件自身的设置面，挂在全局侧栏会挤占导航，且与底部的
+  // "角色卡""记忆"主入口重复。需要时从工具箱（toolbox）进入。
   ToolPkg.registerNavigationEntry({ id: "toolbox", route, surface: "toolbox", title: { zh: definition.title, en: "Characters" }, icon: definition.icon, order: definition.order });
   ToolPkg.registerNavigationEntry({ id: "memory-attachment", route: attachmentRoute, surface: "chat_attachments", title: { zh: "记忆附件", en: "Memory attachment" }, icon: "Memory", order: definition.order, params: { mode: "memory-attachment", ownerKey: null, folderPath: null } });
   const memoryMenuRoute = `toolpkg:${definition.id}:ui:chat-input-memory`;

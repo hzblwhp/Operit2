@@ -7866,8 +7866,6 @@ function register(definition2, screen2, attachmentScreen2, sidebarScreen2, selec
   ToolPkg.registerUiRoute({ id: "group-execution", route: `toolpkg:${definition2.id}:ui:group-execution`, screen: groupExecutionScreen2, runtime: "compose_dsl", keepAlive: false, title: { zh: "\u7FA4\u7EC4\u6267\u884C", en: "Group execution" } });
   ToolPkg.registerUiRoute({ id: "memory", route: memoryRoute, screen: memoryScreen2, runtime: "compose_dsl", keepAlive: true, title: { zh: "\u8BB0\u5FC6", en: "Memory" } });
   ToolPkg.registerNavigationEntry({ id: "sidebar-characters", route: sidebarRoute, surface: "chat_sidebar_tabs", title: { zh: "\u89D2\u8272\u5361", en: "Characters" }, icon: "Badge", order: definition2.order, params: { view: "characters" } });
-  ToolPkg.registerNavigationEntry({ id: "sidebar", route, surface: "main_sidebar_plugins", title: { zh: definition2.title, en: "Characters" }, icon: definition2.icon, order: definition2.order });
-  ToolPkg.registerNavigationEntry({ id: "memory-settings", route: memoryRoute, surface: "main_sidebar_plugins", title: { zh: "\u8BB0\u5FC6", en: "Memory" }, icon: "Memory", order: definition2.order + 1 });
   ToolPkg.registerNavigationEntry({ id: "toolbox", route, surface: "toolbox", title: { zh: definition2.title, en: "Characters" }, icon: definition2.icon, order: definition2.order });
   ToolPkg.registerNavigationEntry({ id: "memory-attachment", route: attachmentRoute, surface: "chat_attachments", title: { zh: "\u8BB0\u5FC6\u9644\u4EF6", en: "Memory attachment" }, icon: "Memory", order: definition2.order, params: { mode: "memory-attachment", ownerKey: null, folderPath: null } });
   const memoryMenuRoute = `toolpkg:${definition2.id}:ui:chat-input-memory`;
