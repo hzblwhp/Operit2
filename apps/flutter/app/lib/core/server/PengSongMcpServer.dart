@@ -313,6 +313,31 @@ class PengSongMcpServer {
         'required': ['path'],
       },
     },
+    {
+      'name': 'invoke_pkg_api',
+      'description':
+          'Invoke one API a ToolPkg registered through registerApi, bypassing '
+          'the tool-call pipeline. Useful to tell a broken tool pipeline apart '
+          'from a broken package.',
+      'inputSchema': {
+        'type': 'object',
+        'properties': {
+          'packageName': {
+            'type': 'string',
+            'description': 'Container package name, e.g. character_memory.',
+          },
+          'methodName': {
+            'type': 'string',
+            'description': 'Registered method name, e.g. memory.list.',
+          },
+          'payload': {
+            'type': 'object',
+            'description': 'Payload passed to the API.',
+          },
+        },
+        'required': ['packageName', 'methodName'],
+      },
+    },
   ];
 
   Future<String> _invoke(String name, Map<String, Object?> arguments) async {
@@ -356,6 +381,25 @@ class PengSongMcpServer {
         );
       case 'delete_path':
         return await _deletePath((arguments['path'] as String? ?? '').trim());
+      case 'invoke_pkg_api':
+        final packageName =
+            (arguments['packageName'] as String? ?? '').trim();
+        final methodName = (arguments['methodName'] as String? ?? '').trim();
+        if (packageName.isEmpty || methodName.isEmpty) {
+          throw StateError('invoke_pkg_api requires packageName and methodName');
+        }
+        final payload = arguments['payload'] ?? const <String, Object?>{};
+        final manager = _clients.application.packageManager();
+        final result = await manager.invokeToolPkgPublicApi(
+          packageName: packageName,
+          methodName: methodName,
+          payload: payload,
+        );
+        return jsonEncode({
+          'packageName': packageName,
+          'methodName': methodName,
+          'result': result,
+        });
       case 'package_log':
         return await _clients.application.packageLogText();
       case 'package_status':
