@@ -2323,6 +2323,26 @@ fn dispatchStructuredToolCall(
     };
     let context = CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| contexts.borrow().get(callId).cloned());
     let Some(context) = context else {
+        // Record the actual registry contents: a miss here means the issuing call's
+        // context was evicted, and knowing which ids survived identifies the evictor.
+        let known = CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
+            contexts
+                .borrow()
+                .keys()
+                .cloned()
+                .collect::<Vec<String>>()
+        });
+        AppLogger::e(
+            "ToolPkg",
+            &format!(
+                "owning-call-miss callId={} knownCount={} known={:?} tool={}:{}",
+                callId,
+                known.len(),
+                known,
+                toolType,
+                toolName
+            ),
+        );
         fail("Tool call requires an active owning call".to_string());
         return;
     };
