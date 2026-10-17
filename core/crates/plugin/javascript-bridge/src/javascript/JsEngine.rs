@@ -2695,12 +2695,20 @@ fn releaseCallContext(callId: &str, reason: &str) {
         "ToolPkg",
         &format!("releaseCallContext callId={} reason={}", callId, reason),
     );
-    { let mut contexts = activeCallContexts();
-        let mut map = contexts;
-        map.retain(|id, context| !(context.retired && id != callId));
-        if let Some(context) = map.get_mut(callId) {
-            context.retired = true;
-        }
+    // Mark only — never evict here.
+    //
+    // Evicting retired entries on the *next* release looked like a cheap sweep, but
+    // it deleted entries other callers still needed: a chat-input hook finishes,
+    // its context is retired, then any unrelated call completing wipes it, and the
+    // tool the hook dispatched asynchronously can no longer resolve its owner —
+    // which surfaced as "Chat input submit_requested hook failed: Tool call
+    // requires an active owning call" and blocked sending messages entirely.
+    //
+    // Bounding the map is ACTIVE_CALL_CONTEXT_LIMIT's job; that cap is far above any
+    // plausible concurrent call count, so it only ever drops genuinely dead entries.
+    let mut contexts = activeCallContexts();
+    if let Some(context) = contexts.get_mut(callId) {
+        context.retired = true;
     }
 }
 
