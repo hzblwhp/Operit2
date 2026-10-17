@@ -26,6 +26,5 @@
         "en": "Read and complete the current chat plan in plugin storage."
       }
     }
-  ],
-  "installation_scope": "space"
+  ]
 }

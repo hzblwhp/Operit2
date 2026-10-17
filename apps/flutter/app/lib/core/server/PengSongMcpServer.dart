@@ -270,6 +270,22 @@ class PengSongMcpServer {
         'required': ['name'],
       },
     },
+    {
+      'name': 'set_package_scope',
+      'description':
+          'Move one package installation to the scope its manifest requires.',
+      'inputSchema': {
+        'type': 'object',
+        'properties': {
+          'name': {'type': 'string', 'description': 'Package name to move.'},
+          'scope': {
+            'type': 'string',
+            'description': 'Target scope: device or space.',
+          },
+        },
+        'required': ['name', 'scope'],
+      },
+    },
   ];
 
   Future<String> _invoke(String name, Map<String, Object?> arguments) async {
@@ -333,6 +349,15 @@ class PengSongMcpServer {
         final message = await _clients.application.packageManager()
             .enablePackage(packageName: name);
         return jsonEncode({'package': name, 'result': message});
+      case 'set_package_scope':
+        final name = (arguments['name'] as String? ?? '').trim();
+        final scope = (arguments['scope'] as String? ?? '').trim();
+        if (name.isEmpty || scope.isEmpty) {
+          throw StateError('set_package_scope requires name and scope');
+        }
+        await _clients.application.packageManager()
+            .setPackageScope(packageName: name, scope: scope);
+        return jsonEncode({'package': name, 'scope': scope, 'moved': true});
       default:
         throw StateError('Unknown tool: $name');
     }
@@ -418,16 +443,41 @@ class PengSongMcpServer {
     });
   }
 
-  /// Candidate log locations, because the runtime root moved between releases.
+  /// Root that holds one identity directory per installation.
+  static const String _identitiesRoot =
+      '/data/data/app.operit/files/runtime/identities';
+
+  /// Fallback log locations for layouts that predate the identity directory.
   static const List<String> _logCandidates = [
     '/data/data/app.operit/files/runtime/logs/operit.log',
-    '/data/user/0/app.operit/files/runtime/logs/operit.log',
     '/data/data/app.operit/files/logs/operit.log',
-    '/data/data/app.operit/files/runtime/data/logs/operit.log',
   ];
 
   /// Returns the trailing slice of the first log file that exists.
+  ///
+  /// The runtime keeps its data under an identity directory whose name carries a
+  /// build-time token, so the directory is resolved instead of hardcoded.
   Future<String> _readLogTail(int limit) async {
+    final identities = Directory(_identitiesRoot);
+    if (await identities.exists()) {
+      await for (final entity in identities.list(followLinks: false)) {
+        if (entity is! Directory) {
+          continue;
+        }
+        final candidate = File('${entity.path}/logs/operit.log');
+        if (!await candidate.exists()) {
+          continue;
+        }
+        final text = await candidate.readAsString();
+        return jsonEncode({
+          'path': candidate.path,
+          'totalChars': text.length,
+          'tail': text.length > limit
+              ? text.substring(text.length - limit)
+              : text,
+        });
+      }
+    }
     for (final path in _logCandidates) {
       final file = File(path);
       if (!await file.exists()) {
@@ -443,7 +493,7 @@ class PengSongMcpServer {
       });
     }
     throw StateError(
-      'No application log found. Tried: ${_logCandidates.join(', ')}',
+      'No application log found under $_identitiesRoot or ${_logCandidates.join(', ')}',
     );
   }
 }
