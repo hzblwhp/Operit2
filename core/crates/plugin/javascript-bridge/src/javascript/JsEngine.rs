@@ -1313,7 +1313,11 @@ impl JsEngineState {
                 completion,
             })
         })();
-        clearThreadLocalCallState();
+        // Execution starts asynchronously and keeps running after this returns.
+        // Call contexts must survive that window: the script still needs its
+        // owning context to issue tool calls (storage_request and friends).
+        // They are released per call when each execution finishes.
+        clearThreadScopedStateKeepingCallContexts();
         started
     }
 
@@ -1669,7 +1673,10 @@ impl JsEngineState {
                 completeScriptExecution(&pending.completion, result);
             }
         }
-        clearThreadLocalCallState();
+        // Advancing one execution must not evict the contexts of executions that
+        // are still in flight: a caller awaiting a cross-runtime IPC would lose
+        // its owning context mid-flight. Each call releases its own on finish.
+        clearThreadScopedStateKeepingCallContexts();
         advanced
     }
 
@@ -2538,6 +2545,30 @@ fn buildToolPkgIpcRequest(
 fn releaseCallContext(callId: &str) {
     CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
         contexts.borrow_mut().remove(callId);
+    });
+}
+
+/// Clears thread-scoped execution state while keeping call contexts alive.
+///
+/// Used after *starting* an asynchronous execution: the script has not run yet,
+/// so dropping its context here would make every tool call it issues fail with
+/// "Tool call requires an active owning call". Contexts are released per call.
+#[allow(non_snake_case)]
+fn clearThreadScopedStateKeepingCallContexts() {
+    CURRENT_EXECUTION_HOST.with(|host| {
+        *host.borrow_mut() = None;
+    });
+    CURRENT_INTERMEDIATE_CALLBACK.with(|callback| {
+        *callback.borrow_mut() = None;
+    });
+    CURRENT_EXECUTION_LISTENER.with(|listener| {
+        *listener.borrow_mut() = None;
+    });
+    CURRENT_ENV_OVERRIDES.with(|overrides| {
+        overrides.borrow_mut().clear();
+    });
+    CURRENT_TEXT_RESOURCE_SOURCE.with(|source| {
+        *source.borrow_mut() = None;
     });
 }
 
