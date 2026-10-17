@@ -114,6 +114,12 @@ struct JsCallContext {
     envOverrides: Arc<Mutex<BTreeMap<String, String>>>,
     textResourceSource: JsTextResourceSource,
     ipcTiming: Option<JsIpcTiming>,
+    /// Set once the owning execution finished but the entry is still reachable.
+    ///
+    /// A cross-runtime IPC initiator reads the callee's result milliseconds after
+    /// the callee completes, so the context cannot be dropped at completion.
+    /// Retired entries are swept by the next release instead.
+    retired: bool,
 }
 
 /// Correlates short engine steps and asynchronous tool work with their originating IPC.
@@ -1255,6 +1261,7 @@ impl JsEngineState {
             envOverrides: Arc::new(Mutex::new(envOverrides)),
             textResourceSource,
             ipcTiming,
+            retired: false,
         };
         installThreadLocalCallContext(&context);
         CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
@@ -1400,6 +1407,7 @@ impl JsEngineState {
                     envOverrides: Arc::new(Mutex::new(envOverrides.clone())),
                     textResourceSource,
                     ipcTiming: None,
+                    retired: false,
                 },
             );
         });
@@ -1437,7 +1445,7 @@ impl JsEngineState {
         // Only this call's context may be dropped here: an enclosing caller may
         // still be awaiting this nested execution and needs its own entry.
         // Host/listener/callback slots stay untouched for the same reason.
-        releaseCallContext(&callId);
+        releaseCallContext(&callId, "execute-script-finish");
         if let Some(message) = extractJsExecutionErrorMessage(output.as_deref()) {
             Err(JsExecutionError::runtime(message))
         } else {
@@ -1511,6 +1519,7 @@ impl JsEngineState {
                         envOverrides: Arc::new(Mutex::new(BTreeMap::new())),
                         textResourceSource,
                         ipcTiming: None,
+                        retired: false,
                     },
                 );
             });
@@ -2572,16 +2581,31 @@ fn buildToolPkgIpcRequest(
     })
 }
 
-/// Releases exactly one call context, leaving every enclosing call intact.
+/// Retires one call context instead of dropping it immediately.
 ///
-/// A nested execution (`__operit_toolpkg_runtime_dispatch__` during a
-/// cross-runtime IPC) finishes while its caller is still running. Wiping the
-/// whole map at that moment strands the caller: its next tool call cannot find
-/// an owning context and fails with "Tool call requires an active owning call".
+/// The completion of a nested execution (`__operit_toolpkg_runtime_dispatch__`
+/// during a cross-runtime IPC) is not the end of its usefulness: its initiator
+/// reads the result a few milliseconds later and resolves its owning context out
+/// of this very map. Removing the entry at completion strands that read with
+/// "Tool call requires an active owning call".
+///
+/// So a finished call is only marked retired, and the next release sweeps every
+/// retired entry. That keeps the map bounded while guaranteeing the result stays
+/// reachable for the read that follows completion.
+///
+/// `reason` identifies the caller so a premature release stays attributable.
 #[allow(non_snake_case)]
-fn releaseCallContext(callId: &str) {
+fn releaseCallContext(callId: &str, reason: &str) {
+    AppLogger::w(
+        "ToolPkg",
+        &format!("releaseCallContext callId={} reason={}", callId, reason),
+    );
     CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-        contexts.borrow_mut().remove(callId);
+        let mut map = contexts.borrow_mut();
+        map.retain(|id, context| !(context.retired && id != callId));
+        if let Some(context) = map.get_mut(callId) {
+            context.retired = true;
+        }
     });
 }
 
