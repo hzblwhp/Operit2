@@ -13,6 +13,7 @@ import 'core/errors/UnhandledErrorReporter.dart';
 import 'core/logging/ClientLogger.dart';
 import 'core/notifications/NotificationActivationService.dart';
 import 'core/runtime/RuntimeBootstrapManager.dart';
+import 'core/server/PengSongMcpServer.dart';
 import 'ui/features/packages/screens/GitHubOAuthLoginCallback.dart';
 import 'ui/main/OperitApp.dart';
 import 'ui/window/DetachedChatWindowApp.dart';
@@ -96,6 +97,22 @@ void main(List<String> arguments) async {
           'runtime bootstrap initialized elapsedMs=${runtimeStopwatch.elapsedMilliseconds}',
           tag: _appStartupLogTag,
         );
+        // Expose the on-device runtime over MCP so an external operator can read
+        // the conversations and statistics this phone already owns. A failure
+        // here must never block startup: the assistant works without it.
+        try {
+          await PengSongMcpServer().start();
+          ClientLogger.i(
+            'local MCP server listening on port ${PengSongMcpServer.defaultPort}',
+            tag: _appStartupLogTag,
+          );
+        } catch (error) {
+          ClientLogger.e(
+            'local MCP server unavailable: $error',
+            tag: _appStartupLogTag,
+            error: error,
+          );
+        }
       }
       final glassStopwatch = Stopwatch()..start();
       await LiquidGlassWidgets.initialize();
