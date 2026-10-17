@@ -428,7 +428,42 @@ fn write_entry(
 
 /// Appends one formatted log line through the configured file-system host.
 fn append_line(file_system_host: &Arc<dyn FileSystemHost>, path: &str, line: &str) {
+    rotate_log_file_if_needed(file_system_host, path);
     let _ = file_system_host.writeFile(path, line, true);
+}
+
+/// Size at which the live log is rolled over.
+const LOG_ROTATE_BYTES: i64 = 50 * 1024 * 1024;
+
+/// Number of rotated generations kept beside the live log.
+const LOG_ROTATE_KEEP: usize = 3;
+
+/// Rolls one log file over once it outgrows the size cap.
+///
+/// Without rotation the live log grows without bound — measured at 27 MB in
+/// seven hours, i.e. roughly 94 MB a day — which makes every grep and read scan
+/// the entire file and slows the writers down as well.
+fn rotate_log_file_if_needed(file_system_host: &Arc<dyn FileSystemHost>, path: &str) {
+    let Ok(metadata) = file_system_host.fileExists(path) else {
+        return;
+    };
+    if !metadata.exists || metadata.isDirectory || metadata.size < LOG_ROTATE_BYTES {
+        return;
+    }
+    let archived = |index: usize| format!("{path}.{index}");
+    // Oldest generation falls off the end, then each remaining one shifts down.
+    let _ = file_system_host.deleteFile(&archived(LOG_ROTATE_KEEP), false);
+    for index in (1..LOG_ROTATE_KEEP).rev() {
+        let from = archived(index);
+        let exists = file_system_host
+            .fileExists(&from)
+            .map(|entry| entry.exists)
+            .unwrap_or(false);
+        if exists {
+            let _ = file_system_host.moveFile(&from, &archived(index + 1));
+        }
+    }
+    let _ = file_system_host.moveFile(path, &archived(1));
 }
 
 /// Creates an empty log file through the host when the path is absent.
