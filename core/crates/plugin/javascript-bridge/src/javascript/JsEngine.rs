@@ -53,7 +53,6 @@ pub trait JsExecutionListener {
 type JsExecutionListenerRef = Arc<dyn JsExecutionListener + Send + Sync>;
 
 thread_local! {
-    static CURRENT_ACTIVE_CALL_CONTEXTS: RefCell<BTreeMap<String, JsCallContext>> = RefCell::new(BTreeMap::new());
     static CURRENT_EXECUTION_HOST: RefCell<Option<Arc<dyn JsExecutionHost>>> = RefCell::new(None);
     static CURRENT_REGISTRATION_CONFIG_PARAMS: RefCell<Option<BTreeMap<String, Value>>> = RefCell::new(None);
     static CURRENT_INTERMEDIATE_CALLBACK: RefCell<Option<Arc<dyn Fn(Value) + Send + Sync>>> = RefCell::new(None);
@@ -63,6 +62,40 @@ thread_local! {
     static CURRENT_ENV_OVERRIDES: RefCell<BTreeMap<String, String>> = RefCell::new(BTreeMap::new());
     static CURRENT_CALL_RESULTS: RefCell<BTreeMap<String, JsExecutionResult<Value>>> = RefCell::new(BTreeMap::new());
     static CURRENT_TEXT_RESOURCE_SOURCE: RefCell<Option<JsTextResourceSource>> = RefCell::new(None);
+}
+
+/// Build fingerprint stamped into hot-path logs.
+///
+/// Device-side debugging cannot read the APK or query `dumpsys`, so without this
+/// a reader cannot tell "the fix never shipped" from "the fix did not work".
+/// Bump it whenever a build worth identifying goes out.
+const BUILD_FINGERPRINT: &str = "20261018-a2a3";
+
+/// Process-wide registry of live call contexts.
+///
+/// This cannot be thread-local. A cross-runtime IPC inserts the callee context
+/// from the JS engine thread while the failing lookup happens on the tool
+/// execution thread, so with one map per thread each side sees its own empty
+/// copy and the lookup can never succeed.
+///
+/// The guard is only ever held across map operations: logging and thread-local
+/// installation happen after it drops, which is what avoids the deadlock an
+/// earlier attempt shipped by keeping the whole closure inside the lock.
+static ACTIVE_CALL_CONTEXTS: OnceLock<Mutex<BTreeMap<String, JsCallContext>>> = OnceLock::new();
+
+/// Borrows the shared call context registry.
+#[allow(non_snake_case)]
+fn activeCallContexts() -> std::sync::MutexGuard<'static, BTreeMap<String, JsCallContext>> {
+    ACTIVE_CALL_CONTEXTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Reports the registry's address so two logs can prove they share one map.
+#[allow(non_snake_case)]
+fn activeCallContextsPtr() -> usize {
+    ACTIVE_CALL_CONTEXTS.get_or_init(|| Mutex::new(BTreeMap::new())) as *const _ as usize
 }
 
 #[derive(Clone)]
@@ -1169,34 +1202,38 @@ impl JsEngineState {
         CURRENT_EXECUTION_HOST.with(|host| {
             *host.borrow_mut() = self.executionHost.clone();
         });
-        CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-            let mut map = contexts.borrow_mut();
-            let before = map.keys().cloned().collect::<Vec<String>>();
-            for (id, context) in self
-                .detachedCallContexts
-                .iter()
-                .map(|(id, context)| (id.clone(), context.clone()))
-                .chain(
-                    self.pendingScriptExecutions
-                        .iter()
-                        .map(|(id, pending)| (id.clone(), pending.context.clone())),
-                )
-            {
-                map.insert(id, context);
+        let entries: Vec<(String, JsCallContext)> = self
+            .detachedCallContexts
+            .iter()
+            .map(|(id, context)| (id.clone(), context.clone()))
+            .chain(
+                self.pendingScriptExecutions
+                    .iter()
+                    .map(|(id, pending)| (id.clone(), pending.context.clone())),
+            )
+            .collect();
+        let pending = self.pendingScriptExecutions.len();
+        // Guard scope stops at the end of this block; logging follows outside it.
+        let (before, after) = {
+            let mut contexts = activeCallContexts();
+            let before = contexts.keys().cloned().collect::<Vec<String>>();
+            for (id, context) in entries {
+                contexts.insert(id, context);
             }
-            // Distinguishes "evicted here" from "never inserted": if the callee
-            // was absent before and still absent after, the miss happened on the
-            // insertion side instead of in this rebuild.
-            AppLogger::i(
-                "ToolPkg",
-                &format!(
-                    "install-active before={:?} pending={} after={:?}",
-                    before,
-                    self.pendingScriptExecutions.len(),
-                    map.keys().cloned().collect::<Vec<String>>(),
-                ),
-            );
-        });
+            let after = contexts.keys().cloned().collect::<Vec<String>>();
+            (before, after)
+        };
+        AppLogger::i(
+            "ToolPkg",
+            &format!(
+                "install-active build={} ptr=0x{:x} before={:?} pending={} after={:?}",
+                BUILD_FINGERPRINT,
+                activeCallContextsPtr(),
+                before,
+                pending,
+                after,
+            ),
+        );
     }
 
     /// Starts or cancels a session only on its owning JS state executor.
@@ -1290,11 +1327,9 @@ impl JsEngineState {
             retired: false,
         };
         installThreadLocalCallContext(&context);
-        CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-            contexts
-                .borrow_mut()
-                .insert(callId.clone(), context.clone())
-        });
+        { let mut contexts = activeCallContexts();
+            contexts.insert(callId.clone(), context.clone());
+        }
         let started = (|| {
             self.initJavaScriptEnvironment()
                 .map_err(JsExecutionError::initialization)?;
@@ -1421,8 +1456,8 @@ impl JsEngineState {
             "operit_call_{}",
             Uuid::new_v4().to_string().replace('-', "")
         );
-        CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-            contexts.borrow_mut().insert(
+        { let mut contexts = activeCallContexts();
+            contexts.insert(
                 callId.clone(),
                 JsCallContext {
                     executionHost: self.executionHost.clone(),
@@ -1436,7 +1471,7 @@ impl JsEngineState {
                     retired: false,
                 },
             );
-        });
+        }
         clearNativeExecutionSession(&callId);
         let output = match self.invokeExecutionFunction(
             &callId,
@@ -1535,8 +1570,8 @@ impl JsEngineState {
                 .ok_or_else(|| {
                     JsExecutionError::invalid_request("Registration resource owner is unavailable")
                 })?;
-            CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-                contexts.borrow_mut().insert(
+            { let mut contexts = activeCallContexts();
+                contexts.insert(
                     callId.clone(),
                     JsCallContext {
                         executionHost: self.executionHost.clone(),
@@ -1548,7 +1583,7 @@ impl JsEngineState {
                         retired: false,
                     },
                 );
-            });
+            }
             clearNativeExecutionSession(&callId);
             if let Err(error) =
                 self.invokeExecutionFunction(&callId, registrationParams, script, functionName, 60)
@@ -1884,9 +1919,9 @@ impl JsEngineState {
             .map(|(callId, pending)| (callId.clone(), pending.context.clone()))
             .collect();
         for (callId, context) in inflight {
-            CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-                contexts.borrow_mut().insert(callId, context.clone());
-            });
+            { let mut contexts = activeCallContexts();
+                contexts.insert(callId, context.clone());
+            }
             installThreadLocalCallContext(&context);
         }
         match callback {
@@ -2356,17 +2391,15 @@ fn dispatchStructuredToolCall(
         fail("Tool owning call ID must be a string".to_string());
         return;
     };
-    let context = CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| contexts.borrow().get(callId).cloned());
+    let context = activeCallContexts().get(callId).cloned();
     let Some(context) = context else {
         // Record the actual registry contents: a miss here means the issuing call's
         // context was evicted, and knowing which ids survived identifies the evictor.
-        let known = CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-            contexts
-                .borrow()
-                .keys()
+        let known = { let mut contexts = activeCallContexts();
+            contexts.keys()
                 .cloned()
                 .collect::<Vec<String>>()
-        });
+        };
         AppLogger::e(
             "ToolPkg",
             &format!(
@@ -2626,13 +2659,13 @@ fn releaseCallContext(callId: &str, reason: &str) {
         "ToolPkg",
         &format!("releaseCallContext callId={} reason={}", callId, reason),
     );
-    CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-        let mut map = contexts.borrow_mut();
+    { let mut contexts = activeCallContexts();
+        let mut map = contexts;
         map.retain(|id, context| !(context.retired && id != callId));
         if let Some(context) = map.get_mut(callId) {
             context.retired = true;
         }
-    });
+    }
 }
 
 /// Clears thread-scoped execution state while keeping call contexts alive.
@@ -2661,7 +2694,7 @@ fn clearThreadScopedStateKeepingCallContexts() {
 
 #[allow(non_snake_case)]
 fn clearThreadLocalCallState() {
-    CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| contexts.borrow_mut().clear());
+    activeCallContexts().clear();
     CURRENT_EXECUTION_HOST.with(|host| {
         *host.borrow_mut() = None;
     });
@@ -2949,8 +2982,7 @@ mod PluginConfigTests;
 /// Delivers an external intermediate value only to the explicitly owning execution session.
 #[allow(non_snake_case)]
 fn deliverIntermediateResult(callId: String, result: String) -> HostResult<()> {
-    let context = CURRENT_ACTIVE_CALL_CONTEXTS
-        .with(|contexts| contexts.borrow().get(&callId).cloned())
+    let context = activeCallContexts().get(&callId).cloned()
         .ok_or_else(|| HostError::new("Intermediate result requires an active owning call"))?;
     if let Some(listener) = context.executionListener {
         listener.on_intermediate_result(&callId, &result);
@@ -2988,7 +3020,7 @@ fn textIntermediateCallback(callback: Option<Arc<dyn Fn(String) + Send + Sync>>)
 
 /// Delivers DSL values to their active or detached execution owner without JSON text.
 fn sendStructuredIntermediate(callId: &str, value: Value) {
-    let active = CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| contexts.borrow().get(callId).and_then(|context| context.intermediateCallback.clone()));
+    let active = activeCallContexts().get(callId).and_then(|context| context.intermediateCallback.clone());
     let detached = CURRENT_DETACHED_INTERMEDIATE_CALLBACKS.with(|callbacks| callbacks.borrow().get(callId).cloned());
     match (active, detached) {
         (Some(callback), _) => callback(value),
@@ -3003,8 +3035,7 @@ fn executeHostOperation(name: &str, arguments: Vec<Value>) -> HostResult<Value> 
         "__operitNativeSetCallStructuredResult" => {
             let [callId, value] = exactHostJavaScriptJsonArguments(name, arguments)?;
             let callId = hostJavaScriptStringArgument(callId)?;
-            if !CURRENT_ACTIVE_CALL_CONTEXTS
-                .with(|contexts| contexts.borrow().contains_key(&callId))
+            if !activeCallContexts().contains_key(&callId)
             {
                 return Err(HostError::new("Completion requires an active owning call"));
             }
@@ -3156,8 +3187,7 @@ fn executeHostOperation(name: &str, arguments: Vec<Value>) -> HostResult<Value> 
             let [callId, key] = exactHostJavaScriptJsonArguments(name, arguments)?;
             let callId = hostJavaScriptStringArgument(callId)?;
             let key = hostJavaScriptStringArgument(key)?;
-            let context = CURRENT_ACTIVE_CALL_CONTEXTS
-                .with(|contexts| contexts.borrow().get(&callId).cloned())
+            let context = activeCallContexts().get(&callId).cloned()
                 .ok_or_else(|| {
                     HostError::new("Environment request requires an active owning call")
                 })?;
@@ -3443,7 +3473,7 @@ fn normalizeToolPkgTextResourcePath(path: &str) -> String {
 /// Stores an externally serialized execution result for the owning call.
 #[allow(non_snake_case)]
 fn storeExecutionResult(callId: String, result: String) -> HostResult<()> {
-    if !CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| contexts.borrow().contains_key(&callId)) {
+    if !activeCallContexts().contains_key(&callId) {
         return Err(HostError::new("Completion requires an active owning call"));
     }
     CURRENT_CALL_RESULTS.with(|results| {
@@ -3455,8 +3485,7 @@ fn storeExecutionResult(callId: String, result: String) -> HostResult<()> {
 /// Reports and stores an execution error through the external listener contract.
 #[allow(non_snake_case)]
 fn storeExecutionError(callId: String, error: String) -> HostResult<()> {
-    let context = CURRENT_ACTIVE_CALL_CONTEXTS
-        .with(|contexts| contexts.borrow().get(&callId).cloned())
+    let context = activeCallContexts().get(&callId).cloned()
         .ok_or_else(|| HostError::new("Execution error requires an active owning call"))?;
     if let Some(listener) = context.executionListener {
         listener.on_failed(&callId, &error);
@@ -3474,8 +3503,7 @@ fn setHostEnvironmentValue(callId: &str, key: &str, value: &str) -> HostResult<(
     if key.is_empty() {
         return Err(HostError::new("Environment variable name is required"));
     }
-    let context = CURRENT_ACTIVE_CALL_CONTEXTS
-        .with(|contexts| contexts.borrow().get(callId).cloned())
+    let context = activeCallContexts().get(callId).cloned()
         .ok_or_else(|| HostError::new("Environment write requires an active owning call"))?;
     context
         .executionHost
