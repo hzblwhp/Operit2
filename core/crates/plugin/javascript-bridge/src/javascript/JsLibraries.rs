@@ -1090,6 +1090,12 @@ fn assembleRuntimeBootstrapScript() -> String {
                                     payload === undefined ? null : payload
                                 ).then(function(response) {{
                                     try {{
+                                        // The target runtime finishes its own call session and
+                                        // leaves its call id behind on this shared engine. Restore
+                                        // the originating identity unconditionally: activating it is
+                                        // best effort, but every later continuation must never read
+                                        // a foreign call id that has already been finalized.
+                                        globalThis.__operitCurrentCallId = ownerCallId;
                                         __operitActivateCall(ownerCallId);
                                         if (!response || typeof response !== 'object' || typeof response.success !== 'boolean') {{
                                             throw new TypeError('IPC host returned an invalid result envelope');
@@ -1103,6 +1109,7 @@ fn assembleRuntimeBootstrapScript() -> String {
                                     }}
                                 }}, function(error) {{
                                     try {{
+                                        globalThis.__operitCurrentCallId = ownerCallId;
                                         __operitActivateCall(ownerCallId);
                                         reject(error);
                                     }} catch (activationError) {{
