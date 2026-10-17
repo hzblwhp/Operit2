@@ -591,7 +591,30 @@ fn assembleRuntimeBootstrapScript() -> String {
                         globalThis.__operitNotifyDetachedCall(callId);
                     }}
                 }} else if (typeof globalThis.__operitCleanupCallSession === 'function') {{
-                    globalThis.__operitCleanupCallSession(callId);
+                    // Late consumers read this state milliseconds after completion:
+                    // a cross-runtime dispatch finishes, then the caller's result
+                    // packaging runs and asks for the dispatch's state. Purging
+                    // synchronously strands them with "execution state is
+                    // unavailable", so defer the purge through the native timer,
+                    // which acquires no call reference of its own.
+                    var deferredCallId = callId;
+                    var purge = function() {{
+                        if (typeof globalThis.__operitCleanupCallSession === 'function') {{
+                            globalThis.__operitCleanupCallSession(deferredCallId);
+                        }}
+                    }};
+                    var schedule = globalThis.__operitNativeScheduleJavaScriptTimer;
+                    if (typeof schedule === 'function') {{
+                        try {{
+                            Promise.resolve(
+                                schedule('__operit_purge_' + deferredCallId, 250)
+                            ).then(purge, purge);
+                        }} catch (_purgeError) {{
+                            purge();
+                        }}
+                    }} else {{
+                        purge();
+                    }}
                 }}
             }}
             function isActive() {{
