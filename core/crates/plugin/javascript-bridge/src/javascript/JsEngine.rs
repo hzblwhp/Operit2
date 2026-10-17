@@ -71,6 +71,14 @@ thread_local! {
 /// Bump it whenever a build worth identifying goes out.
 const BUILD_FINGERPRINT: &str = "20261018-a2a3";
 
+/// Upper bound on retained call contexts.
+///
+/// The registry no longer gets cleared wholesale (that caused A1), so every call
+/// would otherwise leave an entry behind for the whole process lifetime. This is
+/// far above any plausible number of concurrent calls, so trimming only ever
+/// removes genuinely finished entries.
+const ACTIVE_CALL_CONTEXT_LIMIT: usize = 512;
+
 /// Process-wide registry of live call contexts.
 ///
 /// This cannot be thread-local. A cross-runtime IPC inserts the callee context
@@ -1219,6 +1227,17 @@ impl JsEngineState {
             let before = contexts.keys().cloned().collect::<Vec<String>>();
             for (id, context) in entries {
                 contexts.insert(id, context);
+            }
+            // Nothing clears this registry wholesale any more (that was the A1
+            // bug), so a long session would accumulate one entry per call. Cap it
+            // once well past the number of calls that can plausibly be in flight
+            // at once, dropping the smallest ids first.
+            if contexts.len() > ACTIVE_CALL_CONTEXT_LIMIT {
+                let excess = contexts.len() - ACTIVE_CALL_CONTEXT_LIMIT;
+                let victims: Vec<String> = contexts.keys().take(excess).cloned().collect();
+                for id in victims {
+                    contexts.remove(&id);
+                }
             }
             let after = contexts.keys().cloned().collect::<Vec<String>>();
             (before, after)
