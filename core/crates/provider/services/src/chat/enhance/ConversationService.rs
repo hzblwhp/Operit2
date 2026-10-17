@@ -52,6 +52,50 @@ pub struct PrepareConversationHistoryRequest {
     pub intro_prompt: String,
     pub disable_user_preference_description: bool,
     pub ai_name: String,
+    /// Routed model's context window in tokens. When present, prepared history is
+    /// trimmed to fit it instead of being sent over the limit.
+    pub max_context_tokens: Option<i64>,
+}
+
+/// Share of the context window the history may occupy before older turns are
+/// dropped, leaving room for the reply and for tool results produced mid-turn.
+const HISTORY_BUDGET_RATIO: f64 = 0.9;
+
+/// Drops the oldest conversational turns until the history fits the window.
+///
+/// The leading system turn is always kept: it carries identity, rules and the
+/// tool protocol. Token counts are approximated as one per three characters,
+/// which is deliberately conservative for CJK text and cheap enough to run on
+/// every request.
+fn bound_history_to_context(
+    history: Vec<PromptTurn>,
+    max_context_tokens: Option<i64>,
+) -> Vec<PromptTurn> {
+    let Some(max_tokens) = max_context_tokens.filter(|value| *value > 0) else {
+        return history;
+    };
+    let budget = (max_tokens as f64 * HISTORY_BUDGET_RATIO) as usize;
+    let estimate = |turn: &PromptTurn| turn.content.chars().count() / 3 + 8;
+    let total: usize = history.iter().map(estimate).sum();
+    if total <= budget {
+        return history;
+    }
+    let system_prefix = usize::from(
+        history
+            .first()
+            .is_some_and(|turn| turn.kind == PromptTurnKind::SYSTEM),
+    );
+    let mut keep_from = system_prefix;
+    let mut used = total;
+    let last_kept = history.len().saturating_sub(1);
+    while keep_from < last_kept && used > budget {
+        used = used.saturating_sub(estimate(&history[keep_from]));
+        keep_from += 1;
+    }
+    let mut bounded: Vec<PromptTurn> = Vec::with_capacity(last_kept - keep_from + 1 + system_prefix);
+    bounded.extend(history[..system_prefix].iter().cloned());
+    bounded.extend(history[keep_from..].iter().cloned());
+    bounded
 }
 
 /// Mutable hook context passed before and after prompt history preparation.
@@ -165,7 +209,10 @@ impl ConversationService {
                 ..before_context
             })
             .await;
-        Ok(after_context.prepared_history)
+        Ok(bound_history_to_context(
+            after_context.prepared_history,
+            request.max_context_tokens,
+        ))
     }
 
     /// Splits mixed text and XML-like assistant output into ordered tag segments.

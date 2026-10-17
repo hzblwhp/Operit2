@@ -847,6 +847,10 @@ impl EnhancedAIService {
                     intro_prompt: runtime.introPrompt.clone(),
                     disable_user_preference_description: runtime.disableUserPreferenceDescription,
                     ai_name: runtime.aiName.clone(),
+                    // K tokens → tokens, matching how the chat menu reports the window.
+                    max_context_tokens: Some(
+                        (config.context.maxContextLength as f64 * 1024.0).round() as i64,
+                    ),
                 },
                 &history_hooks,
                 &system_prompt_composer,
