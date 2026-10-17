@@ -61,12 +61,24 @@ pub struct PrepareConversationHistoryRequest {
 /// dropped, leaving room for the reply and for tool results produced mid-turn.
 const HISTORY_BUDGET_RATIO: f64 = 0.9;
 
+/// Level the trimmed history is taken down to once the budget is exceeded.
+///
+/// Trimming to exactly the budget would move the cut point on every subsequent
+/// request, and each move invalidates the provider's prefix cache from that
+/// point on. Cutting back to a much lower level instead means the prefix stays
+/// byte-identical for many turns after each trim.
+const HISTORY_RETAIN_RATIO: f64 = 0.6;
+
 /// Drops the oldest conversational turns until the history fits the window.
 ///
-/// The leading system turn is always kept: it carries identity, rules and the
-/// tool protocol. Token counts are approximated as one per three characters,
-/// which is deliberately conservative for CJK text and cheap enough to run on
-/// every request.
+/// Two properties matter beyond fitting:
+/// - The leading system turn is always kept; it carries identity, rules and the
+///   tool protocol.
+/// - The cut never lands inside a tool call/result pair, because a result whose
+///   call was dropped is rejected by every provider.
+///
+/// Token counts are approximated as one per three characters, which is
+/// deliberately conservative for CJK text and cheap enough to run every request.
 fn bound_history_to_context(
     history: Vec<PromptTurn>,
     max_context_tokens: Option<i64>,
@@ -80,6 +92,9 @@ fn bound_history_to_context(
     if total <= budget {
         return history;
     }
+    // Trim well below the budget so the next several turns reuse this exact
+    // prefix and keep hitting the provider's cache.
+    let retain_target = (max_tokens as f64 * HISTORY_RETAIN_RATIO) as usize;
     let system_prefix = usize::from(
         history
             .first()
@@ -88,9 +103,24 @@ fn bound_history_to_context(
     let mut keep_from = system_prefix;
     let mut used = total;
     let last_kept = history.len().saturating_sub(1);
-    while keep_from < last_kept && used > budget {
+    let is_tool_turn = |turn: &PromptTurn| {
+        matches!(
+            turn.kind,
+            PromptTurnKind::TOOL_CALL | PromptTurnKind::TOOL_RESULT
+        )
+    };
+    while keep_from < last_kept && used > retain_target {
         used = used.saturating_sub(estimate(&history[keep_from]));
         keep_from += 1;
+    }
+    // Never start the remaining history on an orphaned tool turn.
+    while keep_from < last_kept && is_tool_turn(&history[keep_from]) {
+        used = used.saturating_sub(estimate(&history[keep_from]));
+        keep_from += 1;
+    }
+    if used > budget {
+        // The tail alone exceeds the budget; keep it rather than send nothing.
+        keep_from = system_prefix;
     }
     let mut bounded: Vec<PromptTurn> = Vec::with_capacity(last_kept - keep_from + 1 + system_prefix);
     bounded.extend(history[..system_prefix].iter().cloned());
