@@ -37,7 +37,7 @@ class DataRescueApp extends StatelessWidget {
   /// Builds only framework widgets and a fixed theme independent of user preferences.
   @override
   Widget build(BuildContext context) => MaterialApp(
-    title: 'Operit2 数据救援 / Data Rescue',
+    title: 'PengSong 数据救援 / Data Rescue',
     debugShowCheckedModeBanner: false,
     theme: ThemeData(
       colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff245f9e)),
@@ -375,7 +375,7 @@ class _DataRescueScreenState extends State<_DataRescueScreen> {
       canPop: !_busy,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Operit2 数据救援 / Data Rescue'),
+          title: const Text('PengSong 数据救援 / Data Rescue'),
           automaticallyImplyLeading: false,
         ),
         body: Center(

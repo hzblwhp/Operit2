@@ -425,7 +425,10 @@ fn decode(current: &Layout, row: &Row, rows: &BTreeMap<String, Vec<Row>>) -> Res
         if matches!(node.null_encoding, Some(NullEncoding::Column))
             && matches!(row.get(field(prefix)), Some(StorageSqlValue::Null))
         {
-            return Ok(Some(Value::Null));
+            // A column-encoded NULL cannot distinguish "absent" from "explicit
+            // null". An optional field must round-trip back to absent, while a
+            // merely nullable one keeps its explicit null.
+            return Ok(if node.optional { None } else { Some(Value::Null) });
         }
         if node.null_encoding.is_none() && (node.optional || node.nullable) {
             match integer(row, &format!("{}__state", field(prefix)))? {

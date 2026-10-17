@@ -2227,6 +2227,7 @@ dependencies = [
  "hmac",
  "jni",
  "js-sys",
+ "libc",
  "mdns-sd",
  "operit-core-application",
  "operit-data-rescue",

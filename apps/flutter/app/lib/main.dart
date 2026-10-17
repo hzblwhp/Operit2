@@ -49,7 +49,15 @@ void main(List<String> arguments) async {
         applicationStarted = true;
         return;
       }
-      await platformCoreProxy.dataRescue({'operation': 'runtimeLease'});
+      // The rescue lease is a maintenance convenience, never a startup
+      // precondition: on Android the data root lives under /data/user/<id>,
+      // which is a platform-provided symlink the native boundary rejects.
+      // Losing the lease must not keep the whole application from booting.
+      try {
+        await platformCoreProxy.dataRescue({'operation': 'runtimeLease'});
+      } catch (error) {
+        debugPrint('data rescue lease unavailable: $error');
+      }
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       consumeGitHubOAuthWebCallbackAtStartup();
       final bindingElapsedMs = bindingStopwatch.elapsedMilliseconds;

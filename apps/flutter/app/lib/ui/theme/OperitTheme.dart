@@ -298,7 +298,7 @@ class _OperitThemeState extends State<OperitTheme> {
           if (!activeThemeReady && !showUnconfiguredApp)
             ThemeRenderRoot(
               key: const ValueKey('appearance-status'),
-              title: 'Operit2',
+              title: 'PengSong',
               themePreferenceSnapshot: _controller.themePreferenceSnapshot,
               lightColorScheme: _seedColorScheme(
                 Brightness.light,
@@ -373,7 +373,7 @@ class _OperitMaterialApp extends StatelessWidget {
       themePreferenceSnapshot,
     );
     return ThemeRenderRoot(
-      title: 'Operit2',
+      title: 'PengSong',
       themePreferenceSnapshot: themePreferenceSnapshot,
       lightColorScheme: lightColorScheme,
       darkColorScheme: darkColorScheme,

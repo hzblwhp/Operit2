@@ -1179,7 +1179,8 @@ var collections = {
       chatProviderId: {
         kind: "text",
         nullable: true,
-        nullEncoding: "column"
+        nullEncoding: "column",
+        optional: true
       },
       ttsConfigId: {
         kind: "text",

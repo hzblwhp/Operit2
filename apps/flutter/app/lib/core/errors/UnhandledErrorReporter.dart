@@ -161,7 +161,7 @@ class UnhandledErrorDialog extends StatelessWidget {
         Icons.error_outline,
         color: Theme.of(context).colorScheme.error,
       ),
-      title: const Text('Operit2 encountered an error'),
+      title: const Text('PengSong encountered an error'),
       content: SizedBox(
         width: 760,
         child: Column(
@@ -205,7 +205,7 @@ class StartupErrorApplication extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Operit2',
+      title: 'PengSong',
       home: Scaffold(
         body: SafeArea(
           child: ValueListenableBuilder<UnhandledErrorReport?>(
@@ -220,7 +220,7 @@ class StartupErrorApplication extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
                     Text(
-                      'Operit2 could not start',
+                      'PengSong could not start',
                       style: Theme.of(context).textTheme.headlineSmall,
                     ),
                     const SizedBox(height: 8),

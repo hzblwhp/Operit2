@@ -16,7 +16,7 @@ final Uri _contactUri = Uri.parse('mailto:aaswordsman@foxmail.com');
 class AboutOperitScreen extends StatelessWidget {
   const AboutOperitScreen({super.key});
 
-  /// Builds the Operit2 project information screen.
+  /// Builds the PengSong project information screen.
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -35,7 +35,7 @@ class AboutOperitScreen extends StatelessWidget {
                   _AboutHeader(),
                   SizedBox(height: 24),
                   _AboutSection(
-                    title: 'Operit2',
+                    title: 'PengSong',
                     child: Text(
                       '面向终端与桌面的 AI 工作台，提供聊天会话、工作区、工具、插件、MCP、远程连接和 Web 访问。',
                     ),
@@ -103,7 +103,7 @@ class _AboutHeaderState extends State<_AboutHeader> {
         ),
         const SizedBox(height: 14),
         Text(
-          'Operit2',
+          'PengSong',
           style: Theme.of(
             context,
           ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
@@ -164,7 +164,7 @@ class _ProjectLinksSection extends StatelessWidget {
           _AboutActionRow(
             icon: Icons.description_outlined,
             title: '开源许可证',
-            subtitle: 'Operit2 使用 AGPL-3.0',
+            subtitle: 'PengSong 使用 AGPL-3.0',
             onTap: () => _showOpenSourceLicenses(context),
           ),
         ],
@@ -286,7 +286,7 @@ class _OpenSourceComponent {
 
 const List<_OpenSourceComponent> _openSourceComponents = <_OpenSourceComponent>[
   _OpenSourceComponent(
-    name: 'Operit2',
+    name: 'PengSong',
     license: 'AGPL-3.0',
     description: 'AI workspace application and runtime.',
   ),

@@ -770,12 +770,27 @@ fn is_storage_link(metadata: &std::fs::Metadata) -> bool {
     false
 }
 
+/// Reports the platform-provided storage links that every normal app install
+/// lives under. Android maps the per-user data tree through `/data/user/<id>`
+/// (a symlink to `/data/data`), so rejecting it would disable the rescue
+/// boundary on every device instead of hardening it.
+fn is_platform_storage_link(path: &Path) -> bool {
+    let parts: Vec<&str> = path
+        .components()
+        .filter_map(|part| part.as_os_str().to_str())
+        .collect();
+    matches!(parts.as_slice(), ["/", "data", "user", _])
+}
+
 /// Validates an absolute data directory independently of business bootstrap parsing.
 fn absolute_root(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir)) {
         return Err("Data roots must be normalized absolute directories".into());
     }
-    for ancestor in path.ancestors() { reject_symlink(ancestor)?; }
+    for ancestor in path.ancestors() {
+        if is_platform_storage_link(ancestor) { continue; }
+        reject_symlink(ancestor)?;
+    }
     Ok(path.to_path_buf())
 }
 
