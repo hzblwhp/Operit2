@@ -1155,18 +1155,24 @@ impl JsEngineState {
 
     /// Installs every active owner so callbacks advanced by another call retain their context.
     ///
-    /// The map is rebuilt from the executions that are still live, but entries
-    /// already marked retired are carried over: a finished call may still have a
-    /// pending reader (the initiator of a cross-runtime IPC reads its result a
-    /// few milliseconds later). Replacing the map outright would evict exactly
-    /// that entry and the reader would fail with "requires an active owning call".
+    /// This merges rather than rebuilds. Rebuilding from live executions alone
+    /// evicts a call the moment it leaves `pendingScriptExecutions`, but the
+    /// initiator of a cross-runtime IPC reads its callee's result a few
+    /// milliseconds *after* that callee finished and was removed. Dropping the
+    /// entry there strands the read with "requires an active owning call".
+    ///
+    /// So live executions are (re)installed and everything already present is
+    /// kept. The map therefore only grows by the number of calls in flight, and
+    /// a process restart clears it.
     #[allow(non_snake_case)]
     fn installActiveCallContexts(&self) {
         CURRENT_EXECUTION_HOST.with(|host| {
             *host.borrow_mut() = self.executionHost.clone();
         });
         CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-            let mut rebuilt: BTreeMap<String, JsCallContext> = self
+            let mut map = contexts.borrow_mut();
+            let before = map.keys().cloned().collect::<Vec<String>>();
+            for (id, context) in self
                 .detachedCallContexts
                 .iter()
                 .map(|(id, context)| (id.clone(), context.clone()))
@@ -1175,17 +1181,21 @@ impl JsEngineState {
                         .iter()
                         .map(|(id, pending)| (id.clone(), pending.context.clone())),
                 )
-                .collect();
-            let mut current = contexts.borrow_mut();
-            for (id, context) in current.iter() {
-                if context.retired {
-                    rebuilt
-                        .entry(id.clone())
-                        .or_insert_with(|| context.clone());
-                }
+            {
+                map.insert(id, context);
             }
-            // Sweep retired entries that no longer have a pending reader.
-            *current = rebuilt;
+            // Distinguishes "evicted here" from "never inserted": if the callee
+            // was absent before and still absent after, the miss happened on the
+            // insertion side instead of in this rebuild.
+            AppLogger::i(
+                "ToolPkg",
+                &format!(
+                    "install-active before={:?} pending={} after={:?}",
+                    before,
+                    self.pendingScriptExecutions.len(),
+                    map.keys().cloned().collect::<Vec<String>>(),
+                ),
+            );
         });
     }
 
