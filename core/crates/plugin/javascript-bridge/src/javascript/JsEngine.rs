@@ -2694,7 +2694,10 @@ fn clearThreadScopedStateKeepingCallContexts() {
 
 #[allow(non_snake_case)]
 fn clearThreadLocalCallState() {
-    activeCallContexts().clear();
+    // The call-context registry is process-wide and outlives this reset: clearing
+    // it here would wipe entries other threads are still using, which is exactly
+    // how "requires an active owning call" appeared one millisecond after the
+    // registry had been populated. Per-call release is releaseCallContext's job.
     CURRENT_EXECUTION_HOST.with(|host| {
         *host.borrow_mut() = None;
     });
