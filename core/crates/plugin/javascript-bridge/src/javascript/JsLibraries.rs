@@ -782,10 +782,17 @@ fn assembleRuntimeBootstrapScript() -> String {
                     if (!value || typeof value.then !== 'function') {{
                         return false;
                     }}
+                    // Whatever happens below, the borrowed execution identity must go back
+                    // to its owner. A nested runtime (targetRuntime:"main") rebinds the
+                    // ambient id to its own call; if this session was already finalized by
+                    // the time the Promise settles, skipping finalizeCall would strand that
+                    // foreign id in every later continuation of the caller.
                     Promise.resolve(value).then(
                         function(result) {{
                             if (isActive()) {{
                                 complete(result);
+                            }} else {{
+                                finalizeCall();
                             }}
                         }},
                         function(error) {{
@@ -799,6 +806,8 @@ fn assembleRuntimeBootstrapScript() -> String {
                                         ? report.details.message
                                         : __operitText(error && error.message ? error.message : error);
                                 emitError(rejectionMessage || 'Promise rejection');
+                            }} else {{
+                                finalizeCall();
                             }}
                         }}
                     );
