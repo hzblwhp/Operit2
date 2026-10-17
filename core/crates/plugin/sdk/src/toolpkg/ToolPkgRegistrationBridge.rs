@@ -422,6 +422,15 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             };
         }
 
+        /**
+         * Last package identity resolved from a live call session.
+         *
+         * Hooks that fire after their call completed still need a target to read
+         * resources for; remembering the last good value lets them work instead of
+         * failing with "runtime target is empty".
+         */
+        var lastResolvedToolPkgTarget = '';
+
         function resolveCurrentToolPkgTarget() {
             var callId = String(root.__operitCurrentCallId || '').trim();
             var callState =
@@ -433,7 +442,11 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
                     ? callState.params
                     : null;
             if (!params) {
-                return '';
+                // Late hooks run after their call session is gone, yet they still
+                // read resources for the same package. Falling back to the last
+                // resolved target keeps them working instead of failing with an
+                // empty target and no way to recover.
+                return lastResolvedToolPkgTarget;
             }
             var candidates = [
                 params.__operit_ui_package_name,
@@ -445,10 +458,11 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             for (var i = 0; i < candidates.length; i += 1) {
                 var value = String(candidates[i] || '').trim();
                 if (value) {
+                    lastResolvedToolPkgTarget = value;
                     return value;
                 }
             }
-            return '';
+            return lastResolvedToolPkgTarget;
         }
 
         /** Materializes a resource through the required structured host Promise. */
