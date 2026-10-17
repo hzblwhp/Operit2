@@ -23,7 +23,7 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
-        android:label="Operit2"
+        android:label="PengSong"
         android:name=".OperitApplication"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -62,7 +62,7 @@
         <service android:name=".PluginSdkService" android:exported="true" />
         <service
             android:name=".OperitNotificationListener"
-            android:label="Operit notification access"
+            android:label="PengSong notification access"
             android:exported="true"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
@@ -71,7 +71,7 @@
         </service>
         <activity
             android:name=".DataRescueActivity"
-            android:label="Operit2 数据救援"
+            android:label="PengSong 数据救援"
             android:exported="true"
             android:process=":maintenance"
             android:taskAffinity="app.operit.maintenance"

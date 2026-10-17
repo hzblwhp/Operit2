@@ -637,7 +637,7 @@
   "settingsModelCodexBrowser": "Browser sign-in",
   "settingsModelCodexDevice": "Device code",
   "settingsModelCodexWaiting": "Waiting for ChatGPT authorization…",
-  "settingsModelCodexDeviceInstructions": "Enter this code on the opened page, then return to Operit.",
+  "settingsModelCodexDeviceInstructions": "Enter this code on the opened page, then return to PengSong.",
   "settingsModelCodexOpenPage": "Open verification page",
   "settingsModelCodexLogout": "Sign out",
   "settingsModelCodexLoginFailed": "ChatGPT sign-in failed: {error}",

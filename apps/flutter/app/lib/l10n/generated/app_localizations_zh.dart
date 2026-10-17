@@ -1248,7 +1248,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsModelCodexDeviceInstructions =>
-      '在打开的页面输入这个验证码，然后回到 Operit。';
+      '在打开的页面输入这个验证码，然后回到 PengSong。';
 
   @override
   String get settingsModelCodexOpenPage => '打开验证页面';

@@ -2393,7 +2393,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsModelCodexDeviceInstructions.
   ///
   /// In en, this message translates to:
-  /// **'Enter this code on the opened page, then return to Operit.'**
+  /// **'Enter this code on the opened page, then return to PengSong.'**
   String get settingsModelCodexDeviceInstructions;
 
   /// No description provided for @settingsModelCodexOpenPage.
