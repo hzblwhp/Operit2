@@ -53,6 +53,7 @@ pub trait JsExecutionListener {
 type JsExecutionListenerRef = Arc<dyn JsExecutionListener + Send + Sync>;
 
 thread_local! {
+    static CURRENT_ACTIVE_CALL_CONTEXTS: RefCell<BTreeMap<String, JsCallContext>> = RefCell::new(BTreeMap::new());
     static CURRENT_EXECUTION_HOST: RefCell<Option<Arc<dyn JsExecutionHost>>> = RefCell::new(None);
     static CURRENT_REGISTRATION_CONFIG_PARAMS: RefCell<Option<BTreeMap<String, Value>>> = RefCell::new(None);
     static CURRENT_INTERMEDIATE_CALLBACK: RefCell<Option<Arc<dyn Fn(Value) + Send + Sync>>> = RefCell::new(None);
@@ -62,25 +63,6 @@ thread_local! {
     static CURRENT_ENV_OVERRIDES: RefCell<BTreeMap<String, String>> = RefCell::new(BTreeMap::new());
     static CURRENT_CALL_RESULTS: RefCell<BTreeMap<String, JsExecutionResult<Value>>> = RefCell::new(BTreeMap::new());
     static CURRENT_TEXT_RESOURCE_SOURCE: RefCell<Option<JsTextResourceSource>> = RefCell::new(None);
-}
-
-/// Owns the call context registry shared by every thread that touches it.
-///
-/// This must not be thread-local. A cross-runtime IPC writes its callee context
-/// from the JS engine thread, while the failing lookup happens on the tool
-/// execution thread; with a `thread_local!` registry each thread sees its own
-/// empty map, so the lookup can never succeed no matter how the entry is
-/// inserted or retained.
-static ACTIVE_CALL_CONTEXTS: OnceLock<Mutex<BTreeMap<String, JsCallContext>>> = OnceLock::new();
-
-/// Runs `f` against the process-wide call context registry.
-#[allow(non_snake_case)]
-fn call_contexts<T>(f: impl FnOnce(&mut BTreeMap<String, JsCallContext>) -> T) -> T {
-    let registry = ACTIVE_CALL_CONTEXTS.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut guard = registry
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    f(&mut guard)
 }
 
 #[derive(Clone)]
@@ -1187,8 +1169,8 @@ impl JsEngineState {
         CURRENT_EXECUTION_HOST.with(|host| {
             *host.borrow_mut() = self.executionHost.clone();
         });
-        call_contexts(|contexts| {
-            let mut map = contexts;
+        CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
+            let mut map = contexts.borrow_mut();
             let before = map.keys().cloned().collect::<Vec<String>>();
             for (id, context) in self
                 .detachedCallContexts
@@ -1308,8 +1290,10 @@ impl JsEngineState {
             retired: false,
         };
         installThreadLocalCallContext(&context);
-        call_contexts(|contexts| {
-            contexts.insert(callId.clone(), context.clone())
+        CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
+            contexts
+                .borrow_mut()
+                .insert(callId.clone(), context.clone())
         });
         let started = (|| {
             self.initJavaScriptEnvironment()
@@ -1437,8 +1421,8 @@ impl JsEngineState {
             "operit_call_{}",
             Uuid::new_v4().to_string().replace('-', "")
         );
-        call_contexts(|contexts| {
-            contexts.insert(
+        CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
+            contexts.borrow_mut().insert(
                 callId.clone(),
                 JsCallContext {
                     executionHost: self.executionHost.clone(),
@@ -1551,8 +1535,8 @@ impl JsEngineState {
                 .ok_or_else(|| {
                     JsExecutionError::invalid_request("Registration resource owner is unavailable")
                 })?;
-            call_contexts(|contexts| {
-                contexts.insert(
+            CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
+                contexts.borrow_mut().insert(
                     callId.clone(),
                     JsCallContext {
                         executionHost: self.executionHost.clone(),
@@ -1900,8 +1884,8 @@ impl JsEngineState {
             .map(|(callId, pending)| (callId.clone(), pending.context.clone()))
             .collect();
         for (callId, context) in inflight {
-            call_contexts(|contexts| {
-                contexts.insert(callId, context.clone());
+            CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
+                contexts.borrow_mut().insert(callId, context.clone());
             });
             installThreadLocalCallContext(&context);
         }
@@ -2372,12 +2356,14 @@ fn dispatchStructuredToolCall(
         fail("Tool owning call ID must be a string".to_string());
         return;
     };
-    let context = call_contexts(|contexts| contexts.get(callId).cloned());
+    let context = CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| contexts.borrow().get(callId).cloned());
     let Some(context) = context else {
         // Record the actual registry contents: a miss here means the issuing call's
         // context was evicted, and knowing which ids survived identifies the evictor.
-        let known = call_contexts(|contexts| {
-            contexts.keys()
+        let known = CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
+            contexts
+                .borrow()
+                .keys()
                 .cloned()
                 .collect::<Vec<String>>()
         });
@@ -2640,8 +2626,8 @@ fn releaseCallContext(callId: &str, reason: &str) {
         "ToolPkg",
         &format!("releaseCallContext callId={} reason={}", callId, reason),
     );
-    call_contexts(|contexts| {
-        let mut map = contexts;
+    CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
+        let mut map = contexts.borrow_mut();
         map.retain(|id, context| !(context.retired && id != callId));
         if let Some(context) = map.get_mut(callId) {
             context.retired = true;
@@ -2675,7 +2661,7 @@ fn clearThreadScopedStateKeepingCallContexts() {
 
 #[allow(non_snake_case)]
 fn clearThreadLocalCallState() {
-    call_contexts(|contexts| contexts.clear());
+    CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| contexts.borrow_mut().clear());
     CURRENT_EXECUTION_HOST.with(|host| {
         *host.borrow_mut() = None;
     });
@@ -2963,7 +2949,8 @@ mod PluginConfigTests;
 /// Delivers an external intermediate value only to the explicitly owning execution session.
 #[allow(non_snake_case)]
 fn deliverIntermediateResult(callId: String, result: String) -> HostResult<()> {
-    let context = call_contexts(|contexts| contexts.get(&callId).cloned())
+    let context = CURRENT_ACTIVE_CALL_CONTEXTS
+        .with(|contexts| contexts.borrow().get(&callId).cloned())
         .ok_or_else(|| HostError::new("Intermediate result requires an active owning call"))?;
     if let Some(listener) = context.executionListener {
         listener.on_intermediate_result(&callId, &result);
@@ -3001,7 +2988,7 @@ fn textIntermediateCallback(callback: Option<Arc<dyn Fn(String) + Send + Sync>>)
 
 /// Delivers DSL values to their active or detached execution owner without JSON text.
 fn sendStructuredIntermediate(callId: &str, value: Value) {
-    let active = call_contexts(|contexts| contexts.get(callId).and_then(|context| context.intermediateCallback.clone()));
+    let active = CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| contexts.borrow().get(callId).and_then(|context| context.intermediateCallback.clone()));
     let detached = CURRENT_DETACHED_INTERMEDIATE_CALLBACKS.with(|callbacks| callbacks.borrow().get(callId).cloned());
     match (active, detached) {
         (Some(callback), _) => callback(value),
@@ -3016,7 +3003,8 @@ fn executeHostOperation(name: &str, arguments: Vec<Value>) -> HostResult<Value> 
         "__operitNativeSetCallStructuredResult" => {
             let [callId, value] = exactHostJavaScriptJsonArguments(name, arguments)?;
             let callId = hostJavaScriptStringArgument(callId)?;
-            if !call_contexts(|contexts| contexts.contains_key(&callId))
+            if !CURRENT_ACTIVE_CALL_CONTEXTS
+                .with(|contexts| contexts.borrow().contains_key(&callId))
             {
                 return Err(HostError::new("Completion requires an active owning call"));
             }
@@ -3168,7 +3156,8 @@ fn executeHostOperation(name: &str, arguments: Vec<Value>) -> HostResult<Value> 
             let [callId, key] = exactHostJavaScriptJsonArguments(name, arguments)?;
             let callId = hostJavaScriptStringArgument(callId)?;
             let key = hostJavaScriptStringArgument(key)?;
-            let context = call_contexts(|contexts| contexts.get(&callId).cloned())
+            let context = CURRENT_ACTIVE_CALL_CONTEXTS
+                .with(|contexts| contexts.borrow().get(&callId).cloned())
                 .ok_or_else(|| {
                     HostError::new("Environment request requires an active owning call")
                 })?;
@@ -3454,7 +3443,7 @@ fn normalizeToolPkgTextResourcePath(path: &str) -> String {
 /// Stores an externally serialized execution result for the owning call.
 #[allow(non_snake_case)]
 fn storeExecutionResult(callId: String, result: String) -> HostResult<()> {
-    if !call_contexts(|contexts| contexts.contains_key(&callId)) {
+    if !CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| contexts.borrow().contains_key(&callId)) {
         return Err(HostError::new("Completion requires an active owning call"));
     }
     CURRENT_CALL_RESULTS.with(|results| {
@@ -3466,7 +3455,8 @@ fn storeExecutionResult(callId: String, result: String) -> HostResult<()> {
 /// Reports and stores an execution error through the external listener contract.
 #[allow(non_snake_case)]
 fn storeExecutionError(callId: String, error: String) -> HostResult<()> {
-    let context = call_contexts(|contexts| contexts.get(&callId).cloned())
+    let context = CURRENT_ACTIVE_CALL_CONTEXTS
+        .with(|contexts| contexts.borrow().get(&callId).cloned())
         .ok_or_else(|| HostError::new("Execution error requires an active owning call"))?;
     if let Some(listener) = context.executionListener {
         listener.on_failed(&callId, &error);
@@ -3484,7 +3474,8 @@ fn setHostEnvironmentValue(callId: &str, key: &str, value: &str) -> HostResult<(
     if key.is_empty() {
         return Err(HostError::new("Environment variable name is required"));
     }
-    let context = call_contexts(|contexts| contexts.get(callId).cloned())
+    let context = CURRENT_ACTIVE_CALL_CONTEXTS
+        .with(|contexts| contexts.borrow().get(callId).cloned())
         .ok_or_else(|| HostError::new("Environment write requires an active owning call"))?;
     context
         .executionHost
