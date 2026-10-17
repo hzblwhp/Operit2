@@ -1154,13 +1154,19 @@ impl JsEngineState {
     }
 
     /// Installs every active owner so callbacks advanced by another call retain their context.
+    ///
+    /// The map is rebuilt from the executions that are still live, but entries
+    /// already marked retired are carried over: a finished call may still have a
+    /// pending reader (the initiator of a cross-runtime IPC reads its result a
+    /// few milliseconds later). Replacing the map outright would evict exactly
+    /// that entry and the reader would fail with "requires an active owning call".
     #[allow(non_snake_case)]
     fn installActiveCallContexts(&self) {
         CURRENT_EXECUTION_HOST.with(|host| {
             *host.borrow_mut() = self.executionHost.clone();
         });
         CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-            *contexts.borrow_mut() = self
+            let mut rebuilt: BTreeMap<String, JsCallContext> = self
                 .detachedCallContexts
                 .iter()
                 .map(|(id, context)| (id.clone(), context.clone()))
@@ -1170,6 +1176,16 @@ impl JsEngineState {
                         .map(|(id, pending)| (id.clone(), pending.context.clone())),
                 )
                 .collect();
+            let mut current = contexts.borrow_mut();
+            for (id, context) in current.iter() {
+                if context.retired {
+                    rebuilt
+                        .entry(id.clone())
+                        .or_insert_with(|| context.clone());
+                }
+            }
+            // Sweep retired entries that no longer have a pending reader.
+            *current = rebuilt;
         });
     }
 
