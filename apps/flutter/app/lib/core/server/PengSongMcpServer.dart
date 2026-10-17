@@ -286,6 +286,33 @@ class PengSongMcpServer {
         'required': ['name', 'scope'],
       },
     },
+    {
+      'name': 'write_file',
+      'description':
+          'Write one UTF-8 text file inside the app sandbox. Used to repair '
+          'materialized plugin cache files that differ from the shipped source.',
+      'inputSchema': {
+        'type': 'object',
+        'properties': {
+          'path': {'type': 'string', 'description': 'Absolute target path.'},
+          'content': {'type': 'string', 'description': 'Full new contents.'},
+        },
+        'required': ['path', 'content'],
+      },
+    },
+    {
+      'name': 'delete_path',
+      'description':
+          'Delete one file or directory tree inside the app sandbox. Forces a '
+          'plugin cache directory to be re-materialized on next launch.',
+      'inputSchema': {
+        'type': 'object',
+        'properties': {
+          'path': {'type': 'string', 'description': 'Absolute target path.'},
+        },
+        'required': ['path'],
+      },
+    },
   ];
 
   Future<String> _invoke(String name, Map<String, Object?> arguments) async {
@@ -322,6 +349,13 @@ class PengSongMcpServer {
           (arguments['path'] as String? ?? '').trim(),
           arguments['maxChars'],
         );
+      case 'write_file':
+        return await _writeTextFile(
+          (arguments['path'] as String? ?? '').trim(),
+          arguments['content'] as String? ?? '',
+        );
+      case 'delete_path':
+        return await _deletePath((arguments['path'] as String? ?? '').trim());
       case 'package_log':
         return await _clients.application.packageLogText();
       case 'package_status':
@@ -446,6 +480,52 @@ class PengSongMcpServer {
   /// Root that holds one identity directory per installation.
   static const String _identitiesRoot =
       '/data/data/app.operit/files/runtime/identities';
+
+  /// Rewrites one sandbox text file in place.
+  ///
+  /// Only used to repair materialized plugin files that drifted from the shipped
+  /// source; a plugin re-materialization overwrites it again on the next launch.
+  Future<String> _writeTextFile(String path, String content) async {
+    if (path.isEmpty) {
+      throw StateError('write_file requires a path');
+    }
+    if (!path.startsWith('/data/data/app.operit/')) {
+      throw StateError('write_file is limited to the app sandbox: $path');
+    }
+    final file = File(path);
+    if (!await file.exists()) {
+      throw StateError('No such file: $path');
+    }
+    await file.writeAsString(content, flush: true);
+    final written = await file.length();
+    return jsonEncode({'path': path, 'bytes': written});
+  }
+
+  /// Removes one sandbox file or directory tree.
+  ///
+  /// Deleting a materialized plugin cache directory makes the runtime unpack the
+  /// shipped copy again, which is how a stale or hand-edited cache is reverted.
+  Future<String> _deletePath(String path) async {
+    if (path.isEmpty) {
+      throw StateError('delete_path requires a path');
+    }
+    if (!path.startsWith('/data/data/app.operit/')) {
+      throw StateError('delete_path is limited to the app sandbox: $path');
+    }
+    final target = path.endsWith('/') && path.length > 1
+        ? path.substring(0, path.length - 1)
+        : path;
+    final type = FileSystemEntity.typeSync(target);
+    if (type == FileSystemEntityType.notFound) {
+      return jsonEncode({'path': target, 'deleted': false, 'reason': 'absent'});
+    }
+    if (type == FileSystemEntityType.directory) {
+      await Directory(target).delete(recursive: true);
+    } else {
+      await File(target).delete();
+    }
+    return jsonEncode({'path': target, 'deleted': true});
+  }
 
   /// Fallback log locations for layouts that predate the identity directory.
   static const List<String> _logCandidates = [
