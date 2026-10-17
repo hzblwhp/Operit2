@@ -1430,7 +1430,10 @@ impl JsEngineState {
             }
         };
         clearNativeExecutionSession(&callId);
-        clearThreadLocalCallState();
+        // Only this call's context may be dropped here: an enclosing caller may
+        // still be awaiting this nested execution and needs its own entry.
+        // Host/listener/callback slots stay untouched for the same reason.
+        releaseCallContext(&callId);
         if let Some(message) = extractJsExecutionErrorMessage(output.as_deref()) {
             Err(JsExecutionError::runtime(message))
         } else {
@@ -2523,6 +2526,19 @@ fn buildToolPkgIpcRequest(
         channel: normalizedChannel,
         payload,
     })
+}
+
+/// Releases exactly one call context, leaving every enclosing call intact.
+///
+/// A nested execution (`__operit_toolpkg_runtime_dispatch__` during a
+/// cross-runtime IPC) finishes while its caller is still running. Wiping the
+/// whole map at that moment strands the caller: its next tool call cannot find
+/// an owning context and fails with "Tool call requires an active owning call".
+#[allow(non_snake_case)]
+fn releaseCallContext(callId: &str) {
+    CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
+        contexts.borrow_mut().remove(callId);
+    });
 }
 
 #[allow(non_snake_case)]
