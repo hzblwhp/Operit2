@@ -220,3 +220,6 @@ artifacts/*
 apps/flutter/app/web/runtime/generated/*
 # Developer-local Flutter macOS signing identity (never includes a private key).
 apps/flutter/app/macos/Runner/Configs/Signing.local.xcconfig
+
+# 本地备份文件不入库
+*.bak-*
