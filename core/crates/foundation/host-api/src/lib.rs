@@ -9,8 +9,15 @@ pub mod PluginSdkIpc;
 pub mod Tcp;
 pub mod TerminalWorkingDirectory;
 pub mod TimeUtils;
+pub mod JavaScriptExecutionInterrupt;
+pub use JavaScriptExecutionInterrupt::{
+    HostJavaScriptExecutionInterrupt, HostJavaScriptInterruptController,
+    HostJavaScriptInterruptSubscription,
+};
 pub mod JavaScriptBootstrap;
+pub mod JavaScriptCodeCache;
 pub use JavaScriptBootstrap::HostJavaScriptBootstrap;
+pub use JavaScriptCodeCache::HostJavaScriptCodeCache;
 pub use Tcp::{TcpConnection, TcpHost, TcpListener};
 pub mod SerialPort;
 pub use SerialPort::{SerialPortConnection, SerialPortHost};
@@ -29,7 +36,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -195,6 +201,7 @@ impl HostEnvironmentDescriptor {
             environmentParameterDescriptionCn: String::new(),
             capabilities: vec![
                 "screen.capture".to_string(),
+                "ocr.recognition".to_string(),
                 "fs.read".to_string(),
                 "fs.write".to_string(),
                 "fs.search".to_string(),
@@ -223,6 +230,7 @@ impl HostEnvironmentDescriptor {
             ],
             structuredCapabilities: hostCapabilities(&[
                 "screen.capture",
+                "ocr.recognition",
                 "fs.read",
                 "fs.write",
                 "fs.search",
@@ -1188,6 +1196,8 @@ pub struct ComposeDslFilePickerOptions {
     pub allowMultiple: Option<bool>,
     /// Restricts selectable documents by MIME type.
     pub mimeTypes: Option<Vec<String>>,
+    /// Returns selected file contents within this positive byte limit.
+    pub maxContentBytes: Option<u64>,
 }
 
 /// A fully validated file-picker request issued by a Compose DSL screen.
@@ -1200,6 +1210,8 @@ pub struct ComposeDslFilePickerRequest {
     pub allowMultiple: bool,
     /// MIME filters passed unchanged to the platform selector.
     pub mimeTypes: Vec<String>,
+    /// Preserves the content limit across the serialized Flutter owner request.
+    pub maxContentBytes: Option<u64>,
 }
 
 impl ComposeDslFilePickerRequest {
@@ -1239,12 +1251,23 @@ impl ComposeDslFilePickerRequest {
 
         let options = raw.options;
         let picker = options.picker.unwrap_or(ComposeDslFilePickerMode::Document);
+        if let Some(limit) = options.maxContentBytes {
+            if limit == 0 {
+                return Err(HostError::new("maxContentBytes must be a positive integer"));
+            }
+            if picker == ComposeDslFilePickerMode::Directory {
+                return Err(HostError::new(
+                    "Directory selections do not have file contents",
+                ));
+            }
+        }
 
         Ok(Self {
             routeInstanceId: raw.routeInstanceId.trim().to_string(),
             executionContextKey: executionContextKey.to_string(),
             allowMultiple: options.allowMultiple.unwrap_or(false),
             mimeTypes: options.mimeTypes.unwrap_or_default(),
+            maxContentBytes: options.maxContentBytes,
             picker,
         })
     }
@@ -1480,6 +1503,10 @@ pub trait WebSocketHost: Send + Sync {
     /// Sends one binary message through an opened WebSocket.
     #[allow(non_snake_case)]
     fn sendWebSocketMessage(&self, streamId: &str, message: Vec<u8>) -> HostResult<()>;
+
+    /// Sends one UTF-8 text frame through an opened WebSocket.
+    #[allow(non_snake_case)]
+    fn sendWebSocketText(&self, streamId: &str, text: String) -> HostResult<()>;
 
     /// Closes one previously opened WebSocket.
     #[allow(non_snake_case)]
@@ -1737,6 +1764,18 @@ pub trait TerminalHost: Send + Sync {
         command: &str,
         timeoutMs: u64,
     ) -> HostResult<TerminalCommandOutput>;
+    /// Executes in the same session while forwarding raw PTY bytes before completion.
+    /// Empty frames allow cancellation checks during quiet commands. A callback error
+    /// interrupts the command and leaves the session available for subsequent work.
+    fn executeInSessionStreaming(
+        &self,
+        _sessionId: &str,
+        _command: &str,
+        _timeoutMs: u64,
+        _onOutput: &mut dyn FnMut(&[u8]) -> HostResult<()>,
+    ) -> HostResult<TerminalCommandOutput> {
+        Err(HostError::new("Terminal output streaming is not supported by this host"))
+    }
     fn executeHiddenCommand(
         &self,
         command: &str,
@@ -1784,11 +1823,15 @@ pub trait RuntimeStorageHost: Send + Sync {
     }
     /// Appends bytes to a virtual runtime storage path.
     fn appendBytes(&self, path: &str, content: &[u8]) -> HostResult<()>;
+    /// Makes preceding file writes durable before their recovery intent is removed.
+    /// Each host must flush its backing storage without reading or rewriting the file.
+    fn flushFile(&self, path: &str) -> HostResult<()>;
     /// Deletes a virtual runtime storage entry.
     fn delete(&self, path: &str, recursive: bool) -> HostResult<()>;
     /// Checks whether a virtual runtime storage entry exists.
     fn exists(&self, path: &str) -> HostResult<bool>;
-    /// Lists entries under a virtual runtime storage prefix.
+    /// Lists committed logical entries under a virtual runtime storage prefix.
+    /// Host-owned write staging files are private and must not be exposed.
     fn list(&self, prefix: &str) -> HostResult<Vec<RuntimeStorageEntry>>;
 }
 
@@ -1996,17 +2039,54 @@ pub type HostRuntimeTurnFuture = Pin<Box<dyn Future<Output = HostResult<()>> + S
 pub type HostJavaScriptAsyncJsonCallback =
     Arc<dyn Fn(u64, Vec<Value>) -> HostResult<()> + Send + Sync + 'static>;
 
-/// Handles a synchronous host operation using owned JSON-compatible arguments and results.
-pub type HostJavaScriptJsonCallback =
-    Arc<dyn Fn(Vec<Value>) -> HostResult<Value> + Send + Sync + 'static>;
+/// Owns an argument independently of the JavaScript heap that produced it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HostJavaScriptValue {
+    Json(Value),
+    Buffer(bytes::Bytes),
+}
 
-/// Supplies one interrupt predicate to a host-owned JavaScript runtime.
-pub type HostJavaScriptInterruptHandler = Arc<dyn Fn() -> bool + Send + Sync + 'static>;
+impl HostJavaScriptValue {
+    /// Requires a structured value without converting binary ownership into a value tree.
+    pub fn into_json(self) -> HostResult<Value> {
+        match self {
+            Self::Json(value) => Ok(value),
+            Self::Buffer(_) => Err(HostError::new("This Host operation requires a structured value")),
+        }
+    }
+
+    /// Borrows a structured argument without copying it.
+    pub fn as_json(&self) -> Option<&Value> {
+        match self { Self::Json(value) => Some(value), Self::Buffer(_) => None }
+    }
+}
+
+impl From<Value> for HostJavaScriptValue {
+    /// Preserves the ownership of an existing structured value.
+    fn from(value: Value) -> Self { Self::Json(value) }
+}
+
+impl PartialEq<Value> for HostJavaScriptValue {
+    /// Compares structured arguments without treating buffers as structured values.
+    fn eq(&self, value: &Value) -> bool { self.as_json() == Some(value) }
+}
+
+/// Handles a synchronous operation with structured values or transferred binary ownership.
+pub type HostJavaScriptCallback =
+    Arc<dyn Fn(Vec<HostJavaScriptValue>) -> HostResult<Value> + Send + Sync + 'static>;
 
 /// Owns one concrete JavaScript runtime created by the active platform host.
 pub trait HostJavaScriptRuntime {
     /// Executes shared trusted bootstrap bytecode in this runtime's independent global scope.
     fn evaluateHostJavaScriptBootstrap(&mut self, source: &'static str) -> HostResult<()>;
+
+    /// Installs a Function-constructor equivalent with fixed parameter names.
+    /// Hosts may reuse compiled bytes; every invocation creates a function in this runtime only.
+    fn registerHostJavaScriptFunctionConstructor(
+        &mut self,
+        name: &str,
+        parameters: &[&str],
+    ) -> HostResult<()>;
 
     /// Evaluates one script without reading its return value.
     fn evaluateHostJavaScriptVoid(&mut self, scriptName: &str, script: &str) -> HostResult<()>;
@@ -2021,11 +2101,8 @@ pub trait HostJavaScriptRuntime {
     /// Executes every JavaScript job currently ready in this runtime.
     fn executePendingHostJavaScriptJobs(&mut self) -> HostResult<()>;
 
-    /// Replaces the interrupt predicate used by the current JavaScript execution.
-    fn setHostJavaScriptInterruptHandler(
-        &mut self,
-        handler: Option<HostJavaScriptInterruptHandler>,
-    ) -> HostResult<()>;
+    /// Provides the event-driven execution scope owned by this realm.
+    fn interruptController(&self) -> Arc<dyn HostJavaScriptInterruptController>;
 
     /// Calls a lifecycle function with structured arguments and returns its structured result.
     fn callHostJavaScriptFunction(&mut self, name: &str, arguments: &[Value]) -> HostResult<Value>;
@@ -2039,21 +2116,23 @@ pub trait HostJavaScriptRuntime {
     ) -> HostResult<()>;
 
     /// Settles a Promise on its owning executor exactly once; cancelled ids are ignored.
+    /// Transfers ownership of the result so the host can reuse its allocations after
+    /// fully materializing the JavaScript value without cloning the Rust tree.
     fn settleHostJavaScriptPromise(
         &mut self,
         id: u64,
-        value: &Value,
+        value: Value,
         reject: bool,
     ) -> HostResult<()>;
 
-    /// Releases the Promise handles owned by the cancelled execution scope.
+    /// Rejects the cancelled scope's pending Promises so JavaScript cleanup can run.
     fn cancelHostJavaScriptPromises(&mut self, scope: &str) -> HostResult<()>;
 
     /// Registers a required synchronous structured binding without JSON text transport.
-    fn registerHostJavaScriptJsonFunction(
+    fn registerHostJavaScriptFunction(
         &mut self,
         name: &str,
-        callback: HostJavaScriptJsonCallback,
+        callback: HostJavaScriptCallback,
     ) -> HostResult<()>;
 }
 
@@ -2101,61 +2180,13 @@ pub type HostJavaScriptRuntimeStateAsyncTask = Box<
 pub type HostJavaScriptRuntimeStateOutputFuture =
     Pin<Box<dyn Future<Output = HostResult<HostJavaScriptRuntimeStateOutput>> + 'static>>;
 
-struct HostJavaScriptExecutionInterruptState {
-    deadlineMillis: u128,
-    cancelled: AtomicBool,
-    timedOut: AtomicBool,
-}
-
-/// Controls one exact host-owned JavaScript execution deadline.
-#[derive(Clone)]
-pub struct HostJavaScriptExecutionInterrupt {
-    state: Arc<HostJavaScriptExecutionInterruptState>,
-}
-
-impl HostJavaScriptExecutionInterrupt {
-    /// Creates one interrupt with an absolute deadline derived from milliseconds.
-    pub fn new(timeoutMillis: u64) -> HostResult<Self> {
-        if timeoutMillis == 0 {
-            return Err(HostError::new(
-                "JavaScript execution timeout must be greater than zero",
-            ));
-        }
-        let timeout = Duration::from_millis(timeoutMillis);
-        let nowMillis = crate::TimeUtils::currentTimeMillisU128();
-        let deadlineMillis = nowMillis
-            .checked_add(timeout.as_millis())
-            .ok_or_else(|| HostError::new("JavaScript execution deadline exceeds clock range"))?;
-        Ok(Self {
-            state: Arc::new(HostJavaScriptExecutionInterruptState {
-                deadlineMillis,
-                cancelled: AtomicBool::new(false),
-                timedOut: AtomicBool::new(false),
-            }),
-        })
-    }
-
-    /// Requests interruption of the execution owning this token.
-    pub fn interrupt(&self) {
-        self.state.cancelled.store(true, Ordering::Release);
-    }
-
-    /// Returns whether the JavaScript runtime must stop the current execution.
-    pub fn shouldInterrupt(&self) -> bool {
-        if self.state.cancelled.load(Ordering::Acquire) {
-            return true;
-        }
-        if crate::TimeUtils::currentTimeMillisU128() >= self.state.deadlineMillis {
-            self.state.timedOut.store(true, Ordering::Release);
-            return true;
-        }
-        false
-    }
-
-    /// Returns whether the execution crossed its configured deadline.
-    pub fn didTimeOut(&self) -> bool {
-        self.state.timedOut.load(Ordering::Acquire)
-    }
+/// Identifies affine JavaScript workloads whose synchronous dependencies require independent scheduling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostJavaScriptRuntimeStateKind {
+    /// Runs plugin functions, callbacks, and their Promise continuations.
+    Execution,
+    /// Lowers source without invoking plugin code or waiting for an execution state.
+    Compilation,
 }
 
 /// Creates and schedules platform-owned JavaScript runtimes and their affine state.
@@ -2167,6 +2198,7 @@ pub trait HostJavaScriptRuntimeHost: Send + Sync {
     fn createHostJavaScriptRuntimeState(
         &self,
         taskName: &str,
+        kind: HostJavaScriptRuntimeStateKind,
         factory: HostJavaScriptRuntimeStateFactory,
     ) -> HostResult<HostJavaScriptRuntimeStateHandle>;
 
@@ -2174,15 +2206,23 @@ pub trait HostJavaScriptRuntimeHost: Send + Sync {
     fn executeHostJavaScriptRuntimeStateTask(
         &self,
         handle: HostJavaScriptRuntimeStateHandle,
-        timeoutMillis: u64,
+        interrupt: HostJavaScriptExecutionInterrupt,
         task: HostJavaScriptRuntimeStateTask,
     ) -> HostResult<HostJavaScriptRuntimeStateOutput>;
+
+    /// Enqueues one synchronous continuation directly on its owner without waiting for completion.
+    fn enqueueHostJavaScriptRuntimeStateTask(
+        &self,
+        handle: HostJavaScriptRuntimeStateHandle,
+        interrupt: HostJavaScriptExecutionInterrupt,
+        task: HostJavaScriptRuntimeStateTask,
+    ) -> HostResult<()>;
 
     /// Executes one asynchronous operation against an affine JavaScript runtime state.
     fn executeHostJavaScriptRuntimeStateAsyncTask(
         &self,
         handle: HostJavaScriptRuntimeStateHandle,
-        timeoutMillis: u64,
+        interrupt: HostJavaScriptExecutionInterrupt,
         task: HostJavaScriptRuntimeStateAsyncTask,
     ) -> HostJavaScriptRuntimeStateOutputFuture;
 
@@ -2199,6 +2239,9 @@ pub trait HostRuntimeTaskSchedulerHost: Send + Sync {
     fn monotonicTimeMillis(&self) -> HostResult<u64>;
 
     /// Schedules a named one-shot runtime task through the platform execution mechanism.
+    ///
+    /// The closure is synchronous, so hosts with dedicated blocking capacity should
+    /// execute it there instead of on the coordination executor.
     fn scheduleHostRuntimeTask(&self, taskName: &str, task: HostRuntimeTask) -> HostResult<()>;
 
     /// Schedules a named asynchronous runtime task through the platform executor.
@@ -2207,6 +2250,20 @@ pub trait HostRuntimeTaskSchedulerHost: Send + Sync {
         taskName: &str,
         task: HostRuntimeAsyncTask,
     ) -> HostResult<()>;
+
+    /// Schedules an asynchronous task that may perform blocking work.
+    ///
+    /// Hosts with dedicated blocking capacity must isolate these tasks from the
+    /// coordination executor, so one blocked call cannot delay runtime deadlines,
+    /// promise pumps, notification dispatch, or engine steps. Platforms without a
+    /// separate blocking executor may reuse the asynchronous executor.
+    fn scheduleHostRuntimeBlockingAsyncTask(
+        &self,
+        taskName: &str,
+        task: HostRuntimeAsyncTask,
+    ) -> HostResult<()> {
+        self.scheduleHostRuntimeAsyncTask(taskName, task)
+    }
 
     /// Schedules a nonblocking task on the host's reusable affine executor.
     /// Callers must not block the executor or rely on exclusive thread-local state.
@@ -2985,18 +3042,11 @@ mod tests {
         }
     }
 
-    /// Verifies that OpenHarmony does not advertise unimplemented OCR capability.
+    /// Verifies that OpenHarmony advertises its packaged offline OCR implementation.
     #[test]
-    fn ohosDescriptorExcludesUnimplementedCapabilities() {
+    fn ohosDescriptorIncludesOfflineOcr() {
         let descriptor = HostEnvironmentDescriptor::ohos();
-        let actual = descriptorCapabilitySet(&descriptor);
-        let unimplemented = idSet(&["ocr.recognition"]);
-        let advertised: Vec<_> = actual.intersection(&unimplemented).cloned().collect();
-
-        assert!(
-            advertised.is_empty(),
-            "OpenHarmony host descriptor advertises unimplemented capabilities: {advertised:?}"
-        );
+        assert!(descriptorCapabilitySet(&descriptor).contains("ocr.recognition"));
     }
 
     /// Verifies that OpenHarmony onboarding exposes required runtime permissions.
@@ -3015,6 +3065,31 @@ mod tests {
             missing.is_empty(),
             "OpenHarmony onboarding requirements are missing ids: {missing:?}"
         );
+    }
+
+    /// Verifies the actual SDK payload survives validation and owner serialization.
+    #[test]
+    fn composeDslFilePickerMatchesSharedProtocol() {
+        let cases: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/compose_file_picker.json"
+        ))
+        .expect("file-picker contract must be valid JSON");
+        for case in cases["valid"].as_array().expect("valid cases") {
+            let request = ComposeDslFilePickerRequest::fromValue(case["request"].clone())
+                .expect("shared SDK file-picker request must be accepted");
+            let owner = serde_json::to_value(&request).expect("owner request must serialize");
+            assert_eq!(owner, case["ownerRequest"], "{}", case["name"]);
+            let decoded: ComposeDslFilePickerRequest = serde_json::from_value(owner)
+                .expect("serialized owner request must retain all fields");
+            assert_eq!(decoded, request);
+        }
+        for case in cases["invalid"].as_array().expect("invalid cases") {
+            assert!(
+                ComposeDslFilePickerRequest::fromValue(case["request"].clone()).is_err(),
+                "{}",
+                case["name"]
+            );
+        }
     }
 
     /// Verifies that omitted options produce the documented document selection request.

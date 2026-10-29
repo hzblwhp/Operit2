@@ -660,12 +660,13 @@ impl OpenAIProvider {
         let provider_model = self.provider_model();
         let endpoint = self.diagnosticEndpoint()?;
         let started_at = currentTimeMillis();
-        AppLogger::i(
+        AppLogger::v_with_level(
             PROVIDER_TRANSPORT_LOG_TAG,
             &format!(
                 "provider.http.request.start providerModel={} endpoint={}",
                 provider_model, endpoint
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         let receiver = self.cancel_receiver();
         let observedGeneration = *receiver.borrow();
@@ -677,7 +678,7 @@ impl OpenAIProvider {
             _ = Self::waitForCancellation(receiver, observedGeneration) => Err(AiServiceError::RequestCancelled),
         };
         match &result {
-            Ok(response) => AppLogger::i(
+            Ok(response) => AppLogger::v_with_level(
                 PROVIDER_TRANSPORT_LOG_TAG,
                 &format!(
                     "provider.http.response.headers providerModel={} endpoint={} status={} elapsedMs={}",
@@ -686,6 +687,7 @@ impl OpenAIProvider {
                     response.status(),
                     currentTimeMillis().saturating_sub(started_at),
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_3,
             ),
             Err(error) => AppLogger::e(
                 PROVIDER_TRANSPORT_LOG_TAG,
@@ -848,17 +850,19 @@ impl OpenAIProvider {
             if message_object.get("role").and_then(Value::as_str) != Some("assistant") {
                 continue;
             }
-            let Some(content) = message_object
-                .get("content")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-            else {
-                message_object.insert("reasoning_content".to_string(), json!(""));
-                continue;
-            };
-            let (clean_content, reasoning) = ChatUtils::extract_thinking_content(&content);
-            message_object.insert("reasoning_content".to_string(), json!(reasoning));
-            message_object.insert("content".to_string(), json!(clean_content));
+            match message_object.remove("content") {
+                Some(Value::String(content)) => {
+                    let (clean_content, reasoning) = ChatUtils::extract_thinking_content(&content);
+                    message_object.insert("reasoning_content".to_string(), json!(reasoning));
+                    message_object.insert("content".to_string(), json!(clean_content));
+                }
+                other => {
+                    message_object.insert("reasoning_content".to_string(), json!(""));
+                    if let Some(content) = other {
+                        message_object.insert("content".to_string(), content);
+                    }
+                }
+            }
         }
     }
 
@@ -961,15 +965,25 @@ impl OpenAIProvider {
             tools_json,
             preserve_think_in_history,
         );
-        let mut messages_array =
-            serde_json::from_str(&StructuredToolCallBridge::buildMessagesJsonForProvider(
-                &provider_ready_history,
-                preserve_think_in_history,
-                use_tool_call,
-            ))
-            .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?;
+        let mut messages_array = StructuredToolCallBridge::buildMessagesValueFromCompiled(
+            provider_ready_history,
+            preserve_think_in_history,
+            use_tool_call,
+        );
         self.rewrite_message_media_content(&mut messages_array);
         Ok((messages_array, token_count))
+    }
+
+    /// Takes ownership of a message's string content field, restoring any other value untouched.
+    fn take_string_content(message: &mut Value) -> Option<String> {
+        let object = message.as_object_mut()?;
+        match object.remove("content")? {
+            Value::String(text) => Some(text),
+            other => {
+                object.insert("content".to_string(), other);
+                None
+            }
+        }
     }
 
     /// Rewrites media links and preserves history images through valid user inputs.
@@ -994,15 +1008,10 @@ impl OpenAIProvider {
                 );
                 tool_image_sources.clear();
             }
-            let content = message
-                .get("content")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
+            let content = Self::take_string_content(&mut message);
             if let (Some(content), Some(object)) = (&content, message.as_object_mut()) {
-                object.insert(
-                    "content".to_string(),
-                    self.build_content_field(content, &role),
-                );
+                let value = self.build_content_field(content, &role);
+                object.insert("content".to_string(), value);
             }
             let has_tool_calls = message
                 .get("tool_calls")
@@ -1088,7 +1097,7 @@ impl OpenAIProvider {
         let has_images = MediaLinkParser::has_image_links(&text);
         let has_media = MediaLinkParser::has_media_links(&text);
         if !has_images && !has_media {
-            return json!(text);
+            return Value::String(text);
         }
 
         let allow_user_rich_content = canCarryUserRichContent(role);
@@ -1124,7 +1133,7 @@ impl OpenAIProvider {
         let has_supported_media = (self.supports_audio && !audio_links.is_empty())
             || (self.supports_video && !video_links.is_empty());
 
-        let mut text_without_links = text.clone();
+        let mut text_without_links = text;
         if has_media {
             text_without_links = MediaLinkParser::remove_media_links(&text_without_links);
         }
@@ -1295,13 +1304,14 @@ impl OpenAIProvider {
                 received_byte_count += bytes.len();
                 if !received_first_byte {
                     received_first_byte = true;
-                    AppLogger::i(
+                    AppLogger::v_with_level(
                         PROVIDER_TRANSPORT_LOG_TAG,
                         &format!(
                             "provider.http.response.firstByte providerModel={} elapsedMs={}",
                             provider_model,
                             currentTimeMillis().saturating_sub(stream_started_at),
                         ),
+                        operit_util::AppLogger::VERBOSE_LEVEL_3,
                     );
                 }
                 state.pending_bytes.extend_from_slice(&bytes);
@@ -1343,7 +1353,7 @@ impl OpenAIProvider {
 
             self.set_estimated_output_tokens(&emitter.received_content);
             self.apply_token_counts(state.usage.clone());
-            AppLogger::i(
+            AppLogger::v_with_level(
                 PROVIDER_TRANSPORT_LOG_TAG,
                 &format!(
                     "provider.http.response.stream.done providerModel={} elapsedMs={} bytes={} chunks={} contentDeltas={} contentBytes={} nativeToolCallDeltas={}",
@@ -1355,6 +1365,7 @@ impl OpenAIProvider {
                     state.regularContentBytes,
                     state.nativeToolCallDeltaCount,
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
             Ok(())
         }
@@ -1472,7 +1483,7 @@ impl OpenAIProvider {
                 accumulated["function"]["name"] = json!(name);
             }
             if state.toolCallState.nameEmitted.get(&index).copied() != Some(true) {
-                AppLogger::d(
+                AppLogger::v_with_level(
                     PROVIDER_TRANSPORT_LOG_TAG,
                     &format!(
                         "provider.stream.tool_call.start providerModel={} index={} tool={} precedingContentDeltas={} precedingContentBytes={}",
@@ -1482,6 +1493,7 @@ impl OpenAIProvider {
                         state.regularContentDeltaCount,
                         state.regularContentBytes,
                     ),
+                    operit_util::AppLogger::VERBOSE_LEVEL_3,
                 );
                 if let Some(callback) = on_tool_invocation {
                     callback(name.to_string());
@@ -2534,6 +2546,9 @@ impl OpenAIProvider {
             let enable_retry = request.enable_retry;
             let on_non_fatal_error = request.on_non_fatal_error.clone();
             let on_tool_invocation = request.on_tool_invocation.clone();
+            let request_body_bytes = serde_json::to_vec(&request_body)
+                .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?;
+            let http_client = reqwest::Client::new();
             defaultHostRuntimeTaskSchedulerHost()
                 .scheduleHostRuntimeAsyncTask(
                     "openai-response-stream",
@@ -2544,20 +2559,21 @@ impl OpenAIProvider {
                         let mut retryCount = 0;
                         let result = loop {
                             let attempt = retryCount + 1;
-                            AppLogger::i(
+                            AppLogger::v_with_level(
                                 PROVIDER_TRANSPORT_LOG_TAG,
                                 &format!(
                                     "provider.stream.attempt.start providerModel={} attempt={}",
                                     provider.provider_model(),
                                     attempt,
                                 ),
+                                operit_util::AppLogger::VERBOSE_LEVEL_3,
                             );
                             let response = provider
                                 .sendHttpRequest(
-                                    reqwest::Client::new()
+                                    http_client
                                         .post(&api_endpoint)
                                         .headers(headers.clone())
-                                        .json(&request_body),
+                                        .body(request_body_bytes.clone()),
                                 )
                                 .await;
                             let result = match response {
@@ -2660,17 +2676,19 @@ impl OpenAIProvider {
         enable_retry: bool,
         on_non_fatal_error: Option<Arc<dyn Fn(String) + Send + Sync>>,
     ) -> Result<Vec<String>, AiServiceError> {
+        let request_body_bytes = serde_json::to_vec(&request_body)
+            .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?;
         let response = {
             let maxRetries = super::LlmRetryPolicy::LlmRetryPolicy::MAX_RETRY_ATTEMPTS;
+            let client = reqwest::Client::new();
             let mut retryCount = 0;
             loop {
-                let client = reqwest::Client::new();
                 let response = match self
                     .sendHttpRequest(
                         client
                             .post(&api_endpoint)
                             .headers(headers.clone())
-                            .json(&request_body),
+                            .body(request_body_bytes.clone()),
                     )
                     .await
                 {

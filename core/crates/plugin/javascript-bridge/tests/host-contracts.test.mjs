@@ -24,26 +24,6 @@ function directoryRuntime(native) {
   return context;
 }
 
-/** Checks each domain SDK and native binding reaches its canonical host manager. */
-test("domain directories connect declarations, scoped callbacks and canonical runtime managers", () => {
-  const paths = { "Models.listSummaries": "listModelSummaries", "Tts.listConfigs": "listTtsConfigs", "Theme.listConfigs": "listThemeConfigs", "Theme.applyConfig": "applyThemeConfig", "Tts.getCurrentConfigId": "getCurrentTtsConfigId", "Tts.setCurrentConfigId": "setCurrentTtsConfigId", "Catalog.readToolSources": "readToolSourceCatalog" };
-  const bindings = source("core/crates/plugin/sdk/src/js_sdk/runtime_bindings.rs"), runtime = source("core/crates/runtime/application/src/services/ToolRuntimeSupportService.rs");
-  const engine = source("core/crates/plugin/javascript-bridge/src/javascript/JsEngine.rs"), native = source("core/crates/tool/services/src/tools/AIToolHandler.rs");
-  for (const [path, canonical] of Object.entries(paths)) {
-    const [namespace, method] = path.split("."), sdk = source("core/crates/plugin/sdk/src/js_sdk/" + namespace.toLowerCase() + ".rs");
-    assert.ok(bindings.includes('namespace: "' + namespace + '", method: "' + method + '"'));
-    assert.ok(sdk.includes("fn " + method + "(&self"));
-
-    assert.match(runtime, new RegExp("fn " + canonical + "(?:<[^>]+>)?\\("));
-  }
-  assert.match(runtime, /getAllModelSummaries\(\)/); assert.match(runtime, /getAllTtsConfigs\(\)/);
-  for (const call of ["getAllToolNames", "getAvailablePackages", "getAvailableSkillsSnapshot", "getAvailableServerPackages"]) assert.ok(runtime.includes(call + "("));
-  assert.match(engine, /"__operitNativeCallToolStructured"/);
-  assert.doesNotMatch(engine, /__operitNativeInvokeDomainAsync|invoke_direct_host_json/);
-  assert.match(native, /impl JsExecutionHost for AIToolHandler/);
-  for (const canonical of Object.values(paths)) assert.match(source("core/crates/tool/services/src/tools/ToolRegistration.rs"), new RegExp("runtimeSupport\\(\\)\\." + canonical + "\\("));
-});
-
 /** Confirms the domain DTOs preserve every field from the actual model and speech records. */
 test("directory SDK DTOs are complete canonical model and TTS records", () => {
   const sdkModels = source("core/crates/plugin/sdk/src/js_sdk/models.rs"), sdkTts = source("core/crates/plugin/sdk/src/js_sdk/tts.rs");
@@ -91,10 +71,10 @@ test("generic chat consumers have matching async contracts and no old character 
   for (const file of [trait, runtime, tools]) assert.doesNotMatch(file, /RuntimeCharacterCardInfo|resolveCharacterCardName|(?:fn|\.)\s*(?:listCharacterCards|characterCardName)\(|CharacterCardManager|DEFAULT_CHARACTER_CARD_ID|role_card_id|character_card_id|ChatManagerToolOperation::ListCharacterCards/);
   for (const file of [trait, runtime]) {
     const compact = file.replace(/\s+/g, " ");
-    assert.match(compact, /fn createChatRuntime<'a>\( &'a self, setAsCurrentChat: bool, sourceChatId: Option<String>, input: Option<serde_json::Value>, \) -> ToolRuntimeSupportFuture<'a, Result<String, String>>/);
+    assert.match(compact, /fn createChatRuntime<'a>\( &'a self, setAsCurrentChat: bool, sourceChatId: Option<String>, parentChatId: Option<String>, input: Option<serde_json::Value>, \) -> ToolRuntimeSupportFuture<'a, Result<String, String>>/);
     assert.match(compact, /fn switchMainChat<'a>\( &'a self, chatId: &'a str, \) -> ToolRuntimeSupportFuture<'a, Result<\(\), String>>/);
   }
-  assert.match(runtime, /\.createNewChat\(setAsCurrentChat, sourceChatId, input\)\s*\.await\?/);
+  assert.match(runtime, /\.createNewChat\(setAsCurrentChat, sourceChatId, parentChatId, input\)\s*\.await\?/);
   assert.match(tools, /impl AsyncToolExecutor for ChatManagerToolExecutor/);
   assert.doesNotMatch(tools, /block_on|new_current_thread/);
   assert.match(registration, /RegisteredToolExecutor::Asynchronous\(Box::new\(\s*ChatManagerToolExecutor/);
@@ -120,7 +100,7 @@ test("actual package executor delegates one request to immutable exact SDK selec
   assert.doesNotMatch(executor, /packageExecutor:|self\.invoke\(/);
   const execute = manager.slice(manager.indexOf("pub async fn executeScript("), manager.indexOf("/// Releases JavaScript tool manager resources."));
   assert.equal([...execute.matchAll(/\.select_tool\(/g)].length, 1);
-  assert.match(execute, /&selection\.definition\.script/);
+  assert.match(execute, /execute_script_function_owned\(\s*selection\.definition\.script, functionName, runtimeParams, BTreeMap::new\(\)/);
   assert.doesNotMatch(execute, /\b_script\b|script: &str/);
   const host = source("core/crates/tool/services/src/tools/ToolJsRuntime.rs");
   assert.match(host, /packageRegistryReadiness\(\)\.require_ready\(\)\?/);

@@ -17,29 +17,15 @@ use operit_util::AppLogger::AppLogger;
 use operit_host_api::HostRuntimeTaskSchedulerHost;
 use serde_json::Value;
 
-const TOOLPKG_SCRIPT_TIMEOUT_SECONDS: u64 = 60;
-/// Enables optional target and JavaScript IPC timing diagnostics.
-const TOOLPKG_IPC_TIMING_ENABLED: bool = false;
 const TOOLPKG_IPC_DISPATCH_FUNCTION_NAME: &str = "__operit_toolpkg_runtime_dispatch__";
 const TOOLPKG_IPC_DISPATCH_FUNCTION_SOURCE: &str = r#"
 async function(params) {
-    var dispatch = globalThis.__operitInvokeToolPkgIpcLocal;
-    if (typeof dispatch !== 'function') {
-        throw new Error('ToolPkg.ipc runtime is unavailable in target context');
-    }
     var payload = params.__operit_toolpkg_ipc_payload;
-    var channel = params.__operit_toolpkg_ipc_channel.trim();
+    var channel = params.__operit_toolpkg_ipc_channel;
     if (channel === '$route') return await globalThis.__operitInvokeToolPkgRouteLocal(payload);
-    if (!channel) {
-        throw new Error('ToolPkg.ipc channel is required');
-    }
-    return await dispatch(channel, payload, {
-        channel: channel,
-        callerContextKey: params.__operit_toolpkg_ipc_caller_context_key,
-        currentContextKey: params.__operit_execution_context_key,
-        currentRuntime: params.__operit_toolpkg_runtime_kind,
-        packageTarget: params.__operit_ui_package_name
-    });
+    return await globalThis.__operitInvokeToolPkgIpcLocal(
+        channel, payload, params.__operit_toolpkg_ipc_caller_context_key
+    );
 }
 "#;
 
@@ -66,7 +52,10 @@ impl PackageManagerJsRuntime {
 impl JsPackageRuntime for PackageManagerJsRuntime {
     /// Returns the current host language for package JavaScript.
     fn package_language(&self) -> Result<String, String> {
-        let language = LocaleUtils::getCurrentLanguage(&self.tool_handler.getContext(), "")?;
+        let host = self.tool_handler.systemOperationHost()
+            .ok_or("SystemOperationHost is required to resolve system language")?;
+        let language = host.getSystemLanguageCode().map_err(|error| error.to_string())?;
+        let language = LocaleUtils::resolve_supported_language_code(&language);
         let language = language.trim();
         if language.is_empty() {
             return Err("Host returned an empty package language".to_string());
@@ -85,14 +74,10 @@ impl JsPackageRuntime for PackageManagerJsRuntime {
             .lock()
             .map_err(|error| error.to_string())?;
         manager.packageRegistryReadiness().require_ready()?;
-        let package = manager
-            .getEffectivePackageTools(package_name)
-            .ok_or_else(|| format!("Package not registered: {package_name}"))?;
         if !manager.isPackageEnabled(package_name) {
             return Err(format!("Package is disabled: {package_name}"));
         }
-        let definition =
-            operit_plugin_sdk::javascript::select_registered_package_tool(package, function_name)?;
+        let definition = manager.selectPackageTool(package_name, function_name)?;
         Ok(operit_plugin_sdk::javascript::JsPackageToolSelection {
             definition,
             active_state_id: manager.getActivePackageStateId(package_name),
@@ -106,12 +91,15 @@ impl JsPackageRuntime for PackageManagerJsRuntime {
         context_key: &str,
         container_package_name: &str,
     ) -> Result<Arc<dyn JsExecutionEngine>, String> {
-        let manager = self
+        let engines = self
             .package_manager
             .lock()
-            .expect("package manager mutex poisoned")
+            .map_err(|error| error.to_string())?
+            .toolPkgManager()
             .clone();
-        manager.getToolPkgExecutionEngine(context_key, container_package_name)
+        // Only the Arc-backed engine registry crosses the lock boundary. Engine
+        // creation can re-enter the package catalog, so never hold its lock here.
+        engines.getToolPkgExecutionEngine(context_key, container_package_name)
     }
 }
 
@@ -230,6 +218,7 @@ pub fn resolveJsToolName(
 
 /// Captures non-overlapping target phases using one Host monotonic clock.
 struct IpcTargetTiming {
+    enabled: bool,
     scheduler: Arc<dyn HostRuntimeTaskSchedulerHost>,
     trace_id: String,
     started: u64,
@@ -240,7 +229,7 @@ struct IpcTargetTiming {
 impl IpcTargetTiming {
     /// Captures a phase boundary only while IPC timing is enabled.
     fn mark(&mut self, phase: &'static str) -> Result<(), String> {
-        if !TOOLPKG_IPC_TIMING_ENABLED {
+        if !self.enabled {
             return Ok(());
         }
         let now = self.scheduler.monotonicTimeMillis().map_err(|error| error.to_string())?;
@@ -250,7 +239,7 @@ impl IpcTargetTiming {
     }
 }
 
-/// Invokes one IPC target with optional failure timing diagnostics.
+/// Invokes one IPC target with opt-in target and JavaScript stage diagnostics.
 #[allow(non_snake_case)]
 pub async fn invokeToolPkgIpc(
     toolHandler: &AIToolHandler,
@@ -258,27 +247,36 @@ pub async fn invokeToolPkgIpc(
 ) -> Result<Value, String> {
     let scheduler = toolHandler.getContext().hostRuntimeTaskSchedulerHost
         .ok_or("HostRuntimeTaskSchedulerHost is required for ToolPkg IPC timing")?;
-    let started = if TOOLPKG_IPC_TIMING_ENABLED {
+    let enabled = std::env::var_os("OPERIT_PROFILE_COMPOSE_STAGES").is_some();
+    let started = if enabled {
         scheduler.monotonicTimeMillis().map_err(|error| error.to_string())?
     } else {
         0
     };
     let mut timing = IpcTargetTiming {
+        enabled,
         scheduler,
-        trace_id: uuid::Uuid::new_v4().simple().to_string(),
+        trace_id: if enabled { uuid::Uuid::new_v4().simple().to_string() } else { String::new() },
         started,
         previous: started,
-        phases: Vec::with_capacity(14),
+        phases: Vec::new(),
     };
-    let package = request.package_target.clone();
-    let channel = request.channel.clone();
+    let identity = enabled.then(|| (request.package_target.clone(), request.channel.clone()));
     let result = invokeToolPkgIpcMeasured(toolHandler, request, &mut timing).await;
-    if TOOLPKG_IPC_TIMING_ENABLED {
+    if let Some((package, channel)) = identity {
         timing.mark("finishMs")?;
+        let phases = timing.phases.iter()
+            .map(|(phase, elapsed)| format!("{phase}={elapsed}"))
+            .collect::<Vec<_>>().join(" ");
+        if result.is_ok() {
+            eprintln!(
+                "event=compose_ipc_timing kind=target traceId={} operation={} wallMillis={} elapsedMs={} {}",
+                timing.trace_id, channel,
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
+                timing.previous.saturating_sub(timing.started), phases,
+            );
+        }
         if let Err(error) = &result {
-            let phases = timing.phases.iter()
-                .map(|(phase, elapsed)| format!("{phase}={elapsed}"))
-                .collect::<Vec<_>>().join(" ");
             AppLogger::e("ToolPkg", &format!(
                 "event=toolpkg_ipc_target traceId={} package={} channel={} elapsedMs={} outcome=error {} error={error}",
                 timing.trace_id, package, channel, timing.previous.saturating_sub(timing.started), phases,
@@ -405,7 +403,7 @@ async fn invokeToolPkgIpcMeasured(
     }
     timing.mark("engineValidateMs")?;
     let mut params = BTreeMap::new();
-    if TOOLPKG_IPC_TIMING_ENABLED {
+    if timing.enabled {
         params.insert("__operit_ipc_trace_id".to_string(), Value::String(timing.trace_id.clone()));
     }
     params.insert(
@@ -440,11 +438,6 @@ async fn invokeToolPkgIpcMeasured(
         "__operit_inline_function_source".to_string(),
         Value::String(TOOLPKG_IPC_DISPATCH_FUNCTION_SOURCE.trim().to_string()),
     );
-    let persistent = channel == "$route"
-        && matches!(
-            request.payload.get("op").and_then(Value::as_str),
-            Some("next" | "pushItem" | "pushClose")
-        );
     params.insert(
         "__operit_toolpkg_ipc_channel".to_string(),
         Value::String(channel),
@@ -485,11 +478,14 @@ async fn invokeToolPkgIpcMeasured(
         }
     };
     timing.mark("paramsMs")?;
-    let execution = if persistent {
-        engine.execute_script_function_until_cancelled(script, functionName, params, BTreeMap::new())
-    } else {
-        engine.execute_script_function_async(script, functionName, params, BTreeMap::new(), None, true, TOOLPKG_SCRIPT_TIMEOUT_SECONDS * 1_000)
-    };
+    let execution = engine.execute_script_function_async(
+        script,
+        functionName,
+        params,
+        BTreeMap::new(),
+        None,
+        true,
+    );
     let result = execution.await;
     timing.mark("executeMs")?;
     let result = result.map_err(|error| error.to_string())?;

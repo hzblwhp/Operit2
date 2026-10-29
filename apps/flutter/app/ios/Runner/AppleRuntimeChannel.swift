@@ -7,7 +7,6 @@ import Flutter
 import Foundation
 import Network
 import UserNotifications
-import Vision
 import UIKit
 
 final class AppleRuntimeChannel: NSObject, UIDocumentInteractionControllerDelegate {
@@ -583,7 +582,10 @@ final class AppleRuntimeChannel: NSObject, UIDocumentInteractionControllerDelega
       let runtimeRoot = try absoluteDirectory(from: arguments["runtimeRoot"] ?? nil, label: "runtimeRoot")
       let workspaceRoot = try absoluteDirectory(from: arguments["workspaceRoot"] ?? nil, label: "workspaceRoot")
       if handle != nil {
-        if configuredRuntimeRoot == runtimeRoot && configuredWorkspaceRoot == workspaceRoot {
+        // URL equality keeps a trailing slash that appears only after the
+        // directory exists, so the same roots look changed on a second apply.
+        if configuredRuntimeRoot?.path == runtimeRoot.path &&
+            configuredWorkspaceRoot?.path == workspaceRoot.path {
           result(nil)
           return
         }
@@ -1195,14 +1197,7 @@ final class AppleRuntimeChannel: NSObject, UIDocumentInteractionControllerDelega
   }
 
   private func recognizeText(imagePath: String) throws -> String {
-    let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .accurate
-    let handler = VNImageRequestHandler(url: URL(fileURLWithPath: imagePath), options: [:])
-    try handler.perform([request])
-    guard let results = request.results else {
-      return ""
-    }
-    return results.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    try AppleTextRecognizer().recognizeText(imagePath: imagePath)
   }
 
   private func musicPlayback(command: String, payload: [String: Any]) throws -> [String: Any?] {

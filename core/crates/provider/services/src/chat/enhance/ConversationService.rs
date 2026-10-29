@@ -147,7 +147,9 @@ pub trait PromptHistoryHookDispatcher: Send + Sync {
     fn dispatch_prompt_history_hooks(
         &self,
         context: HistoryHookContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HistoryHookContext> + Send + '_>>;
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<HistoryHookContext, String>> + Send + '_>,
+    >;
 }
 
 /// Composes the system prompt used at the start of prepared chat history.
@@ -191,7 +193,7 @@ impl ConversationService {
                 use_english: None,
                 metadata: build_prepare_history_metadata(&request),
             })
-            .await;
+            .await?;
         let effective_chat_history = before_context.chat_history.clone();
         let mut prepared_history = Vec::new();
 
@@ -485,7 +487,8 @@ impl ConversationService {
                 model_parameters: serializedModelParameters.clone(),
                 metadata: baseSummaryMetadata.clone(),
             })
-            .await;
+            .await
+            .map_err(AiServiceError::RequestFailed)?;
         summaryHistory = beforePrepareContext.chat_history;
         systemPrompt = beforePrepareContext.system_prompt.expect(
             "SummaryHookContext.system_prompt must be present after before_prepare_summary_prompt",
@@ -524,7 +527,8 @@ impl ConversationService {
                     metadata
                 },
             })
-            .await;
+            .await
+            .map_err(AiServiceError::RequestFailed)?;
         summaryHistory = beforeSendContext.chat_history;
         systemPrompt = beforeSendContext
             .system_prompt
@@ -598,7 +602,8 @@ impl ConversationService {
                     metadata
                 },
             })
-            .await;
+            .await
+            .map_err(AiServiceError::RequestFailed)?;
         summaryContent = afterGenerateContext.summary_result.expect(
             "SummaryHookContext.summary_result must be present after after_generate_summary",
         );

@@ -73,6 +73,7 @@ impl Drop for ToolPkgExecutionEngineLease {
 /// Tracks live engines and revocation generations under the same registry lock.
 #[derive(Default)]
 struct ToolPkgExecutionEngineRegistry {
+    mainScripts: BTreeMap<String, String>,
     entries: BTreeMap<String, ToolPkgExecutionEngineEntry>,
     packageGenerations: BTreeMap<String, u64>,
     factoryGeneration: u64,
@@ -129,6 +130,7 @@ impl ToolPkgManager {
     pub fn shutdownExecutionEngines(&self) {
         self.removeExecutionEnginesMatching(|_| true, |registry| {
             registry.closed = true;
+            registry.mainScripts.clear();
             registry.factoryGeneration += 1;
         });
     }
@@ -325,7 +327,10 @@ impl ToolPkgManager {
     #[allow(non_snake_case)]
     fn runtimeRevision(&self, runtime: &ToolPkgContainerRuntime) -> Option<u64> {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
-        serde_json::to_vec(runtime).ok()?.hash(&mut hash);
+        let mut metadata = serde_json::to_value(runtime).ok()?;
+        // Localized text uses HashMap; fresh scans must hash identical content identically.
+        metadata.sort_all_objects();
+        serde_json::to_vec(&metadata).ok()?.hash(&mut hash);
         if runtime.sourceType != ToolPkgSourceType::ASSET {
             self.hashSource(&runtime.sourcePath, 0, &mut hash)?;
         }
@@ -446,7 +451,7 @@ impl ToolPkgManager {
         if !enabled || runtime.mainEntry.trim().is_empty() {
             return None;
         }
-        self.readToolPkgResourceText(&runtime, &runtime.mainEntry)
+        self.readToolPkgMainScript(&runtime)
     }
 
     /// Returns the main script of one registered ToolPkg container for runtime IPC dispatch.
@@ -456,7 +461,7 @@ impl ToolPkgManager {
         if runtime.mainEntry.trim().is_empty() {
             return None;
         }
-        self.readToolPkgResourceText(&runtime, &runtime.mainEntry)
+        self.readToolPkgMainScript(&runtime)
     }
 
     /// Reads a text resource from an enabled ToolPkg container or subpackage.
@@ -732,7 +737,10 @@ impl ToolPkgManager {
         }
         self.removeExecutionEnginesMatching(
             |entry| entry.containerPackageName == normalizedContainer,
-            |registry| { *registry.packageGenerations.entry(normalizedContainer.to_string()).or_insert(0) += 1; },
+            |registry| {
+                registry.mainScripts.remove(normalizedContainer);
+                *registry.packageGenerations.entry(normalizedContainer.to_string()).or_insert(0) += 1;
+            },
         );
     }
 
@@ -761,6 +769,31 @@ impl ToolPkgManager {
         for entry in removed {
             entry.engine.destroy();
         }
+    }
+
+    /// Shares the main source for one catalog generation and rejects publication after revocation.
+    #[allow(non_snake_case)]
+    fn readToolPkgMainScript(&self, runtime: &ToolPkgContainerRuntime) -> Option<String> {
+        let containers = self.containers.read().expect("toolpkg container runtime lock poisoned");
+        let registered = containers.get(&runtime.packageName)?;
+        if registered.sourceType != runtime.sourceType || registered.sourcePath != runtime.sourcePath
+            || registered.mainEntry != runtime.mainEntry {
+            return None;
+        }
+        let generation = {
+            let mut registry = self.toolPkgExecutionEngines.lock().expect("toolpkg execution engine mutex poisoned");
+            if registry.closed { return None; }
+            if let Some(script) = registry.mainScripts.get(&runtime.packageName) {
+                return Some(script.clone());
+            }
+            *registry.packageGenerations.entry(runtime.packageName.clone()).or_insert(0)
+        };
+        let script = self.readToolPkgResourceText(runtime, &runtime.mainEntry)?;
+        let mut registry = self.toolPkgExecutionEngines.lock().expect("toolpkg execution engine mutex poisoned");
+        if registry.closed || registry.packageGenerations.get(&runtime.packageName) != Some(&generation) {
+            return None;
+        }
+        Some(registry.mainScripts.entry(runtime.packageName.clone()).or_insert(script).clone())
     }
 
     /// Reads one ToolPkg resource as UTF-8 text.
@@ -849,53 +882,60 @@ fn joinToolPkgSourcePath(sourcePath: &str, entryPath: &str) -> String {
 }
 
 impl ToolPkgHookDispatcher for ToolPkgManager {
-    /// Invokes one ToolPkg hook using its container main script and execution context.
+    /// Preserves typed failures and applies a deadline only to an explicitly timed before hook.
     #[allow(non_snake_case)]
     fn dispatchToolPkgHook(
         &self,
         enabledPackageNames: &[String],
         invocation: ToolPkgHookInvocation,
-    ) -> crate::javascript::JsExecutionCompletion<Result<Option<String>, String>> {
+    ) -> crate::javascript::JsExecutionCompletion<
+        crate::execution_result::JsExecutionResult<Option<String>>,
+    > {
         let prepared = self.prepareToolPkgHook(enabledPackageNames, &invocation);
         Box::pin(async move {
-            let (engine, script, params, _lease) = prepared?;
-            engine
-                .execute_script_function_with_timeout_millis(
-                    &script,
-                    &invocation.functionName,
-                    &params,
-                    &invocation.envOverrides,
-                    invocation.onIntermediateResult,
-                    invocation.dispatchIntermediateOnMain,
-                    invocation.timeoutMillis,
-                )
-                .await
-                .map_err(|error| error.to_string())
+            let (engine, script, params, _lease) =
+                prepared.map_err(crate::execution_result::JsExecutionError::invalid_request)?;
+            match invocation.timeoutMillis {
+                Some(timeout) => {
+                    engine
+                        .execute_script_function_with_timeout_millis(
+                            &script,
+                            &invocation.functionName,
+                            &params,
+                            &invocation.envOverrides,
+                            invocation.onIntermediateResult,
+                            invocation.dispatchIntermediateOnMain,
+                            timeout,
+                        )
+                        .await
+                }
+                None => {
+                    engine
+                        .execute_script_function(
+                            &script,
+                            &invocation.functionName,
+                            &params,
+                            &invocation.envOverrides,
+                            invocation.onIntermediateResult,
+                            invocation.dispatchIntermediateOnMain,
+                        )
+                        .await
+                }
+            }
         })
     }
 }
 
 impl ToolPkgManager {
-    /// Invokes a ToolPkg hook through the host-owned asynchronous execution boundary.
+    /// Uses the same typed lifecycle contract for asynchronous hook dispatch.
     #[allow(non_snake_case)]
     pub async fn dispatchToolPkgHookAsync(
         &self,
         enabledPackageNames: &[String],
         invocation: ToolPkgHookInvocation,
-    ) -> Result<Option<String>, String> {
-        let (engine, script, params, _lease) = self.prepareToolPkgHook(enabledPackageNames, &invocation)?;
-        engine
-            .execute_script_function_async(
-                script,
-                invocation.functionName,
-                params,
-                invocation.envOverrides,
-                invocation.onIntermediateResult,
-                invocation.dispatchIntermediateOnMain,
-                invocation.timeoutMillis,
-            )
+    ) -> crate::execution_result::JsExecutionResult<Option<String>> {
+        self.dispatchToolPkgHook(enabledPackageNames, invocation)
             .await
-            .map_err(|error| error.to_string())
     }
 
     /// Resolves the engine, script, and event parameters shared by hook execution APIs.
@@ -1078,7 +1118,7 @@ mod tests {
     }
 
     use std::io::Write;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -1093,6 +1133,7 @@ mod tests {
     #[derive(Default)]
     struct TestFileSystemHost {
         files: Mutex<BTreeMap<String, Vec<u8>>>,
+        byteReadCount: AtomicUsize,
     }
 
     impl TestFileSystemHost {
@@ -1140,8 +1181,9 @@ mod tests {
             Self::unsupported()
         }
 
-        /// Rejects byte reads.
+        /// Counts and returns the explicitly registered test bytes.
         fn readFileBytes(&self, path: &str) -> HostResult<Vec<u8>> {
+            self.byteReadCount.fetch_add(1, Ordering::Relaxed);
             self.files.lock().unwrap().get(path).cloned()
                 .ok_or_else(|| HostError::new("file missing"))
         }
@@ -1230,19 +1272,29 @@ mod tests {
     }
 
     impl JsExecutionEngine for RecordingExecutionEngine {
-        /// Returns no script result for registry tests.
+        /// Records hook parameters and yields once through the canonical host execution API.
         fn execute_script_function(
             &self,
             _script: &str,
             _function_name: &str,
-            _params: &BTreeMap<String, Value>,
+            params: &BTreeMap<String, Value>,
             _env_overrides: &BTreeMap<String, String>,
             _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
             _dispatch_intermediate_on_main: bool,
-            _timeout_sec: u64,
         ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
-            let result = (|| Ok(None))();
-            Box::pin(std::future::ready(result))
+            *self
+                .asyncHookParams
+                .lock()
+                .expect("async hook params mutex poisoned") = Some(params.clone());
+            let mut yielded = false;
+            Box::pin(std::future::poll_fn(move |context| {
+                if yielded {
+                    return std::task::Poll::Ready(Ok(Some("hook completed".to_string())));
+                }
+                yielded = true;
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }))
         }
 
         /// Returns no script result for exact-deadline registry tests.
@@ -1269,21 +1321,15 @@ mod tests {
             _env_overrides: BTreeMap<String, String>,
             _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
             _dispatch_intermediate_on_main: bool,
-            _timeout_millis: u64,
         ) -> crate::javascript::JsExecutionFuture<JsExecutionResult<Option<String>>> {
-            *self
-                .asyncHookParams
-                .lock()
-                .expect("async hook params mutex poisoned") = Some(params);
-            let mut yielded = false;
-            Box::pin(std::future::poll_fn(move |context| {
-                if yielded {
-                    return std::task::Poll::Ready(Ok(Some("hook completed".to_string())));
-                }
-                yielded = true;
-                context.waker().wake_by_ref();
-                std::task::Poll::Pending
-            }))
+            self.execute_script_function(
+                &_script,
+                &_function_name,
+                &params,
+                &_env_overrides,
+                _on_intermediate_result,
+                _dispatch_intermediate_on_main,
+            )
         }
 
         /// Returns an empty ToolPkg registration capture for registry tests.
@@ -1301,7 +1347,7 @@ mod tests {
         fn execute_compose_dsl_script_stream_async(
             &self, _script: String, _runtime_options: BTreeMap<String, Value>,
             _env_overrides: BTreeMap<String, String>, _text_resources: Arc<BTreeMap<String, String>>,
-            _on_response: Arc<dyn Fn(Value) + Send + Sync>,
+            _on_response: Arc<dyn Fn(operit_host_api::HostJavaScriptValue) + Send + Sync>,
         ) -> crate::javascript::JsExecutionFuture<JsExecutionResult<Option<Value>>> {
             Box::pin(async { Err(crate::execution_result::JsExecutionError::invalid_request("This recording engine does not execute live Compose sessions")) })
         }
@@ -1313,7 +1359,7 @@ mod tests {
             _payload: Option<Value>,
             _runtime_options: BTreeMap<String, Value>,
             _env_overrides: BTreeMap<String, String>,
-            _on_intermediate_result: Arc<dyn Fn(Value) + Send + Sync>,
+            _on_intermediate_result: Arc<dyn Fn(operit_host_api::HostJavaScriptValue) + Send + Sync>,
         ) -> crate::javascript::JsExecutionFuture<JsExecutionResult<Option<Value>>> {
             Box::pin(async { Ok(None) })
         }
@@ -1593,6 +1639,43 @@ mod tests {
         assert!(factory.engines.lock().unwrap().iter().all(|engine| engine.destroyed.load(Ordering::Acquire)));
     }
 
+    /// Preserves a live sidebar when fresh scans deserialize identical multilingual metadata.
+    #[test]
+    fn multilingualCatalogRescanPreservesSidebarRealm() {
+        let (mut manager, factory) = recordingManager();
+        let mut containers = manager.containers.read().unwrap().clone();
+        let runtime = containers.get_mut("package_a").unwrap();
+        runtime.displayName = serde_json::from_value(serde_json::json!({
+            "zh": "角色卡", "en": "Characters", "default": "Characters",
+            "ja": "キャラクター", "fr": "Personnages", "de": "Charaktere"
+        })).unwrap();
+        runtime.description = runtime.displayName.clone();
+        let snapshot = serde_json::to_value(&containers).unwrap();
+        let subpackages = manager.subpackageByPackageName.read().unwrap().clone();
+        manager.replaceRuntimeMaps(containers, subpackages.clone());
+        manager.acquireToolPkgExecutionEngine("character-sidebar", "package_a").unwrap();
+        let sidebar = manager.findToolPkgExecutionEngine("character-sidebar", "package_a").unwrap();
+        let (_, mainLease) = manager.leaseToolPkgMainExecutionEngine("package_a").unwrap();
+        drop(mainLease);
+        for _ in 0..32 {
+            let rescanned = serde_json::from_value(snapshot.clone()).unwrap();
+            manager.replaceRuntimeMaps(rescanned, subpackages.clone());
+            let current = manager.findToolPkgExecutionEngine("character-sidebar", "package_a")
+                .expect("unchanged multilingual metadata must preserve the sidebar");
+            assert!(Arc::ptr_eq(&sidebar, &current));
+            assert!(factory.engines.lock().unwrap().iter()
+                .all(|engine| !engine.destroyed.load(Ordering::Acquire)));
+        }
+        let mut changed: BTreeMap<String, ToolPkgContainerRuntime> =
+            serde_json::from_value(snapshot).unwrap();
+        changed.get_mut("package_a").unwrap().displayName.values
+            .insert("en".into(), "Updated characters".into());
+        manager.replaceRuntimeMaps(changed, subpackages);
+        assert!(manager.findToolPkgExecutionEngine("character-sidebar", "package_a").is_none());
+        assert!(factory.engines.lock().unwrap().iter()
+            .all(|engine| engine.destroyed.load(Ordering::Acquire)));
+    }
+
     /// Preserves engine identity and every counted lease across repeated catalog replacement.
     #[test]
     fn catalogReplacementKeepsLeasedContextUntilLastRelease() {
@@ -1716,7 +1799,7 @@ mod tests {
                 runtimeKind: None,
                 envOverrides: BTreeMap::new(),
                 timestampMs: 1,
-                timeoutMillis: 60_000,
+                timeoutMillis: None,
                 dispatchIntermediateOnMain: true,
                 onIntermediateResult: None,
             },
@@ -1776,7 +1859,7 @@ mod tests {
                 runtimeKind: None,
                 envOverrides: BTreeMap::new(),
                 timestampMs: 1,
-                timeoutMillis: 1_000,
+                timeoutMillis: Some(1_000),
                 dispatchIntermediateOnMain: true,
                 onIntermediateResult: None,
             },
@@ -1964,6 +2047,51 @@ mod tests {
         assert!(factory.engines.lock().unwrap()[3].destroyed.load(Ordering::Acquire));
         manager.updateExecutionEngineFactory(Arc::new(RecordingExecutionEngineFactory::default()));
         assert!(factory.engines.lock().unwrap()[2].destroyed.load(Ordering::Acquire));
+    }
+
+    /// Creates a real compressed main-script archive for source-generation tests.
+    fn mainScriptArchive(script: &str) -> Vec<u8> {
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        archive.start_file("main.js", zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)).unwrap();
+        archive.write_all(script.as_bytes()).unwrap();
+        archive.finish().unwrap().into_inner()
+    }
+
+    /// Reads main code once per catalog generation and invalidates both directory and archive snapshots.
+    #[test]
+    fn mainScriptSourcesFollowCatalogGenerationAndShutdown() {
+        for (source, file, archived) in [("/plugin", "/plugin/main.js", false), ("/plugin.toolpkg", "/plugin.toolpkg", true)] {
+            let (mut manager, _) = recordingManager();
+            let fs = Arc::new(TestFileSystemHost::default());
+            let old = "exports.read = () => 1;";
+            let new = "exports.read = () => 2;";
+            let bytes = if archived { mainScriptArchive(old) } else { old.as_bytes().to_vec() };
+            fs.files.lock().unwrap().insert(file.into(), bytes);
+            manager.fileSystemHost = fs.clone();
+            let mut runtime = manager.getToolPkgContainerRuntime("package_a").unwrap();
+            runtime.sourceType = ToolPkgSourceType::EXTERNAL;
+            runtime.sourcePath = source.into();
+            runtime.mainEntry = "main.js".into();
+            manager.registerToolPkg(ToolPkgLoadResult {
+                containerPackage: ToolPackage { name: "package_a".into(), ..ToolPackage::default() },
+                containerRuntime: runtime, ..ToolPkgLoadResult::default()
+            });
+            fs.byteReadCount.store(0, Ordering::Relaxed);
+            for _ in 0..9 {
+                assert_eq!(manager.getRegisteredToolPkgMainScript("package_a").as_deref(), Some(old));
+                assert_eq!(manager.getToolPkgMainScriptInternal("package_a", &["package_a".into()]).as_deref(), Some(old));
+            }
+            assert_eq!(fs.byteReadCount.load(Ordering::Relaxed), 1);
+            let bytes = if archived { mainScriptArchive(new) } else { new.as_bytes().to_vec() };
+            fs.files.lock().unwrap().insert(file.into(), bytes);
+            rescanRuntimeCatalog(&mut manager);
+            fs.byteReadCount.store(0, Ordering::Relaxed);
+            assert_eq!(manager.getRegisteredToolPkgMainScript("package_a").as_deref(), Some(new));
+            assert_eq!(fs.byteReadCount.load(Ordering::Relaxed), 1);
+            manager.shutdownExecutionEngines();
+            assert!(manager.getRegisteredToolPkgMainScript("package_a").is_none());
+        }
     }
 
     /// Same-size edits with an unchanged manifest and parent mtime still replace the realm.

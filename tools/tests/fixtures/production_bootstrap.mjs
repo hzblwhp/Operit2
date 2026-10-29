@@ -37,12 +37,13 @@ export function productionBootstrap() {
     embedded(bridge + 'JsJavaBridge.rs'),
     composeManifest.context.map(composeSource).join('\n'),
     embedded(sdk + 'toolpkg/ToolPkgApiRuntimeScript.rs'),
+    source(bridge + 'JsToolPkgIpc.script.js'),
     embedded(sdk + 'toolpkg/ToolPkgRegistrationBridge.rs').replace('__OPERIT_TOOLPKG_REGISTRATION_ONLY__', 'false'),
     '', '', // These tests exercise host operations, not generated Tools or external libraries.
     source(bridge + 'PluginConfig.script.js'),
     source(bridge + 'RuntimeContext.script.js'),
     lazyBootstrapLibraries(),
-    source(sdk + 'JsExecutionRuntimeBridge.script.js'),
+    source(sdk + 'js_sdk/toolpkg_route_runtime.js') + '\n' + source(sdk + 'JsExecutionRuntimeBridge.script.js'),
   ];
   let position = 0;
   const result = text.slice(start, end).replace(/\{\{|\}\}|\{\}/g, token => {

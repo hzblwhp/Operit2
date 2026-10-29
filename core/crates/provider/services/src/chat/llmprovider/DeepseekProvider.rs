@@ -498,13 +498,11 @@ impl DeepseekProvider {
         effectiveHistory: &[PromptTurn],
         useToolCall: bool,
     ) -> Result<Value, AiServiceError> {
-        let structuredMessages: Value =
-            serde_json::from_str(&StructuredToolCallBridge::buildMessagesJsonForProvider(
-                effectiveHistory,
-                true,
-                useToolCall,
-            ))
-            .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?;
+        let structuredMessages: Value = StructuredToolCallBridge::buildMessagesValueForProvider(
+            effectiveHistory,
+            true,
+            useToolCall,
+        );
 
         let mut messagesArray = Vec::new();
         let Some(messages) = structuredMessages.as_array() else {
@@ -779,21 +777,23 @@ impl AIService for DeepseekProvider {
 
         let request_body = self.create_request_body(&request)?;
         if request.stream {
-            AppLogger::i(
+            AppLogger::v_with_level(
                 PROVIDER_TRANSPORT_LOG_TAG,
                 &format!(
                     "provider.deepseek.parent.create providerModel={} stream=true",
                     self.provider_model(),
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
             let mut parent = self.open_ai_parent(self.uses_responses_protocol()?);
             let mut result = parent.send_prepared_request(request, request_body).await?;
-            AppLogger::i(
+            AppLogger::v_with_level(
                 PROVIDER_TRANSPORT_LOG_TAG,
                 &format!(
                     "provider.deepseek.parent.stream.ready providerModel={}",
                     self.provider_model(),
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
             let event_channel = result.event_channel().clone();
             let terminalFailure = TerminalFailureState::new();
@@ -822,7 +822,7 @@ impl AIService for DeepseekProvider {
                     if let Some(error) = result.terminal_failure() {
                         producerTerminalFailure.set(error);
                     }
-                    AppLogger::i(
+                    AppLogger::v_with_level(
                         PROVIDER_TRANSPORT_LOG_TAG,
                         &format!(
                             "provider.deepseek.parent.stream.done providerModel={} inputTokens={} cachedInputTokens={} outputTokens={}",
@@ -831,6 +831,7 @@ impl AIService for DeepseekProvider {
                             parent.cached_input_token_count(),
                             parent.output_token_count(),
                         ),
+                        operit_util::AppLogger::VERBOSE_LEVEL_3,
                     );
                     provider.apply_token_counts(TokenCounts {
                         input: (parent.input_token_count() - parent.cached_input_token_count()).max(0),

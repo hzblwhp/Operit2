@@ -31,6 +31,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             chatLifecycleHooks: [],
             chatMessageMenuItems: [],
             chatRuntimeHooks: [],
+            chatResponseHooks: [],
             hostEventHooks: [],
             toolLifecycleHooks: [],
             promptInputHooks: [],
@@ -637,6 +638,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
 
         var toolPkgApi = requireToolPkgApiRuntime();
         var api = toolPkgApi.namespace('ToolPkg', {
+            ipc: root.__operitToolPkgIpc,
             _m: captureMarketOrigin,
             // Captures only explicitly published methods using durable exported function references.
             registerApi: function(definition) {
@@ -721,6 +723,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
                 .between('1.0.1', '2.0.0')
                 .since('2.0.0')
                 .implement(registerFunction('chatRuntimeHooks', 'registerChatRuntimeHook')),
+            registerChatResponseHook: registerFunction('chatResponseHooks', 'registerChatResponseHook'),
             registerHostEventHook: registerFunction('hostEventHooks', 'registerHostEventHook'),
             registerToolLifecycleHook: registerFunction('toolLifecycleHooks', 'registerToolLifecycleHook'),
             registerPromptInputHook: registerFunction('promptInputHooks', 'registerPromptInputHook'),
@@ -756,17 +759,17 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
 mod tests {
     use super::buildToolPkgRegistrationBridgeScript;
     use crate::toolpkg::ToolPkgApiRuntimeScript::buildToolPkgApiRuntimeScript;
-    use rquickjs::{Context, Runtime};
+    use operit_host_api::HostJavaScriptRuntime;
 
     /// Verifies runtime marketplace markers can be evaluated repeatedly without capture side effects.
     #[test]
     fn runtime_marketplace_marker_is_repeatable_noop() {
-        let runtime = Runtime::new().expect("QuickJS runtime should start");
-        let context = Context::full(&runtime).expect("QuickJS context should start");
+        let mut context = crate::javascript_test::runtime();
 
-        context.with(|context| {
+        {
             context
-                .eval::<(), _>(
+                .evaluateHostJavaScriptVoid(
+                    "test",
                     r#"
                     globalThis.__operitExpose = function(name, value) {
                         globalThis[name] = value;
@@ -775,33 +778,34 @@ mod tests {
                 )
                 .expect("runtime expose should evaluate");
             context
-                .eval::<(), _>(buildToolPkgApiRuntimeScript())
+                .evaluateHostJavaScriptVoid("test", &buildToolPkgApiRuntimeScript())
                 .expect("toolpkg api runtime should evaluate");
             context
-                .eval::<(), _>(buildToolPkgRegistrationBridgeScript(false))
+                .evaluateHostJavaScriptVoid("test", &buildToolPkgRegistrationBridgeScript(false))
                 .expect("runtime bridge should evaluate");
             context
-                .eval::<(), _>("ToolPkg._m([], 0); ToolPkg._m([], 0);")
+                .evaluateHostJavaScriptVoid("test", "ToolPkg._m([], 0); ToolPkg._m([], 0);")
                 .expect("runtime marker calls should not throw");
             let capturedOrigin = context
-                .eval::<String, _>(
+                .evaluateHostJavaScriptString(
+                    "test",
                     "String(globalThis.__operitToolPkgRegistrationCapture.marketOrigin)",
                 )
                 .expect("runtime capture should be readable");
 
             assert_eq!(capturedOrigin, "null");
-        });
+        }
     }
 
     /// Verifies Core command registrations retain their metadata and durable callback reference.
     #[test]
     fn captures_core_command_registration() {
-        let runtime = Runtime::new().expect("QuickJS runtime should start");
-        let context = Context::full(&runtime).expect("QuickJS context should start");
+        let mut context = crate::javascript_test::runtime();
 
-        context.with(|context| {
+        {
             context
-                .eval::<(), _>(
+                .evaluateHostJavaScriptVoid(
+                    "test",
                     r#"
                     globalThis.__operitExpose = function(name, value) {
                         globalThis[name] = value;
@@ -810,13 +814,14 @@ mod tests {
                 )
                 .expect("runtime expose should evaluate");
             context
-                .eval::<(), _>(buildToolPkgApiRuntimeScript())
+                .evaluateHostJavaScriptVoid("test", &buildToolPkgApiRuntimeScript())
                 .expect("toolpkg api runtime should evaluate");
             context
-                .eval::<(), _>(buildToolPkgRegistrationBridgeScript(false))
+                .evaluateHostJavaScriptVoid("test", &buildToolPkgRegistrationBridgeScript(false))
                 .expect("runtime bridge should evaluate");
             context
-                .eval::<(), _>(
+                .evaluateHostJavaScriptVoid(
+                    "test",
                     r#"
                     function runHello(event) {
                         return { stdout: event.eventPayload.commandName };
@@ -836,18 +841,18 @@ mod tests {
                 )
                 .expect("Core command registration should evaluate");
             let command_name = context
-                .eval::<String, _>(
+                .evaluateHostJavaScriptString("test",
                     "JSON.parse(globalThis.__operitToolPkgRegistrationCapture.coreCommands[0]).name",
                 )
                 .expect("captured command should be readable");
             let function_name = context
-                .eval::<String, _>(
+                .evaluateHostJavaScriptString("test",
                     "JSON.parse(globalThis.__operitToolPkgRegistrationCapture.coreCommands[0]).function",
                 )
                 .expect("captured function should be readable");
 
             assert_eq!(command_name, "hello");
             assert_eq!(function_name, "runHello");
-        });
+        }
     }
 }

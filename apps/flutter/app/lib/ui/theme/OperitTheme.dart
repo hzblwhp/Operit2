@@ -14,13 +14,13 @@ import '../../core/runtime/RuntimeBootstrapManager.dart';
 import '../../data/preferences/UserPreferencesManager.dart';
 import '../../l10n/generated/app_localizations.dart';
 import '../common/AppToastHost.dart';
+import '../common/MacNoticeScaffoldMessenger.dart';
 import '../common/RuntimeBootstrapScreen.dart';
 import '../common/layout/ApplicationZoom.dart';
 import '../common/layout/ApplicationZoomPreferences.dart';
 import '../features/chat/tts/TtsFloatingPanel.dart';
-import '../features/startup/PluginLoadingOverlay.dart';
+import '../features/startup/RuntimeActivityOverlay.dart';
 import '../../core/host/browser/RuntimeBrowserOwnerHost.dart';
-import '../features/chat/components/workspace/browser/automation/WorkspaceWebVisitHost.dart';
 import 'OperitThemeAssets.dart';
 import 'ThemeAppearanceErrorScreen.dart';
 import 'ThemeCircularRevealHost.dart';
@@ -264,9 +264,7 @@ class _OperitThemeState extends State<OperitTheme> {
               widget.initialThemePreferenceSnapshot.themeMode;
     return _OperitThemeScope(
       controller: _controller,
-      child: Stack(
-        alignment: Alignment.topLeft,
-        fit: StackFit.expand,
+      child: ThemeRenderStack(
         children: <Widget>[
           if (retainApplication)
             Offstage(
@@ -399,27 +397,27 @@ class _OperitMaterialApp extends StatelessWidget {
           zoom: zoom,
           shortcutsEnabled: zoomShortcutsEnabled,
           onZoomChanged: onZoomChanged,
-          child: appContent,
+          child: AppToastHost(
+            child: MacNoticeScaffoldMessenger(child: appContent),
+          ),
         );
       },
       home: UnhandledErrorHost(
-        child: RuntimeBrowserOwnerHost(
-          enabled: hostInteractionHostsEnabled,
-          child: WorkspaceWebVisitHost(
-            child: AppToastHost(
-              child: Stack(
-                fit: StackFit.expand,
-                children: <Widget>[
-                  Positioned.fill(child: child),
-                  const TtsFloatingPanel(),
-                  PluginLoadingOverlay(
-                    key: const ValueKey<String>('plugin-loading-overlay'),
-                    enabled: hostInteractionHostsEnabled,
-                  ),
-                ],
+        child: Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            Positioned.fill(
+              child: RuntimeBrowserOwnerHost(
+                enabled: hostInteractionHostsEnabled,
+                child: child,
               ),
             ),
-          ),
+            const TtsFloatingPanel(),
+            RuntimeActivityOverlay(
+              key: const ValueKey<String>('runtime-activity-overlay'),
+              enabled: hostInteractionHostsEnabled,
+            ),
+          ],
         ),
       ),
     );
@@ -1097,7 +1095,14 @@ class _VideoThemeBackgroundState extends State<_VideoThemeBackground> {
         child: SizedBox(
           width: controller.value.size.width,
           height: controller.value.size.height,
-          child: VideoPlayer(controller),
+          child: ValueListenableBuilder<VideoPlayerValue>(
+            valueListenable: controller,
+            child: VideoPlayer(controller),
+            builder: (context, value, child) => LiquidGlassSourceAnimation(
+              active: value.isPlaying,
+              child: child!,
+            ),
+          ),
         ),
       ),
     );

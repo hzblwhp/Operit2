@@ -696,6 +696,7 @@ class ToolPkgContainerRuntime {
     required this.chatLifecycleHooks,
     required this.chatMessageMenuItems,
     required this.chatRuntimeHooks,
+    required this.chatResponseHooks,
     required this.hostEventHooks,
     required this.toolLifecycleHooks,
     required this.promptInputHooks,
@@ -751,6 +752,7 @@ class ToolPkgContainerRuntime {
     chatLifecycleHooks: (value['chatLifecycleHooks'] as List<Object?>).map((item) => ToolPkgFunctionHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
     chatMessageMenuItems: (value['chatMessageMenuItems'] as List<Object?>).map((item) => ToolPkgChatMessageMenuItemRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
     chatRuntimeHooks: (value['chatRuntimeHooks'] as List<Object?>).map((item) => ToolPkgFunctionHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
+    chatResponseHooks: (value['chatResponseHooks'] as List<Object?>).map((item) => ToolPkgFunctionHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
     hostEventHooks: (value['hostEventHooks'] as List<Object?>).map((item) => ToolPkgHostEventHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
     toolLifecycleHooks: (value['toolLifecycleHooks'] as List<Object?>).map((item) => ToolPkgFunctionHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
     promptInputHooks: (value['promptInputHooks'] as List<Object?>).map((item) => ToolPkgFunctionHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
@@ -806,6 +808,7 @@ class ToolPkgContainerRuntime {
     'chatLifecycleHooks': chatLifecycleHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
     'chatMessageMenuItems': chatMessageMenuItems.map((item) => item.toMessagePackValue()).toList(growable: false),
     'chatRuntimeHooks': chatRuntimeHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
+    'chatResponseHooks': chatResponseHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
     'hostEventHooks': hostEventHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
     'toolLifecycleHooks': toolLifecycleHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
     'promptInputHooks': promptInputHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
@@ -859,6 +862,7 @@ class ToolPkgContainerRuntime {
   final List<ToolPkgFunctionHookRuntime> chatLifecycleHooks;
   final List<ToolPkgChatMessageMenuItemRuntime> chatMessageMenuItems;
   final List<ToolPkgFunctionHookRuntime> chatRuntimeHooks;
+  final List<ToolPkgFunctionHookRuntime> chatResponseHooks;
   final List<ToolPkgHostEventHookRuntime> hostEventHooks;
   final List<ToolPkgFunctionHookRuntime> toolLifecycleHooks;
   final List<ToolPkgFunctionHookRuntime> promptInputHooks;

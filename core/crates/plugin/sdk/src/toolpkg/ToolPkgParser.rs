@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::package::{LocalizedText, ToolPackage};
 use crate::toolpkg::ToolPkgApiVersion::{
-    currentToolPkgApiVersionText, requireSupportedToolPkgApiVersion, ToolPkgApiVersion,
+    defaultToolPkgApiVersionText, requireSupportedToolPkgApiVersion, ToolPkgApiVersion,
 };
 use crate::toolpkg::ToolPkgCommonPluginConstants::*;
 use crate::toolpkg::ToolPkgTemplateModels::{
@@ -469,6 +469,8 @@ pub struct ToolPkgMainRegistration {
     pub chatMessageMenuItems: Vec<ToolPkgRegisteredChatMessageMenuItem>,
     #[serde(rename = "chatRuntimeHooks", default)]
     pub chatRuntimeHooks: Vec<ToolPkgRegisteredFunctionHook>,
+    #[serde(rename = "chatResponseHooks", default)]
+    pub chatResponseHooks: Vec<ToolPkgRegisteredFunctionHook>,
     #[serde(rename = "hostEventHooks", default)]
     pub hostEventHooks: Vec<ToolPkgRegisteredHostEventHook>,
     #[serde(rename = "toolLifecycleHooks", default)]
@@ -581,6 +583,8 @@ pub struct ToolPkgContainerRuntime {
     pub chatMessageMenuItems: Vec<ToolPkgChatMessageMenuItemRuntime>,
     #[serde(rename = "chatRuntimeHooks")]
     pub chatRuntimeHooks: Vec<ToolPkgFunctionHookRuntime>,
+    #[serde(rename = "chatResponseHooks", default)]
+    pub chatResponseHooks: Vec<ToolPkgFunctionHookRuntime>,
     #[serde(rename = "hostEventHooks")]
     pub hostEventHooks: Vec<ToolPkgHostEventHookRuntime>,
     #[serde(rename = "toolLifecycleHooks")]
@@ -633,7 +637,7 @@ pub struct ToolPkgManifest {
     pub toolpkgId: String,
     #[serde(default)]
     pub version: String,
-    #[serde(rename = "api_version", default = "currentToolPkgApiVersionText")]
+    #[serde(rename = "api_version", default = "defaultToolPkgApiVersionText")]
     pub apiVersion: String,
     /// Names the self-contained TypeScript client distributed to dependent packages.
     #[serde(rename = "public_api", default)]
@@ -831,7 +835,7 @@ impl ToolPkgArchiveParser {
         FReadEntryText: FnMut(&str) -> Option<String>,
         FReadEntryProtectionHeader: FnMut(&str) -> Option<Vec<u8>>,
         FParseJsPackage: FnMut(&str, &mut dyn FnMut(String, String)) -> Option<ToolPackage>,
-        FParseMainRegistration: FnMut(&str, &str, &str, &str) -> ToolPkgMainRegistrationParseResult,
+        FParseMainRegistration: FnMut(&str, &str, &str, &str, &[String]) -> ToolPkgMainRegistrationParseResult,
         FReportPackageLoadError: FnMut(String, String),
     {
         let manifestEntryName = findManifestEntry(&entryIndex.entryNames)
@@ -1160,7 +1164,14 @@ impl ToolPkgArchiveParser {
                 ToolPkgMainRegistration { marketOrigin, ..Default::default() }
             },
             Some(source) => match parseMainRegistration(
-                &source, &manifest.toolpkgId, &normalizedMainEntry, &apiVersionText,
+                &source,
+                &manifest.toolpkgId,
+                &normalizedMainEntry,
+                &apiVersionText,
+                &subpackagePackages
+                    .iter()
+                    .flat_map(|package| package.env.iter().map(|variable| variable.name.clone()))
+                    .collect::<Vec<_>>(),
             ) {
                 ToolPkgMainRegistrationParseResult::Success { registration } => registration,
                 ToolPkgMainRegistrationParseResult::Failure { message } => {
@@ -1426,6 +1437,10 @@ impl ToolPkgArchiveParser {
             &mainRegistration.chatRuntimeHooks,
             TOOLPKG_REGISTRATION_CHAT_RUNTIME_HOOK,
         )?;
+        let chatResponseHooks = validateFunctionHooks(
+            &mainRegistration.chatResponseHooks,
+            TOOLPKG_REGISTRATION_CHAT_RESPONSE_HOOK,
+        )?;
         let hostEventHooks = validateHostEventHooks(
             &mainRegistration.hostEventHooks,
             TOOLPKG_REGISTRATION_HOST_EVENT_HOOK,
@@ -1524,6 +1539,7 @@ impl ToolPkgArchiveParser {
             chatLifecycleHooks,
             chatMessageMenuItems,
             chatRuntimeHooks,
+            chatResponseHooks,
             hostEventHooks,
             toolLifecycleHooks,
             promptInputHooks,
@@ -2629,17 +2645,24 @@ mod logo_tests {
 mod api_compatibility_tests {
     use super::*;
 
-    /// Verifies archive loading preserves the declared API contract through registration and runtime metadata.
+    /// Verifies omitted and explicit API contracts reach registration, runtime metadata, and prerequisites.
     #[test]
-    fn loads_explicit_legacy_and_current_contracts() {
-        for version in ["1.0.0", "1.0.1", "2.0.0"] {
-            let manifest = serde_json::json!({
+    fn loads_omitted_and_explicit_api_contracts() {
+        for (declared, version) in [
+            (None, "1.0.0"),
+            (Some("1.0.0"), "1.0.0"),
+            (Some("1.0.1"), "1.0.1"),
+            (Some("2.0.0"), "2.0.0"),
+        ] {
+            let mut manifest = serde_json::json!({
                 "schema_version": 1,
                 "toolpkg_id": "compat_fixture",
-                "api_version": version,
                 "main": "main.js"
-            })
-            .to_string();
+            });
+            if let Some(declared) = declared {
+                manifest["api_version"] = serde_json::json!(declared);
+            }
+            let manifest = manifest.to_string();
             let entries = BTreeMap::from([
                 ("manifest.json".to_string(), manifest),
                 ("main.js".to_string(), "exports.registerToolPkg = function() {};".to_string()),
@@ -2656,7 +2679,7 @@ mod api_compatibility_tests {
                 "compat_fixture.toolpkg",
                 false,
                 |_, _| panic!("fixture does not contain subpackages"),
-                |_, id, path, declared| {
+                |_, id, path, declared, _environment| {
                     assert_eq!(id, "compat_fixture");
                     assert_eq!(path, "main.js");
                     assert_eq!(declared, version);
@@ -2760,7 +2783,7 @@ mod api_compatibility_tests {
                 &index, |name| entries.get(name).cloned(), |_| None,
                 ToolPkgSourceType::EXTERNAL, "theme_fixture.toolpkg", false,
                 |_, _| panic!("declarative theme has no scripts"),
-                |_, _, _, _| panic!("declarative theme must not execute registration"),
+                |_, _, _, _, _| panic!("declarative theme must not execute registration"),
                 |_, _| panic!("declarative theme has no subpackages"),
             );
             match missing {
@@ -2793,7 +2816,7 @@ mod api_compatibility_tests {
         let loaded = ToolPkgArchiveParser::parseToolPkgFromIndexedEntries(
             &index, |name| entries.get(name).cloned(), |_| None,
             ToolPkgSourceType::EXTERNAL, "resource_fixture.toolpkg", false,
-            |_, _| panic!("no executable declarations"), |_, _, _, _| panic!("no main entry"),
+            |_, _| panic!("no executable declarations"), |_, _, _, _, _| panic!("no main entry"),
             |_, _| panic!("resource declarations must load"),
         ).unwrap();
         assert!(loaded.containerRuntime.mainEntry.is_empty());
@@ -2843,15 +2866,15 @@ mod api_compatibility_tests {
         assert!(templates[0].file_bytes("main.js").is_none());
     }
 
-    /// Keeps the existing current-contract default explicit and rejects undeclared future contracts.
+    /// Defaults omitted manifest versions to the original contract and rejects unadmitted future versions.
     #[test]
-    fn preserves_manifest_default_and_rejects_future_contracts() {
+    fn defaults_manifest_to_v1_and_rejects_future_contracts() {
         let manifest = parseToolPkgManifest(
-            r#"{"toolpkg_id":"current_fixture","main":"main.js"}"#,
+            r#"{"toolpkg_id":"legacy_fixture","main":"main.js"}"#,
             "manifest.json",
         )
-        .expect("current manifest must parse");
-        assert_eq!(manifest.apiVersion, "2.0.0");
+        .expect("legacy manifest must parse");
+        assert_eq!(manifest.apiVersion, "1.0.0");
         for version in ["1.0.2", "2.0.1", "3.0.0"] {
             assert!(requireSupportedToolPkgApiVersion(version).is_err());
         }
@@ -2885,7 +2908,7 @@ mod public_api_tests {
             &index, |name| entries.get(name).cloned(), |_| None,
             ToolPkgSourceType::EXTERNAL, "public_fixture.toolpkg", false,
             |_, _| panic!("fixture has no subpackages"),
-            |_, _, _, _| ToolPkgMainRegistrationParseResult::Success {
+            |_, _, _, _, _| ToolPkgMainRegistrationParseResult::Success {
                 registration: ToolPkgMainRegistration {
                     publicApis: (0..methods).map(|_| ToolPkgRegisteredFunctionHook {
                         id: "run".to_string(), function: "runExport".to_string(), ..Default::default()
@@ -2951,7 +2974,7 @@ mod navigation_registration_tests {
             &index, |name| sources.get(name).cloned(), |_| None,
             ToolPkgSourceType::EXTERNAL, "arbitrary_package.toolpkg", false,
             |_, _| panic!("navigation unit input has no subpackages"),
-            |_, _, _, _| ToolPkgMainRegistrationParseResult::Success { registration: registration.clone() },
+            |_, _, _, _, _| ToolPkgMainRegistrationParseResult::Success { registration: registration.clone() },
             |name, message| panic!("unexpected package error {name}: {message}"),
         )
     }
@@ -3015,7 +3038,7 @@ mod navigation_registration_tests {
             &index, |name| sources.get(name).cloned(), |_| None,
             ToolPkgSourceType::EXTERNAL, "arbitrary_package.toolpkg", false,
             |_, _| panic!("sidebar archive input declares no subpackages"),
-            |_, _, _, _| ToolPkgMainRegistrationParseResult::Success { registration: registration.clone() },
+            |_, _, _, _, _| ToolPkgMainRegistrationParseResult::Success { registration: registration.clone() },
             |name, message| panic!("unexpected package error {name}: {message}"),
         )
     }

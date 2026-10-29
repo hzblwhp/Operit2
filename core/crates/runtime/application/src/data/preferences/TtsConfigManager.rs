@@ -1,6 +1,5 @@
-use operit_store::PreferenceMerge::{
-    PreferenceMergeCatalog, PreferenceMergeReference, PreferenceMergeStore,
-};
+use operit_host_api::PluginStorage::{StoragePreferencesMergeCatalog, StoragePreferencesMergeDescriptor, StoragePreferencesMergeKey, StoragePreferencesMergeReference};
+use operit_store::PreferenceMerge::PreferenceMergeStore;
 use operit_store::PreferencesDataStore::{
     stringPreferencesKey, Flow, Preferences, PreferencesDataStore, PreferencesDataStoreError,
 };
@@ -35,30 +34,42 @@ impl TtsConfigManager {
             .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
     }
 
-    /// Declares this owner's entity identity, name and content metadata for Core merging.
-    pub(crate) fn spaceMergeCatalog() -> PreferenceMergeCatalog {
-        PreferenceMergeCatalog {
-            store: PreferenceMergeStore {
-                path: operit_util::RuntimeStorageLayout::TTS_CONFIGS_PREFERENCES_PATH,
-                encrypted: true,
-            },
-            keyPrefix: "tts_config_",
-            keySuffix: "_json",
-            identityField: "id",
-            nameField: "name",
-            ignoredFields: &["createdAt", "updatedAt"],
-            retiredKeys: &["tts_config_list"],
-        }
+    /// Decodes historical record encodings without running new-store initialization.
+    fn decodeSyncedEntry(entry: &mut operit_store::PreferencesDataStore::PreferencesSyncedEntry) -> Result<(), PreferencesDataStoreError> {
+        entry.decodeHistoricalValues(|version, values| {
+            if version > Self::PREFERENCES_VERSION {
+                return Err(PreferencesDataStoreError::SchemaVersionTooNew { actual: version, expected: Self::PREFERENCES_VERSION });
+            }
+            for version in version.max(1)..Self::PREFERENCES_VERSION { Self::migratePreferences(version, values)?; }
+            Ok(())
+        })
     }
 
-    /// Declares the current selection as a scalar reference into this owner's catalog.
-    pub(crate) fn spaceMergeReference() -> PreferenceMergeReference {
-        let catalog = Self::spaceMergeCatalog();
-        PreferenceMergeReference {
-            store: catalog.store,
-            key: "current_tts_config_id",
-            path: &[],
-            target: catalog.store.path,
+    /// Declares this owner's catalog and references using the shared merge contract.
+    pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
+        let path = operit_util::RuntimeStorageLayout::TTS_CONFIGS_PREFERENCES_PATH;
+        PreferenceMergeStore {
+            path: path.to_string(),
+            encrypted: true,
+            storageVersion: Some(3),
+            decode: Some(Self::decodeSyncedEntry),
+            merge: StoragePreferencesMergeDescriptor {
+                version: 1,
+                catalog: Some(StoragePreferencesMergeCatalog {
+                    key_prefix: "tts_config_".to_string(),
+                    key_suffix: "_json".to_string(),
+                    identity_field: "id".to_string(),
+                    name_field: "name".to_string(),
+                    ignored_fields: vec!["createdAt".to_string(), "updatedAt".to_string()],
+                    retired_keys: vec!["tts_config_list".to_string()],
+                }),
+                references: vec![StoragePreferencesMergeReference {
+                    key: StoragePreferencesMergeKey::Exact { key: "current_tts_config_id".to_string() },
+                    path: vec![],
+                    target: path.to_string(),
+                }],
+                projection: None,
+            },
         }
     }
 
@@ -675,7 +686,8 @@ fn configJsonKey(id: &str) -> operit_store::PreferencesDataStore::PreferencesKey
 }
 
 #[allow(non_snake_case)]
-fn normalizeConfig(config: TtsConfig) -> Result<TtsConfig, String> {
+/// Validates and canonicalizes a TTS configuration before storage or import matching.
+pub(crate) fn normalizeConfig(config: TtsConfig) -> Result<TtsConfig, String> {
     let name = config.name.trim().to_string();
     if name.is_empty() {
         return Err("tts config name is empty".to_string());
