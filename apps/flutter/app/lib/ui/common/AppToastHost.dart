@@ -312,7 +312,7 @@ class _MacNoticeCard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
                         Text(
-                          'Operit',
+                          'PengSong',
                           style: theme.textTheme.labelMedium?.copyWith(
                             color: onSurface.withValues(alpha: 0.62),
                             fontSize: 12,

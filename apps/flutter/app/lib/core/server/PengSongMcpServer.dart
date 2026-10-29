@@ -590,7 +590,7 @@ class PengSongMcpServer {
 
   /// Root that holds one identity directory per installation.
   static const String _identitiesRoot =
-      '/data/data/app.operit/files/runtime/identities';
+      '/data/data/app.pengsong/files/runtime/identities';
 
   /// Rewrites one sandbox text file, creating parents when they are missing.
   ///
@@ -600,7 +600,7 @@ class PengSongMcpServer {
     if (path.isEmpty) {
       throw StateError('write_file requires a path');
     }
-    if (!path.startsWith('/data/data/app.operit/')) {
+    if (!path.startsWith('/data/data/app.pengsong/')) {
       throw StateError('write_file is limited to the app sandbox: $path');
     }
     final file = File(path);
@@ -621,7 +621,7 @@ class PengSongMcpServer {
     if (path.isEmpty) {
       throw StateError('delete_path requires a path');
     }
-    if (!path.startsWith('/data/data/app.operit/')) {
+    if (!path.startsWith('/data/data/app.pengsong/')) {
       throw StateError('delete_path is limited to the app sandbox: $path');
     }
     final target = path.endsWith('/') && path.length > 1
@@ -641,8 +641,8 @@ class PengSongMcpServer {
 
   /// Fallback log locations for layouts that predate the identity directory.
   static const List<String> _logCandidates = [
-    '/data/data/app.operit/files/runtime/logs/operit.log',
-    '/data/data/app.operit/files/logs/operit.log',
+    '/data/data/app.pengsong/files/runtime/logs/operit.log',
+    '/data/data/app.pengsong/files/logs/operit.log',
   ];
 
   /// Returns the trailing slice of the first log file that exists.

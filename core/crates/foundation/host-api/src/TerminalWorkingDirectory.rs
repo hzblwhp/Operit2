@@ -71,11 +71,11 @@ mod tests {
     fn host_workspace_uses_its_resolved_physical_directory() {
         let resolveHost = |path: &str| {
             assert_eq!(path, "/app/workspaces/project");
-            Ok("/data/user/0/app.operit/files/workspaces/project".to_string())
+            Ok("/data/user/0/app.pengsong/files/workspaces/project".to_string())
         };
         assert_eq!(
             resolveLinuxGuestDirectory("/app/workspaces/project", &resolveHost).unwrap(),
-            "/data/user/0/app.operit/files/workspaces/project",
+            "/data/user/0/app.pengsong/files/workspaces/project",
         );
     }
 }

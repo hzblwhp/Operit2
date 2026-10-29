@@ -16,7 +16,7 @@ flutter:
   plugin:
     platforms:
       android:
-        package: app.operit.folder_access
+        package: app.pengsong.folder_access
         pluginClass: OperitFolderAccessPlugin
         dartPluginClass: OperitFolderAccessAndroid
       macos:

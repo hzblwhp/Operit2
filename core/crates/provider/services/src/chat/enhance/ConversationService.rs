@@ -242,7 +242,7 @@ impl ConversationService {
             })
             .await;
         Ok(bound_history_to_context(
-            after_context.prepared_history,
+            after_context?.prepared_history,
             request.max_context_tokens,
         ))
     }

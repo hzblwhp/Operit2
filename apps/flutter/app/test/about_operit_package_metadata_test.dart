@@ -52,7 +52,7 @@ void main() {
 
       metadata.complete(<String, Object>{
         'appName': 'Operit2',
-        'packageName': 'app.operit',
+        'packageName': 'app.pengsong',
         'version': '3.2.1',
         'buildNumber': '4321',
         'buildSignature': '',

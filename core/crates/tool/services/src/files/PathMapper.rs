@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn clean_on_exit_vfs_path_follows_the_active_identity_root() {
         for runtimeRoot in [
-            "/Users/test/Library/Containers/app.operit/Data/Library/Application Support/Operit2/runtime data/identities/identity-a",
+            "/Users/test/Library/Containers/app.pengsong/Data/Library/Application Support/Operit2/runtime data/identities/identity-a",
             "/Volumes/External Disk/custom runtime/identities/identity-b",
         ] {
             let mapper = PathMapper::builtinOnly(

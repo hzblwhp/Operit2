@@ -74,7 +74,7 @@
             android:label="PengSong 数据救援"
             android:exported="true"
             android:process=":maintenance"
-            android:taskAffinity="app.operit.maintenance"
+            android:taskAffinity="app.pengsong.maintenance"
             android:theme="@style/NormalTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode">
         </activity>

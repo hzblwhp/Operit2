@@ -72,7 +72,7 @@ void _setPackageMetadata({
 }) {
   PackageInfo.setMockInitialValues(
     appName: 'Operit2',
-    packageName: 'app.operit',
+    packageName: 'app.pengsong',
     version: version,
     buildNumber: buildNumber,
     buildSignature: '',

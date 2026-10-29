@@ -1,10 +1,10 @@
-group = "app.operit.folder_access"
+group = "app.pengsong.folder_access"
 version = "1.0"
 
 plugins { id("com.android.library") }
 
 android {
-    namespace = "app.operit.folder_access"
+    namespace = "app.pengsong.folder_access"
     compileSdk = flutter.compileSdkVersion
     defaultConfig { minSdk = 24 }
     compileOptions {

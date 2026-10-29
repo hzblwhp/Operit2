@@ -1,10 +1,10 @@
-group = "app.operit.keep_alive"
+group = "app.pengsong.keep_alive"
 version = "1.0"
 
 plugins { id("com.android.library") }
 
 android {
-    namespace = "app.operit.keep_alive"
+    namespace = "app.pengsong.keep_alive"
     compileSdk = flutter.compileSdkVersion
     defaultConfig { minSdk = 24 }
     compileOptions {

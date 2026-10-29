@@ -446,7 +446,7 @@ impl ToolExecutionManager {
                     }]
                 }
             };
-            AppLogger::d(
+            AppLogger::v_with_level(
                 TAG,
                 &format!(
                     "tool.execution.raw_results tool={} rawResultCount={}",

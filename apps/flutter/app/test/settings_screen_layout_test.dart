@@ -15,7 +15,7 @@ void main() {
   setUp(() {
     PackageInfo.setMockInitialValues(
       appName: 'Operit2',
-      packageName: 'app.operit',
+      packageName: 'app.pengsong',
       version: '2.0.0',
       buildNumber: '15',
       buildSignature: '',

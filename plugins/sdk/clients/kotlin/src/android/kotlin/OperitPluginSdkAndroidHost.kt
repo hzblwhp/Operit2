@@ -36,7 +36,7 @@ internal class OperitPluginSdkAndroidHost(private val context: Context) : AutoCl
                 else ready.completeExceptionally(IllegalStateException(data?.getString("error")))
             }
         }
-        context.startActivity(Intent().setComponent(ComponentName("app.operit", "app.operit.PluginSdkActivationActivity"))
+        context.startActivity(Intent().setComponent(ComponentName("app.pengsong", "app.pengsong.PluginSdkActivationActivity"))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("result", receiver))
         ready.get(60, TimeUnit.SECONDS)
         val bound = CompletableFuture<IBinder>()
@@ -50,7 +50,7 @@ internal class OperitPluginSdkAndroidHost(private val context: Context) : AutoCl
             /** Reports package replacement or permanent binding loss. */
             override fun onBindingDied(name: ComponentName) { bound.completeExceptionally(IllegalStateException("Operit service binding died")) }
         }
-        check(context.bindService(Intent().setComponent(ComponentName("app.operit", "app.operit.PluginSdkService")), service, Context.BIND_AUTO_CREATE)) { "Cannot bind Operit Plugin SDK service" }
+        check(context.bindService(Intent().setComponent(ComponentName("app.pengsong", "app.pengsong.PluginSdkService")), service, Context.BIND_AUTO_CREATE)) { "Cannot bind Operit Plugin SDK service" }
         try {
             endpoint = bound.get(30, TimeUnit.SECONDS)
             connection = service
@@ -67,7 +67,7 @@ internal class OperitPluginSdkAndroidHost(private val context: Context) : AutoCl
         val request = Parcel.obtain()
         val reply = Parcel.obtain()
         try {
-            request.writeInterfaceToken("app.operit.PluginSdk")
+            request.writeInterfaceToken("app.pengsong.PluginSdk")
             check(endpoint!!.transact(IBinder.FIRST_CALL_TRANSACTION, request, reply, 0)) { "Operit rejected Plugin SDK Open" }
             reply.readException()
             val reader = ParcelFileDescriptor.CREATOR.createFromParcel(reply)

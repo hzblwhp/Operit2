@@ -1,11 +1,11 @@
 # AndroidRuntimeHost methods are resolved by Rust through JNI GetMethodID.
 # Their Java names and descriptors are an ABI shared with the native bridge.
--keepclassmembers class app.operit.AndroidRuntimeHost {
+-keepclassmembers class app.pengsong.AndroidRuntimeHost {
     public *** *(...);
 }
 
 # OperitRuntimeNative methods are exported by liboperit_flutter_bridge with exact JNI symbol names.
--keep class app.operit.OperitRuntimeNative {
+-keep class app.pengsong.OperitRuntimeNative {
     *;
 }
 

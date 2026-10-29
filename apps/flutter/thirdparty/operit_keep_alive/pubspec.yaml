@@ -22,7 +22,7 @@ flutter:
   plugin:
     platforms:
       android:
-        package: app.operit.keep_alive
+        package: app.pengsong.keep_alive
         pluginClass: OperitKeepAlivePlugin
       windows:
         pluginClass: OperitKeepAlivePlugin
@@ -33,7 +33,7 @@ flutter:
       ios:
         pluginClass: OperitKeepAlivePlugin
       ohos:
-        package: app.operit.keep_alive
+        package: app.pengsong.keep_alive
         pluginClass: OperitKeepAlivePlugin
       web:
         pluginClass: BrowserKeepAlivePlugin

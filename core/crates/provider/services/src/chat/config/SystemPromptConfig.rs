@@ -84,9 +84,47 @@ const PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_CN: &str = r#"包系统：
 - 如果调用因参数不匹配失败，或返回“工具结果缺失”，先按返回的原因修正参数再调，
   不要把同样的调用原样重试"#;
 
+/// 输出呈现规范（中英双语）。
+///
+/// 来源：WorkBuddy 的 `result-presentation.md`（最终答复规范）、
+/// `style-professional.md`（结构）与 `<instructions_for_visualizer>`（可视化触发），
+/// 按 Operit2 的实际工具能力改写。放在系统提示词层，换模型、换角色卡都不会丢。
+pub const OUTPUT_PRESENTATION_CN: &str = r#"输出呈现规范：
+- **结论先行**：第一句直接给结论或最要紧的信息，不要复述问题、不要铺垫。
+- **结构化展开**：紧跟结论用编号列表、分节小标题或表格组织推理，不要写成一大段散文。
+- **该用表格就用表格**：三个以上同类项对比（版本、参数、文件、方案、测试结果）、现象到原因到修法三列对照、改动前后对照、字段清单，一律用 Markdown 表格，不要用句子罗列。表格单元格里只放短词组，长解释写在表格外的正文。
+- **能量化就量化**："差 50~140 像素"优于"差得不多"；"耗时 18 秒"优于"很快"。
+- **区分事实与推断**：观察到的事实和由此推断的结论分开写，不要混在一句里。
+- **多方案要列代价**：有几种做法时说明各自代价，不要只给一个推荐就完事。
+- **主动上视觉结构**：讲解原理、说明架构、描述多步流程时，先用分层结构、树状图或带箭头的编号流程锚定整体，再用文字说明细节；复杂主题拆成几段，段与段之间要有过渡文字，不要连续堆结构块而没有叙述。
+- **篇幅收敛**：答复控制在 50~70 行以内；内容更长就写成文件配摘要，正文只留高信号部分。
+- **最终答复要能独立看懂**：用户看不到中间过程的原始输出，重要的命令结果、改动的文件、结论、错误、未解决的风险，都必须在最终答复里复述清楚；多部分的问题逐条作答，没解决的明确标注未解决。"#;
+
+pub const OUTPUT_PRESENTATION_EN: &str = r#"Output presentation:
+- Lead with the conclusion: the first sentence states the key point or answer. No preamble, no restating the question.
+- Structure the reasoning: numbered lists, sectioned headings, or tables. Avoid long prose blocks.
+- Use tables whenever comparing three or more items (versions, parameters, files, options, test results), for symptom-cause-fix mapping, before/after diffs, and field lists. Keep table cells to short phrases; put long explanations in prose outside the table.
+- Quantify: "50-140 px behind" beats "a bit behind"; "18 s" beats "fast".
+- Separate observation from inference. Do not blend a measured fact and a guess into one sentence.
+- When several approaches exist, state the cost of each instead of pushing a single recommendation.
+- Reach for visual structure: for how-something-works, architecture, or multi-step flow, anchor with a layered tree or an arrowed numbered flow before explaining details. Split complex topics into sections and keep transitional prose between structural blocks.
+- Stay within 50-70 lines. Longer material goes into a file with a summary; keep only high-signal content inline.
+- The final reply must stand on its own: the user cannot see raw intermediate output, so restate important command results, changed files, conclusions, errors, and unresolved risks. Answer multi-part questions part by part and mark anything unsolved as unsolved."#;
+
+/// 按语言选输出呈现规范。
+fn output_presentation(use_english: bool) -> &'static str {
+    if use_english {
+        OUTPUT_PRESENTATION_EN
+    } else {
+        OUTPUT_PRESENTATION_CN
+    }
+}
+
 pub const SYSTEM_PROMPT_TEMPLATE: &str = r#"BEGIN_SELF_INTRODUCTION_SECTION
 
 WORKSPACE_GUIDELINES_SECTION
+
+OUTPUT_PRESENTATION_SECTION
 
 TOOL_USAGE_GUIDELINES_SECTION
 
@@ -99,6 +137,8 @@ AVAILABLE_TOOLS_SECTION"#;
 pub const SYSTEM_PROMPT_TEMPLATE_CN: &str = r#"BEGIN_SELF_INTRODUCTION_SECTION
 
 WORKSPACE_GUIDELINES_SECTION
+
+OUTPUT_PRESENTATION_SECTION
 
 TOOL_USAGE_GUIDELINES_SECTION
 
@@ -284,7 +324,11 @@ impl SystemPromptConfig {
                     ""
                 },
             )
-            .replace("WORKSPACE_GUIDELINES_SECTION", &workspace_guidelines);
+            .replace("WORKSPACE_GUIDELINES_SECTION", &workspace_guidelines)
+        .replace(
+                "OUTPUT_PRESENTATION_SECTION",
+                output_presentation(options.use_english),
+            );
 
         let available_tools =
             if options.use_tool_call_api || options.tool_exposure_mode == ToolExposureMode::CLI {

@@ -37,7 +37,7 @@ pub const VERBOSE_LEVEL_6: i32 = 6;
 const TOOLPKG_LOG_TAG: &str = "ToolPkg";
 
 /// Size cap for one log file; crossing it evicts the oldest records.
-const LOG_FILE_MAX_BYTES: i64 = 4 * 1024 * 1024;
+const LOG_FILE_MAX_BYTES: i64 = 20 * 1024 * 1024;
 /// Newest bytes kept after one log file eviction pass.
 const LOG_FILE_KEEP_BYTES: i64 = 2 * 1024 * 1024;
 /// Cap for the in-memory entry history.
@@ -692,9 +692,6 @@ fn newest_log_records(content: &str, keep_bytes: usize) -> Option<String> {
         None => None,
     }
 }
-
-/// Size at which the live log is rolled over.
-const LOG_ROTATE_BYTES: i64 = 20 * 1024 * 1024;
 
 /// Number of rotated generations kept beside the live log.
 const LOG_ROTATE_KEEP: usize = 2;
