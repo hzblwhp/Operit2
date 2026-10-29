@@ -261,6 +261,12 @@ val prepareOperitAndroidV8Tasks = selectedOperitRustTargets.associateWith { targ
         val envFile = operitV8EnvFile(target.rustTarget)
         inputs.files(operitV8PrepareScript, operitV8BridgeLock)
         outputs.file(envFile)
+        // Windows cannot build Android V8 at all (Chromium asserts
+        // `host_os == "linux"` in build/config/BUILDCONFIG.gn). Set
+        // OPERIT_SKIP_V8_PREPARE=1 after producing the archive on Linux/WSL.
+        onlyIf {
+            System.getenv("OPERIT_SKIP_V8_PREPARE") == null || !envFile.isFile
+        }
         workingDir = operitRepoRoot
         commandLine(
             operitPluginSyncPython.absolutePath,
@@ -369,6 +375,12 @@ androidComponents {
                     "-C", "link-arg=-Wl,--no-undefined",
                 ))
                 commandLine(cargoArguments)
+                // Let a Linux/WSL host produce the .so and have Gradle reuse it,
+                // since Android V8 cannot be built on Windows.
+                onlyIf {
+                    System.getenv("OPERIT_SKIP_RUST_BUILD") == null ||
+                        !bridgeLibrary.isFile
+                }
                 doLast {
                     val nativeLibraries = listOf(
                         bridgeLibrary,

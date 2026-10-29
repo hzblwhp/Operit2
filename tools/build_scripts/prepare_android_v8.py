@@ -382,7 +382,13 @@ def find_libclang():
         llvm = find_host_clang()
         candidates = [llvm / "lib"]
     else:
-        candidates = [Path("/usr/lib/llvm21/lib")]
+        # Honour OPERIT_LIBCLANG_DIR on Linux too (same variable the Windows path
+        # already uses). Without root we can't drop llvm-21 into /usr/lib, so an
+        # extracted package under $HOME is pointed at here instead.
+        candidates = []
+        if "OPERIT_LIBCLANG_DIR" in os.environ:
+            candidates.append(Path(os.environ["OPERIT_LIBCLANG_DIR"]))
+        candidates += [Path("/usr/lib/llvm21/lib")]
         candidates += sorted(Path("/usr/lib").glob("llvm*/lib"), reverse=True)
         candidates += [Path("/usr/lib/x86_64-linux-gnu"), Path("/usr/lib64"), Path("/usr/lib")]
     libraries = []
