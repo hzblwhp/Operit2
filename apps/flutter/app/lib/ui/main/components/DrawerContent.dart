@@ -274,7 +274,10 @@ class _DrawerContentState extends State<DrawerContent> {
       case ConversationAction.unbindWorkspace:
         await _showUnbindConversationWorkspaceDialog(history);
       case ConversationAction.delete:
-        await _deleteConversation(history);
+        // Deletion is irreversible, so the action-sheet path must ask for the
+        // same confirmation the swipe path already asks for. Without this a
+        // single mis-tap on the menu destroyed a whole conversation.
+        await _showDeleteConversationDialog(history);
     }
   }
 
@@ -551,7 +554,9 @@ class _DrawerContentState extends State<DrawerContent> {
     onRename: () => unawaited(_showRenameConversationDialog(history)),
     onTogglePinned: () => unawaited(_updateConversationPinned(history)),
     onToggleLocked: () => unawaited(_updateConversationLocked(history)),
-    onDelete: () => unawaited(_deleteConversation(history)),
+    // Every delete entry point confirms first: the inline button previously
+    // deleted immediately while the swipe gesture already asked.
+    onDelete: () => unawaited(_showDeleteConversationDialog(history)),
     onSwipeDelete: () => unawaited(_showDeleteConversationDialog(history)),
     onLongPress: () => unawaited(_showConversationActionDialog(history)),
     canDetach: operitSupportsDesktopMultiWindow,
