@@ -44,7 +44,11 @@ String bubbleAiPrimaryTitle(
   return snapshot.showRoleName ? message.roleName : '';
 }
 
-/// Returns the compact model and provider label when enabled in preferences.
+/// Returns the model identity shown next to or beneath a message.
+///
+/// The "show model provider" preference surfaces the model name rather than the
+/// raw protocol/provider value: "OpenAI Generic" identifies the API dialect, not
+/// the model that answered, so it carries no useful information for the reader.
 String formatModelProviderLabel(
   ChatUiMessage message,
   ThemePreferenceSnapshot snapshot,
@@ -55,15 +59,12 @@ String formatModelProviderLabel(
   final showModel =
       !modelIsPrimary && snapshot.showModelName && message.modelName.isNotEmpty;
   final showProvider =
-      snapshot.showModelProvider && message.provider.isNotEmpty;
-  if (showModel && showProvider) {
-    return '${message.modelName} · ${message.provider}';
+      snapshot.showModelProvider && message.modelName.isNotEmpty;
+  if (showProvider) {
+    return message.modelName;
   }
   if (showModel) {
     return message.modelName;
-  }
-  if (showProvider) {
-    return message.provider;
   }
   return '';
 }
@@ -237,13 +238,15 @@ String formatMessageMetadataTooltip(
   AppLocalizations? l10n,
 }) {
   final lines = <String>[];
-  final identityParts = <String>[
+  // Same rule as the inline label: both model preferences resolve to the model
+  // name, and duplicates collapse so the tooltip never repeats one identity.
+  final identityParts = <String>{
     if (snapshot.showRoleName && message.roleName.isNotEmpty) message.roleName,
     if (snapshot.showModelName && message.modelName.isNotEmpty)
       message.modelName,
-    if (snapshot.showModelProvider && message.provider.isNotEmpty)
-      message.provider,
-  ];
+    if (snapshot.showModelProvider && message.modelName.isNotEmpty)
+      message.modelName,
+  }.toList();
   if (identityParts.isNotEmpty) {
     lines.add(identityParts.join(' · '));
   }

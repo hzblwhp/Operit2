@@ -370,10 +370,16 @@ impl Operit1ModelConfig {
     fn providerBinding(&self) -> Result<Operit1ProviderBinding, String> {
         let providerType = self.providerType()?;
         let providerTypeId = self.providerTypeIdForImport(&providerType);
-        let displayName = if providerTypeId.eq_ignore_ascii_case(providerType.name()) {
+        // The user-visible provider name must survive import. Falling back to the
+        // protocol catalogue name whenever the type id matches the protocol name
+        // silently replaced names like "DGX 本地" with "OpenAI Generic".
+        let trimmedName = self.name.trim();
+        let displayName = if !trimmedName.is_empty() {
+            trimmedName.to_string()
+        } else if providerTypeId.eq_ignore_ascii_case(providerType.name()) {
             ModelCatalog::provider(providerType.name())?.displayName
         } else {
-            self.name.clone()
+            providerTypeId.clone()
         };
         Ok(Operit1ProviderBinding {
             providerType,

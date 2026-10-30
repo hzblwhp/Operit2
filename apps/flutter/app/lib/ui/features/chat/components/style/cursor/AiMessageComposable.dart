@@ -352,7 +352,9 @@ class _CursorAiMessageHeader extends StatelessWidget {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final primaryTitle = cursorAiPrimaryTitle(message, snapshot, l10n: l10n);
-    final modelLabel = formatModelProviderLabel(message, snapshot);
+    final rawModelLabel = formatModelProviderLabel(message, snapshot);
+    // Both identity preferences can resolve to the same model name; add it once.
+    final modelLabel = rawModelLabel == primaryTitle ? '' : rawModelLabel;
     final statsText = formatMessageStatsText(message, snapshot, l10n: l10n);
     final tooltipText = formatMessageMetadataTooltip(
       message,

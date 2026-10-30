@@ -735,7 +735,8 @@ String _normalDisplayText(
     parts.add(title);
   }
   final modelProvider = formatModelProviderLabel(message, snapshot);
-  if (modelProvider.isNotEmpty) {
+  // Both identity preferences can resolve to the same model name; add it once.
+  if (modelProvider.isNotEmpty && modelProvider != title) {
     parts.add(modelProvider);
   }
   final stats = formatMessageStatsText(message, snapshot, l10n: l10n);
