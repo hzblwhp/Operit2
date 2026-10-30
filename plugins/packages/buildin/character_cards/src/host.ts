@@ -16,10 +16,8 @@ export function register(definition: Definition, screen: (ctx: ComposeDslContext
   const sidebarRoute = `toolpkg:${definition.id}:ui:chat-sidebar`;
   ToolPkg.registerUiRoute({ id: "chat-sidebar", route: sidebarRoute, screen: sidebarScreen, runtime: "compose_dsl", keepAlive: true, title: { zh: "会话侧边栏", en: "Chat sidebar" } });
   const inputMenuRoute = `toolpkg:${definition.id}:ui:chat-input-menu`;
-  // [pengsong] disabled: Compose DSL render fails on preview.22 (root node null)
-  // ToolPkg.registerUiRoute({ id: "chat-input-menu", route: inputMenuRoute, screen: inputMenuScreen, runtime: "compose_dsl", keepAlive: false, title: { zh: "当前角色卡", en: "Current character" } });
-  // [pengsong] disabled: Compose DSL render fails on preview.22 (root node null)
-  // ToolPkg.registerNavigationEntry({ id: "current-character", route: inputMenuRoute, surface: "chat_input_menu", title: { zh: "当前角色卡", en: "Current character" }, order: definition.order, params: {} });
+  ToolPkg.registerUiRoute({ id: "chat-input-menu", route: inputMenuRoute, screen: inputMenuScreen, runtime: "compose_dsl", keepAlive: false, title: { zh: "当前角色卡", en: "Current character" } });
+  ToolPkg.registerNavigationEntry({ id: "current-character", route: inputMenuRoute, surface: "chat_input_menu", title: { zh: "当前角色卡", en: "Current character" }, order: definition.order, params: {} });
   const selectionRoute = `toolpkg:${definition.id}:ui:selection`;
   ToolPkg.registerUiRoute({ id: "selection", route: selectionRoute, screen: selectionScreen, runtime: "compose_dsl", keepAlive: false, title: { zh: "切换角色卡", en: "Switch character" } });
   ToolPkg.registerUiRoute({ id: "group-execution", route: `toolpkg:${definition.id}:ui:group-execution`, screen: groupExecutionScreen, runtime: "compose_dsl", keepAlive: false, title: { zh: "群组执行", en: "Group execution" } });
@@ -31,12 +29,9 @@ export function register(definition: Definition, screen: (ctx: ComposeDslContext
   ToolPkg.registerNavigationEntry({ id: "toolbox", route, surface: "toolbox", title: { zh: definition.title, en: "Characters" }, icon: definition.icon, order: definition.order });
   ToolPkg.registerNavigationEntry({ id: "memory-attachment", route: attachmentRoute, surface: "chat_attachments", title: { zh: "记忆附件", en: "Memory attachment" }, icon: "Memory", order: definition.order, params: { mode: "memory-attachment", ownerKey: null, folderPath: null } });
   const memoryMenuRoute = `toolpkg:${definition.id}:ui:chat-input-memory`;
-  // [pengsong] disabled: Compose DSL render fails on preview.22 (root node null)
-  // ToolPkg.registerUiRoute({ id: "chat-input-memory", route: memoryMenuRoute, screen: memoryMenuScreen, runtime: "compose_dsl", keepAlive: false, title: { zh: "记忆", en: "Memory" } });
-  // [pengsong] disabled: Compose DSL render fails on preview.22 (root node null)
-  // ToolPkg.registerNavigationEntry({ id: "memory-menu", route: memoryMenuRoute, surface: "chat_input_menu_sections", title: { zh: "记忆", en: "Memory" }, order: definition.order, params: {} });
-  // [pengsong] disabled: Compose DSL render fails on preview.22 (root node null)
-  // ToolPkg.registerUiRoute({ id: "memory-status", route: `toolpkg:${definition.id}:ui:memory-status`, screen: memoryStatusScreen, runtime: "compose_dsl", keepAlive: false, title: { zh: "记忆状态", en: "Memory status" } });
+  ToolPkg.registerUiRoute({ id: "chat-input-memory", route: memoryMenuRoute, screen: memoryMenuScreen, runtime: "compose_dsl", keepAlive: false, title: { zh: "记忆", en: "Memory" } });
+  ToolPkg.registerNavigationEntry({ id: "memory-menu", route: memoryMenuRoute, surface: "chat_input_menu_sections", title: { zh: "记忆", en: "Memory" }, order: definition.order, params: {} });
+  ToolPkg.registerUiRoute({ id: "memory-status", route: `toolpkg:${definition.id}:ui:memory-status`, screen: memoryStatusScreen, runtime: "compose_dsl", keepAlive: false, title: { zh: "记忆状态", en: "Memory status" } });
   return true;
 }
 
