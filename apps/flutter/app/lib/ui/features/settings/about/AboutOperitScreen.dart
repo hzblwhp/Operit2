@@ -92,15 +92,12 @@ class _AboutHeaderState extends State<_AboutHeader> {
     final colorScheme = Theme.of(context).colorScheme;
     return Column(
       children: <Widget>[
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: colorScheme.primaryContainer,
-            shape: BoxShape.circle,
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: OperitLogoMark(size: 76, color: colorScheme.primary),
-          ),
+        // The brand artwork is a filled square, so a circular well would leave
+        // its corners showing the container tint. Match the launcher icon's
+        // rounded-square silhouette instead.
+        ClipRRect(
+          borderRadius: BorderRadius.circular(22),
+          child: OperitLogoMark(size: 116, color: colorScheme.primary),
         ),
         const SizedBox(height: 14),
         Text(
