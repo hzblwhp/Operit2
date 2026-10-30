@@ -33,7 +33,9 @@ String bubbleAiPrimaryTitle(
 ) {
   if (message.roleName.isEmpty ||
       readChatMessageIdentity(message)?.usesProviderLogo == true) {
-    return message.modelName;
+    // A model-only identity must still honour "show model name"; otherwise the
+    // title falls back to the model name and the preference appears ignored.
+    return snapshot.showModelName ? message.modelName : '';
   }
   return snapshot.showRoleName ? message.roleName : '';
 }
