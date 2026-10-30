@@ -249,12 +249,35 @@ pub struct SystemPromptWithCustomOptions {
     pub custom_intro_prompt: String,
 }
 
+/// Fallback self-introduction used when the active character card leaves its
+/// own intro empty.
+///
+/// Without it the section collapses to nothing and the model names the host by
+/// guessing from package ids such as `com.operit.character_cards`, which is how
+/// "Operit" ended up inside reasoning text after the rebrand.
+pub const DEFAULT_SELF_INTRODUCTION_CN: &str = r#"你运行在 PengSong 这个 Android AI 助手应用里。用户界面、应用名和对外称呼都是 PengSong；`com.operit.*` 只是沿用上游开源项目的插件包标识，不是应用名。回答中不要用 Operit 指代当前应用。"#;
+
+pub const DEFAULT_SELF_INTRODUCTION_EN: &str = r#"You run inside PengSong, an Android AI assistant app. The product name shown to the user is PengSong; `com.operit.*` identifiers are inherited plugin package ids from the upstream open-source project and are not the app name. Never call the current app Operit."#;
+
 pub struct SystemPromptConfig;
 
 impl SystemPromptConfig {
     #[allow(non_snake_case)]
-    pub fn applyCustomPrompts(system_prompt: &str, custom_intro_prompt: &str) -> String {
-        system_prompt.replace("BEGIN_SELF_INTRODUCTION_SECTION", custom_intro_prompt)
+    pub fn applyCustomPrompts(
+        system_prompt: &str,
+        custom_intro_prompt: &str,
+        use_english: bool,
+    ) -> String {
+        let intro = if custom_intro_prompt.trim().is_empty() {
+            if use_english {
+                DEFAULT_SELF_INTRODUCTION_EN
+            } else {
+                DEFAULT_SELF_INTRODUCTION_CN
+            }
+        } else {
+            custom_intro_prompt
+        };
+        system_prompt.replace("BEGIN_SELF_INTRODUCTION_SECTION", intro)
     }
 
     #[allow(non_snake_case)]
@@ -550,8 +573,11 @@ impl SystemPromptConfig {
             Some(prompt) => prompt,
             None => Self::getSystemPrompt(options.base.clone()).await?,
         };
-        let composed_prompt =
-            Self::applyCustomPrompts(&base_prompt, &options.custom_intro_prompt);
+        let composed_prompt = Self::applyCustomPrompts(
+            &base_prompt,
+            &options.custom_intro_prompt,
+            options.base.use_english,
+        );
         let compose_context =
             PromptHookRegistry::dispatchSystemPromptComposeHooks(PromptHookContext {
                 stage: "compose_system_prompt_sections".to_string(),
