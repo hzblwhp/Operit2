@@ -18,12 +18,16 @@ String cursorAiPrimaryTitle(
 }) {
   if (message.roleName.isEmpty ||
       readChatMessageIdentity(message)?.usesProviderLogo == true) {
-    return message.modelName;
+    // A model-only identity must still honour "show model name"; otherwise the
+    // title falls back to the model name and the preference appears ignored.
+    return snapshot.showModelName ? message.modelName : '';
   }
   if (snapshot.showRoleName && message.roleName.isNotEmpty) {
     return message.roleName;
   }
-  return l10n?.chatMessageResponse ?? 'Response';
+  // Both identity sources are switched off: keep the header empty instead of
+  // substituting a generic "Response" label the user did not ask for.
+  return '';
 }
 
 /// Returns the participant name or the actual model identity for bubble messages.
