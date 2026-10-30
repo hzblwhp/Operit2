@@ -13,7 +13,7 @@ mod task_scheduler;
 
 /// Accepts the borrowed pipe descriptors delivered by the Android Binder endpoint.
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_acceptPluginSdkPipes(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_acceptPluginSdkPipes(
     mut env: JNIEnv,
     _class: JClass,
     reader: jni::sys::jint,
@@ -43,7 +43,7 @@ fn jni_bool_arg(env: &mut JNIEnv, value: &JString, name: &str) -> Result<bool, S
 
 /// Creates the reference-counted runtime and installs Android's Java host services.
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_create(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_create(
     mut env: JNIEnv,
     _class: JClass,
     runtime_root: JString,
@@ -127,7 +127,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_create(
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_createError(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_createError(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
@@ -142,7 +142,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_createError(
 
 /// Reads the client bootstrap record before the Android Runtime is created.
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_runtimeBootstrapRead(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_runtimeBootstrapRead(
     mut env: JNIEnv,
     _class: JClass,
     default_runtime_root: JString,
@@ -171,7 +171,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_runtimeBootstr
 
 /// Writes the client bootstrap record before the Android Runtime is created.
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_runtimeBootstrapWrite(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_runtimeBootstrapWrite(
     mut env: JNIEnv,
     _class: JClass,
     default_runtime_root: JString,
@@ -214,7 +214,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_runtimeBootstr
 
 /// Releases the Android owner's reference while active Dart connections retain the runtime.
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_destroy(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_destroy(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -224,7 +224,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_destroy(
 
 /// Creates one direct Dart connection while preserving Android's runtime ownership.
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_connectCoreFfi(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_connectCoreFfi(
     env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -238,7 +238,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_connectCoreFfi
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_emitRuntimeEvent(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_emitRuntimeEvent(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -255,7 +255,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_emitRuntimeEve
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_emitHostRuntimeEventSchedule(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_emitHostRuntimeEventSchedule(
     env: JNIEnv,
     _class: JClass,
     _handle: jlong,
@@ -299,7 +299,7 @@ fn new_java_string(mut env: JNIEnv, value: &str) -> jstring {
 
 /// Runs offline maintenance with only the Android secret-store bridge installed.
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_dataRescue(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_dataRescue(
     mut env: JNIEnv,
     _class: JClass,
     default_runtime_root: JString,
@@ -340,7 +340,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_dataRescue(
 
 /// Stops a service notification's exact execution without routing through a Flutter engine.
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_stopBackgroundWork(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_stopBackgroundWork(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,

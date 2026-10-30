@@ -38,7 +38,7 @@ fn retainedJavaTask(
 
 /// Allocates Java callbacks from Host-owned capacity independent of waiting Rust callers.
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_scheduleRuntimeTask(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_scheduleRuntimeTask(
     mut env: JNIEnv,
     _class: JClass,
     task: JObject,
@@ -55,7 +55,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_scheduleRuntim
 
 /// Atomically reserves blocking service capacity for all components of a Java pipeline.
 #[no_mangle]
-pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_scheduleRuntimeServices(
+pub unsafe extern "system" fn Java_app_pengsong_OperitRuntimeNative_scheduleRuntimeServices(
     mut env: JNIEnv,
     _class: JClass,
     tasks: JObjectArray,
