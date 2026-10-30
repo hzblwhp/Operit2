@@ -237,6 +237,13 @@ pub struct AssistantMarkupStreamState {
     activeThinkingOpenTag: Option<String>,
     activeThinkingCloseTag: Option<String>,
     preserveUnsupportedTags: bool,
+    /// Fence delimiter (``` or ~~~) while the stream sits inside a code block.
+    ///
+    /// A model that quotes tool-call XML as an example wraps it in a fence.
+    /// Treating fenced `<tool>`/`<status>` text as markup executed that example:
+    /// the run was rejected as a truncated tool call and the user saw a red
+    /// "AI made an error" chip for a message that was actually correct.
+    activeFence: Option<String>,
 }
 
 impl Default for AssistantMarkupStreamState {
@@ -253,6 +260,7 @@ impl Default for AssistantMarkupStreamState {
             activeThinkingOpenTag: None,
             activeThinkingCloseTag: None,
             preserveUnsupportedTags: false,
+            activeFence: None,
         }
     }
 }
@@ -322,17 +330,55 @@ impl AssistantMarkupStreamState {
                 return Ok(());
             }
 
+            // A fenced code block makes every tag literal sample text. Consume
+            // only up to the closing fence so content after it still parses.
+            if let Some(fence) = self.activeFence.clone() {
+                if let Some(end) = fenceCloseEnd(&self.pending, &fence) {
+                    let content = self.pending[..end].to_string();
+                    self.appendMarkdownContent(&content);
+                    self.pending = self.pending[end..].to_string();
+                    continue;
+                }
+                let retained = trailingFencePrefixLength(&self.pending);
+                let committed = self.pending.len() - retained;
+                if committed > 0 {
+                    let content = self.pending[..committed].to_string();
+                    self.appendMarkdownContent(&content);
+                    self.pending = self.pending[committed..].to_string();
+                }
+                if isFinal {
+                    let content = std::mem::take(&mut self.pending);
+                    self.appendMarkdownContent(&content);
+                }
+                return Ok(());
+            }
+
             let Some(tagStart) = self.pending.find('<') else {
-                if !self.pending.is_empty() {
+                // Same hold-back as below: a fence opener split across chunks
+                // must not be flushed as plain text before it is recognizable.
+                let retained = trailingFencePrefixLength(&self.pending);
+                let committed = self.pending.len() - retained;
+                if committed > 0 {
+                    let content = self.pending[..committed].to_string();
+                    self.appendMarkdownContent(&content);
+                    self.pending = self.pending[committed..].to_string();
+                }
+                if isFinal {
                     let content = std::mem::take(&mut self.pending);
                     self.appendMarkdownContent(&content);
                 }
                 return Ok(());
             };
             if tagStart > 0 {
-                let content = self.pending[..tagStart].to_string();
+                // Hold back a trailing partial fence marker so a fence split
+                // across chunks is still recognized instead of becoming text.
+                let committed = tagStart - trailingFencePrefixLength(&self.pending[..tagStart]);
+                if committed == 0 {
+                    return Ok(());
+                }
+                let content = self.pending[..committed].to_string();
                 self.appendMarkdownContent(&content);
-                self.pending = self.pending[tagStart..].to_string();
+                self.pending = self.pending[committed..].to_string();
                 continue;
             }
 
@@ -423,6 +469,7 @@ impl AssistantMarkupStreamState {
         if content.is_empty() {
             return;
         }
+        self.trackFence(content);
         let extendsMarkdownPart = self
             .parts
             .last()
@@ -441,6 +488,34 @@ impl AssistantMarkupStreamState {
             MessagePart::markdown(MessagePartCodec::partId(sequence), sequence, String::new());
         part.content.push_str(content);
         self.parts.push(part);
+    }
+
+    /// Tracks CommonMark fenced-code state across chunk boundaries.
+    ///
+    /// Only a line consisting of at least three backticks or tildes opens or
+    /// closes a fence; inline code spans never do.
+    fn trackFence(&mut self, content: &str) {
+        for line in content.split_inclusive('\n') {
+            let trimmed = line.trim_end_matches(['\n', '\r']).trim_start();
+            let marker: String = trimmed
+                .chars()
+                .take_while(|ch| *ch == '`' || *ch == '~')
+                .collect();
+            if marker.len() < 3 {
+                continue;
+            }
+            match &self.activeFence {
+                None => self.activeFence = Some(marker),
+                Some(open) => {
+                    // A closing fence uses the same character and is at least as long.
+                    if open.starts_with(marker.chars().next().unwrap())
+                        && marker.len() >= open.len()
+                    {
+                        self.activeFence = None;
+                    }
+                }
+            }
+        }
     }
 
     /// Appends source to the currently open thinking part.
@@ -826,5 +901,116 @@ mod tests {
         .expect("complete assistant markup must parse");
 
         assert_eq!(MessagePartCodec::visibleText(&parts), "Answercareful");
+    }
+}
+
+/// Returns the byte offset just past a closing fence for `fence`, if present.
+fn fenceCloseEnd(pending: &str, fence: &str) -> Option<usize> {
+    let marker = fence.chars().next()?;
+    let mut offset = 0;
+    for line in pending.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\n', '\r']).trim_start();
+        let run: String = trimmed.chars().take_while(|ch| *ch == marker).collect();
+        let rest = &trimmed[run.len()..];
+        if run.len() >= fence.len() && rest.trim().is_empty() {
+            return Some(offset + line.len());
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// Holds back a trailing line that could still grow into a fence opener.
+fn trailingFencePrefixLength(pending: &str) -> usize {
+    let lineStart = pending.rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let tail = &pending[lineStart..];
+    let run: usize = tail.chars().take_while(|ch| *ch == '`' || *ch == '~').count();
+    if run > 0 && run < 3 && tail[run..].trim().is_empty() {
+        tail.len()
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod fenceAwareMarkupTests {
+    use super::*;
+
+    /// Runs a full response through the streaming codec.
+    fn stream(text: &str) -> Vec<MessagePart> {
+        let mut state = AssistantMarkupStreamState::new();
+        state.push(text).expect("stream push");
+        state.finish().expect("stream finish")
+    }
+
+    fn kinds(parts: &[MessagePart]) -> Vec<MessagePartKind> {
+        parts.iter().map(|part| part.kind.clone()).collect()
+    }
+
+    #[test]
+    fn fencedStatusTagStaysMarkdown() {
+        let parts = stream("示例：\n```xml\n<status type=\"warning\">样例</status>\n```\n结束");
+        assert!(
+            !kinds(&parts).contains(&MessagePartKind::Status),
+            "fenced status must not become a status part: {:?}",
+            kinds(&parts)
+        );
+        let text = MessagePartCodec::visibleText(&parts);
+        assert!(text.contains("<status type=\"warning\">样例</status>"), "text: {text}");
+    }
+
+    #[test]
+    fn bareStatusTagStillParses() {
+        let parts = stream("<status type=\"completion\">done</status>");
+        assert!(kinds(&parts).contains(&MessagePartKind::Status), "{:?}", kinds(&parts));
+    }
+
+    #[test]
+    fn fencedToolCallStaysMarkdown() {
+        let parts = stream("```\n<tool name=\"read_file\"><param name=\"path\">/x</param></tool>\n```");
+        assert!(
+            !kinds(&parts).contains(&MessagePartKind::ToolCall),
+            "fenced tool call must not become a tool part: {:?}",
+            kinds(&parts)
+        );
+    }
+
+    #[test]
+    fn bareToolCallStillParses() {
+        let parts = stream("<tool name=\"read_file\"><param name=\"path\">/x</param></tool>");
+        assert!(kinds(&parts).contains(&MessagePartKind::ToolCall), "{:?}", kinds(&parts));
+    }
+
+    #[test]
+    fn fenceClosedThenStatusParses() {
+        let parts = stream("```xml\n<status type=\"warning\">样例</status>\n```\n<status type=\"completion\">done</status>");
+        assert_eq!(
+            kinds(&parts).iter().filter(|kind| **kind == MessagePartKind::Status).count(),
+            1,
+            "only the unfenced status parses: {:?}",
+            kinds(&parts)
+        );
+    }
+
+    #[test]
+    fn tildeFenceAlsoGuards() {
+        let parts = stream("~~~\n<status type=\"warning\">样例</status>\n~~~");
+        assert!(!kinds(&parts).contains(&MessagePartKind::Status), "{:?}", kinds(&parts));
+    }
+
+    #[test]
+    fn unclosedFenceGuardsRestOfResponse() {
+        let parts = stream("```\n<status type=\"warning\">样例</status>");
+        assert!(!kinds(&parts).contains(&MessagePartKind::Status), "{:?}", kinds(&parts));
+    }
+
+    #[test]
+    fn chunkedFenceStillGuards() {
+        let mut state = AssistantMarkupStreamState::new();
+        for chunk in ["``", "`xml\n<sta", "tus type=\"warning\">样例</status>"] {
+            state.push(chunk).expect("push");
+        }
+        let parts = state.finish().expect("finish");
+        assert!(!kinds(&parts).contains(&MessagePartKind::Status), "{:?}", kinds(&parts));
     }
 }
