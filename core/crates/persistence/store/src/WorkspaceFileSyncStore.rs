@@ -102,10 +102,22 @@ impl WorkspaceFileSyncStore {
         paths: &[P],
         change: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
+        // Only real files carry a blob hash to refresh. A `workspaces/<name>`
+        // entry is the workspace directory itself: recursive directory deletion
+        // names it, and rejecting it here made `delete_file recursive=true` fail
+        // with "must belong to a workspace directory". `collect` already skips
+        // such collection-root entries for the same reason, and the scan below
+        // still records tombstones for every file that disappeared.
+        let mut forcedPaths: Vec<&str> = Vec::with_capacity(paths.len());
         for path in paths {
-            validateFilePath(path.as_ref())?;
+            let candidate = path.as_ref();
+            if candidate.split('/').count() < 3 {
+                validatePath(candidate)?;
+                continue;
+            }
+            validateFilePath(candidate)?;
+            forcedPaths.push(candidate);
         }
-        let forcedPaths: Vec<&str> = paths.iter().map(|path| path.as_ref()).collect();
         let _guard = self.lock.lock().map_err(|e| e.to_string())?;
         self.scanUnlocked(&[])?;
         let result = change();

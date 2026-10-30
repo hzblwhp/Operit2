@@ -328,7 +328,19 @@ impl PathMapper {
                     physicalPath: physicalPathString(joinUnixPhysical("/data", rest)),
                 })
             }
-            _ => Err(format!("Unknown VFS root: {normalizedPath}")),
+            // `/app` is virtual: only data/ and workspaces/ below it are real
+            // storage. Saying "Unknown VFS root" here made a caller believe the
+            // root itself was unrecognized, when the path is simply outside the
+            // writable subtrees.
+            [ROOT_APP, unknown, rest @ ..] => Err(format!(
+                "{normalizedPath} is outside the writable VFS roots: /app exposes only \
+/app/data and /app/workspaces (rejected segment: /{unknown}{}{})",
+                if rest.is_empty() { "" } else { "/" },
+                rest.join("/"),
+            )),
+            _ => Err(format!(
+                "Unknown VFS root in {normalizedPath}: known roots are /app, /mnt, /sdcard, /data"
+            )),
         }
     }
 

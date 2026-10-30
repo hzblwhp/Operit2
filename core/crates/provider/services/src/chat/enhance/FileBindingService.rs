@@ -235,11 +235,55 @@ impl FileBindingService {
         self.applyFuzzyOperations(originalContent, &operations)
     }
 
+    /// Replaces single-line OLD blocks that occur verbatim inside a longer line.
+    ///
+    /// Returns `None` when any operation cannot be satisfied this way, so the
+    /// caller falls back to line-window matching unchanged.
+    fn tryInlineSubstringReplace(
+        &self,
+        originalContent: &str,
+        operations: &[EditOperation],
+    ) -> Option<(bool, String)> {
+        let mut content = originalContent.to_string();
+        for op in operations {
+            let oldText = op.oldContent.trim_end_matches('\n');
+            if oldText.is_empty() || oldText.contains('\n') {
+                return None;
+            }
+            let occurrences = content.matches(oldText).count();
+            if occurrences == 0 {
+                return None;
+            }
+            if occurrences > 1 {
+                return Some((
+                    false,
+                    format!(
+                        "OLD block {oldText:?} occurs {occurrences} times in the target file. \
+Please include more surrounding text so it matches a single location."
+                    ),
+                ));
+            }
+            let replacement = match op.action {
+                EditAction::REPLACE => op.newContent.trim_end_matches('\n').to_string(),
+                EditAction::DELETE => String::new(),
+            };
+            content = content.replacen(oldText, &replacement, 1);
+        }
+        Some((true, content))
+    }
+
     fn applyFuzzyOperations(
         &self,
         originalContent: &str,
         operations: &[EditOperation],
     ) -> (bool, String) {
+        // A single-line OLD block is often just a fragment of a longer line
+        // ("hello" inside "hello from agent"). The line-window scorer below can
+        // never match that, because the window length differs by more than its
+        // tolerance, so try an exact in-line replacement first.
+        if let Some(result) = self.tryInlineSubstringReplace(originalContent, operations) {
+            return result;
+        }
         let mut originalLines = originalContent
             .lines()
             .map(str::to_string)
