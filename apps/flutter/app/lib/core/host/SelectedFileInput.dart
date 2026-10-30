@@ -128,7 +128,7 @@ class SelectedFileInput {
   /// Snapshot selection shares the same bounded input owner, but requires a known size.
   static Future<SelectedFileInput?> pickSnapshot({
     List<XTypeGroup> acceptedTypeGroups = const [
-      XTypeGroup(label: 'Operit snapshot', extensions: ['opsnapshot', 'zip']),
+      XTypeGroup(label: 'PengSong snapshot', extensions: ['opsnapshot', 'zip']),
     ],
   }) async {
     if (!kIsWeb &&

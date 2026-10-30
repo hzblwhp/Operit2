@@ -146,11 +146,11 @@ void main(List<String> arguments) async {
             case MainWindowArguments():
               await OperitKeepAlive.instance.initialize(
                 const KeepAliveOptions(
-                  applicationName: 'Operit2',
+                  applicationName: 'PengSong',
                   androidServiceClassName: 'app.pengsong.OperitCoreService',
-                  openLabel: '打开 Operit2',
-                  exitLabel: '退出 Operit2',
-                  quitMessage: '退出将停止后台任务。确定退出 Operit2？',
+                  openLabel: '打开 PengSong',
+                  exitLabel: '退出 PengSong',
+                  quitMessage: '退出将停止后台任务。确定退出 PengSong？',
                 ),
               );
               final coreStopwatch = Stopwatch()..start();
