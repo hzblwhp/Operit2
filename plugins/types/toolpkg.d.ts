@@ -4112,12 +4112,18 @@ export namespace ToolPkg {
     getConfigDir(pluginId?: string): string;
     /**
      * Returns device-local plugin data independent of installation scope during registration and runtime.
+     *
+     * `pluginId` lets a caller name its own package when the surrounding call
+     * context carries no package identity, which is the case for an isolated
+     * Compose DSL UI render.
      */
-    getLocalDataDir(): string;
+    getLocalDataDir(pluginId?: string): string;
     /**
      * Returns shared plugin data independent of installation scope during registration and runtime.
+     *
+     * `pluginId` behaves exactly like the one on `getLocalDataDir`.
      */
-    getSpaceDataDir(): string;
+    getSpaceDataDir(pluginId?: string): string;
   }
 
   /**
@@ -4131,12 +4137,18 @@ export namespace ToolPkg {
   function getConfigDir(pluginId?: string): string;
   /**
    * Returns device-local plugin data independent of installation scope during registration and runtime.
+   *
+   * `pluginId` lets a caller name its own package when the surrounding call
+   * context carries no package identity, which is the case for an isolated
+   * Compose DSL UI render.
    */
-  function getLocalDataDir(): string;
+  function getLocalDataDir(pluginId?: string): string;
   /**
    * Returns shared plugin data independent of installation scope during registration and runtime.
+   *
+   * `pluginId` behaves exactly like the one on `getLocalDataDir`.
    */
-  function getSpaceDataDir(): string;
+  function getSpaceDataDir(pluginId?: string): string;
   /**
    * Extracts a packaged plugin resource and resolves to its readable path.
    */

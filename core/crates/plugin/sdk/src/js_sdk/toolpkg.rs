@@ -3158,9 +3158,15 @@ pub trait ToolPkgRegistryMethods: Send + Sync {
     /// Registration uses the explicitly selected scope before an installation record exists.
     fn getConfigDir(&self, pluginId: Option<String>) -> String;
     /// Returns device-local plugin data independent of installation scope during registration and runtime.
-    fn getLocalDataDir(&self) -> String;
+    ///
+    /// `pluginId` lets a caller name its own package when the surrounding call
+    /// context carries no package identity, which is the case for an isolated
+    /// Compose DSL UI render.
+    fn getLocalDataDir(&self, pluginId: Option<String>) -> String;
     /// Returns shared plugin data independent of installation scope during registration and runtime.
-    fn getSpaceDataDir(&self) -> String;
+    ///
+    /// `pluginId` behaves exactly like the one on `getLocalDataDir`.
+    fn getSpaceDataDir(&self, pluginId: Option<String>) -> String;
 }
 /// Declares the argument that selects the Binding for an implemented plugin method.
 pub struct ToolPkgRouteOptions {
