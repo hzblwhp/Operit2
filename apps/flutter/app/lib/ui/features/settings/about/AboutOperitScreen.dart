@@ -199,7 +199,7 @@ class _CopyrightNotice extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Text(
-      '© 2025 - 2026 Operit. 保留所有权利。',
+      '© 2025 - 2026 PengSong. 保留所有权利。',
       textAlign: TextAlign.center,
       style: Theme.of(context).textTheme.bodySmall?.copyWith(
         color: Theme.of(context).colorScheme.onSurfaceVariant,
