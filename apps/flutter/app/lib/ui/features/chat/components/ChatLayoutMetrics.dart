@@ -7,7 +7,8 @@ const double chatWideContentMaxWidth = themeChatWideContentMaxWidth;
 
 /// Horizontal gap between transcript content and the screen edge.
 ///
-/// Edge-to-edge with zero gutter felt cramped, so the transcript keeps a small
-/// inset of roughly 1 mm on each side: that reads as "uses the full screen"
-/// without the glyphs touching the bezel. Vertical rhythm is untouched.
-const double chatAreaHorizontalPadding = 5;
+/// Density 480 means 1dp = 3px, so 1.5mm is 9.45dp. The previous 5dp could only
+/// give back ~0.8mm in total, so this is 1dp instead: content gains 8dp
+/// (~1.27mm) across both sides, and a 3px gutter still keeps glyphs off the
+/// bezel. Vertical rhythm is untouched.
+const double chatAreaHorizontalPadding = 1;
