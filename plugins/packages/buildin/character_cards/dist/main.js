@@ -7929,8 +7929,6 @@ function register(definition2, screen2, attachmentScreen2, sidebarScreen2, selec
   const sidebarRoute = `toolpkg:${definition2.id}:ui:chat-sidebar`;
   ToolPkg.registerUiRoute({ id: "chat-sidebar", route: sidebarRoute, screen: sidebarScreen2, runtime: "compose_dsl", keepAlive: true, title: { zh: "\u4F1A\u8BDD\u4FA7\u8FB9\u680F", en: "Chat sidebar" } });
   const inputMenuRoute = `toolpkg:${definition2.id}:ui:chat-input-menu`;
-  ToolPkg.registerUiRoute({ id: "chat-input-menu", route: inputMenuRoute, screen: inputMenuScreen2, runtime: "compose_dsl", keepAlive: false, title: { zh: "\u5F53\u524D\u89D2\u8272\u5361", en: "Current character" } });
-  ToolPkg.registerNavigationEntry({ id: "current-character", route: inputMenuRoute, surface: "chat_input_menu", title: { zh: "\u5F53\u524D\u89D2\u8272\u5361", en: "Current character" }, order: definition2.order, params: {} });
   const selectionRoute = `toolpkg:${definition2.id}:ui:selection`;
   ToolPkg.registerUiRoute({ id: "selection", route: selectionRoute, screen: selectionScreen2, runtime: "compose_dsl", keepAlive: false, title: { zh: "\u5207\u6362\u89D2\u8272\u5361", en: "Switch character" } });
   ToolPkg.registerUiRoute({ id: "group-execution", route: `toolpkg:${definition2.id}:ui:group-execution`, screen: groupExecutionScreen2, runtime: "compose_dsl", keepAlive: false, title: { zh: "\u7FA4\u7EC4\u6267\u884C", en: "Group execution" } });
@@ -7939,9 +7937,6 @@ function register(definition2, screen2, attachmentScreen2, sidebarScreen2, selec
   ToolPkg.registerNavigationEntry({ id: "toolbox", route, surface: "toolbox", title: { zh: definition2.title, en: "Characters" }, icon: definition2.icon, order: definition2.order });
   ToolPkg.registerNavigationEntry({ id: "memory-attachment", route: attachmentRoute, surface: "chat_attachments", title: { zh: "\u8BB0\u5FC6\u9644\u4EF6", en: "Memory attachment" }, icon: "Memory", order: definition2.order, params: { mode: "memory-attachment", ownerKey: null, folderPath: null } });
   const memoryMenuRoute = `toolpkg:${definition2.id}:ui:chat-input-memory`;
-  ToolPkg.registerUiRoute({ id: "chat-input-memory", route: memoryMenuRoute, screen: memoryMenuScreen2, runtime: "compose_dsl", keepAlive: false, title: { zh: "\u8BB0\u5FC6", en: "Memory" } });
-  ToolPkg.registerNavigationEntry({ id: "memory-menu", route: memoryMenuRoute, surface: "chat_input_menu_sections", title: { zh: "\u8BB0\u5FC6", en: "Memory" }, order: definition2.order, params: {} });
-  ToolPkg.registerUiRoute({ id: "memory-status", route: `toolpkg:${definition2.id}:ui:memory-status`, screen: memoryStatusScreen2, runtime: "compose_dsl", keepAlive: false, title: { zh: "\u8BB0\u5FC6\u72B6\u6001", en: "Memory status" } });
   return true;
 }
 function receiveUiRequest(value) {
