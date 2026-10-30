@@ -364,8 +364,10 @@ class _CursorAiMessageHeader extends StatelessWidget {
 
     final headerRow = LayoutBuilder(
       builder: (context, constraints) {
+        // The model name is the primary identity here; keep it on one line and
+        // let the stats block yield space (it may wrap without losing meaning).
         final leftMaxWidth = statsText.isNotEmpty
-            ? constraints.maxWidth * 0.48
+            ? constraints.maxWidth * 0.66
             : constraints.maxWidth;
         return Row(
           children: <Widget>[
@@ -374,19 +376,24 @@ class _CursorAiMessageHeader extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
-                  Flexible(
-                    child: InkWell(
-                      onTap: onTap,
-                      child: Text(
-                        primaryTitle,
-                        softWrap: true,
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          fontWeight: FontWeight.w600,
-                          color: colorScheme.onSurface.withValues(alpha: 0.85),
+                  // An empty title would still claim half the row as a Flexible
+                  // and squeeze the model badge into wrapping, so skip it.
+                  if (primaryTitle.isNotEmpty)
+                    Flexible(
+                      child: InkWell(
+                        onTap: onTap,
+                        child: Text(
+                          primaryTitle,
+                          softWrap: false,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                            color: colorScheme.onSurface.withValues(alpha: 0.85),
+                          ),
                         ),
                       ),
                     ),
-                  ),
                   if (modelLabel.isNotEmpty) ...<Widget>[
                     const SizedBox(width: 6),
                     Flexible(
@@ -401,7 +408,9 @@ class _CursorAiMessageHeader extends StatelessWidget {
                         ),
                         child: Text(
                           modelLabel,
-                          softWrap: true,
+                          softWrap: false,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: theme.textTheme.labelSmall?.copyWith(
                             fontSize: 10,
                             color: colorScheme.onSurface.withValues(
