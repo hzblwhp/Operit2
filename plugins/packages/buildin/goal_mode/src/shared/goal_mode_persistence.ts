@@ -6,7 +6,10 @@ let database: Promise<Storage.ObjectDatabase> | null = null;
 /** Opens the goal package's synchronized database without consulting chat workspaces. */
 function openGoalDatabase(): Promise<Storage.ObjectDatabase> {
   if (database === null) {
-    database = Tools.Storage.objects.open({ path: ToolPkg.getSpaceDataDir() + "/goals.sqlite" });
+    // A UI render runs in its own call context that may not carry the owning
+    // package identity; pass it explicitly so the first open cannot fail with
+    // "package/toolpkg runtime target is empty".
+    database = Tools.Storage.objects.open({ path: ToolPkg.getSpaceDataDir("com.operit.goal_mode_bundle") + "/goals.sqlite" });
   }
   return database;
 }

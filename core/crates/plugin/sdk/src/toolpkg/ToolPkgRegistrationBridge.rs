@@ -525,12 +525,14 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
         }
 
         /** Resolves the executing container's stable local data through its Host. */
-        function getToolPkgLocalDataDir() {
+        function getToolPkgLocalDataDir(pluginId) {
+            var explicitId = String(pluginId || '').trim();
             var owner = resolveCurrentToolPkgTarget();
-            if (!owner) {
+            var target = explicitId || owner;
+            if (!target) {
                 throw new Error('package/toolpkg runtime target is empty');
             }
-            var path = __operitNativeGetPluginLocalDataDir(owner);
+            var path = __operitNativeGetPluginLocalDataDir(target);
             if (typeof path !== 'string' || !path.startsWith('/')) {
                 throw new Error('Plugin local data directory must be an absolute VFS path');
             }
@@ -538,10 +540,19 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
         }
 
         /** Resolves persistent shared data without changing the plugin's installation scope. */
-        function getToolPkgSpaceDataDir() {
+        /**
+         * Resolves the plugin space data directory.
+         *
+         * A UI render runs in its own call context, which may not carry the
+         * owning package identity, so callers that already know their package
+         * can pass it explicitly instead of failing with an empty target.
+         */
+        function getToolPkgSpaceDataDir(pluginId) {
+            var explicitId = String(pluginId || '').trim();
             var owner = resolveCurrentToolPkgTarget();
-            if (!owner) { throw new Error('package/toolpkg runtime target is empty'); }
-            var path = __operitNativeGetPluginSpaceDataDir(owner);
+            var target = explicitId || owner;
+            if (!target) { throw new Error('package/toolpkg runtime target is empty'); }
+            var path = __operitNativeGetPluginSpaceDataDir(target);
             if (typeof path !== 'string' || !path.startsWith('/')) {
                 throw new Error('Plugin shared data directory must be an absolute VFS path');
             }
