@@ -3153,8 +3153,18 @@ fn textIntermediateCallback(callback: Option<Arc<dyn Fn(String) + Send + Sync>>)
 }
 
 /// Delivers DSL values to their active or detached execution owner without JSON text.
+///
+/// The registry is process-wide, not thread-local: a Compose render finishes on a
+/// worker thread while `activateCall` ran on another, so a thread-local lookup
+/// silently dropped every sealed frame and the page reported
+/// "Compose render completed without a root node".
+///
+/// The callback is cloned out before it runs, so the registry mutex is released
+/// first — calling JS while holding it deadlocked long IPC calls (see 4fa23a52).
 fn sendStructuredIntermediate(callId: &str, value: operit_host_api::HostJavaScriptValue) {
-    let active = CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| contexts.borrow().get(callId).and_then(|context| context.intermediateCallback.clone()));
+    let active = activeCallContexts()
+        .get(callId)
+        .and_then(|context| context.intermediateCallback.clone());
     let detached = CURRENT_DETACHED_INTERMEDIATE_CALLBACKS.with(|callbacks| callbacks.borrow().get(callId).cloned());
     match (active, detached) {
         (Some(callback), _) => callback(value),
