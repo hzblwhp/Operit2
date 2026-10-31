@@ -227,3 +227,7 @@ apps/flutter/app/macos/Runner/Configs/Signing.local.xcconfig
 # Build-owned Flutter engine font resources
 apps/flutter/app/web/fonts/
 tools/theme/preview/web/fonts/
+
+# WSL 构建用的本地配置（含绝对路径，不该进仓库）
+apps/flutter/app/android/local.properties.wsl
+apps/flutter/app/.flutter-plugins-dependencies.wsl
