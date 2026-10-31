@@ -1,6 +1,7 @@
 // ignore_for_file: file_names
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 import 'package:operit_ui/operit_ui.dart';
@@ -76,7 +77,14 @@ class ThemeTemplateService {
           'Template receipt contains an undeclared or duplicate resource',
         );
       }
-      assets[asset.path] = asset.bytes;
+      // Core 经 MessagePack 传回来的二进制不保证是 Uint8List（可能是
+      // List<dynamic>）。直接赋给 Map<String, Uint8List> 会在运行时抛
+      // "type 'List<dynamic>' is not a subtype of type 'Uint8List' in type cast"，
+      // 把整个外观加载打成"无法加载外观设置"。这里统一规范化。
+      final rawBytes = asset.bytes;
+      assets[asset.path] = rawBytes is Uint8List
+          ? rawBytes
+          : Uint8List.fromList(List<int>.from(rawBytes as List));
     }
     if (assets.length != digests.length) {
       throw StateError('Template receipt is missing declared resources');

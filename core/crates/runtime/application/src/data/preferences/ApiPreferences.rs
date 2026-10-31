@@ -28,7 +28,7 @@ impl ApiPreferences {
     pub const DEFAULT_DISABLE_STREAM_OUTPUT: bool = false;
     pub const DEFAULT_DISABLE_USER_PREFERENCE_DESCRIPTION: bool = false;
     pub const DEFAULT_MCP_STARTUP_TIMEOUT_SECONDS: i32 = 10;
-    pub const DEFAULT_TOOLPKG_PRE_HOOK_TIMEOUT_SECONDS: i32 = 10;
+    pub const DEFAULT_TOOLPKG_PRE_HOOK_TIMEOUT_SECONDS: i32 = 60; // 上限：本地 LLM 忙时 hook 链排队会吃满预算 // 10s 在本地 LLM 占满 CPU 时不够：hook/public-api 的 JS worker 排队等待即超时（小吴冒烟测试 B7）
     pub const DEFAULT_TOOL_PROMPT_VISIBILITY_JSON: &'static str = "{}";
     pub const DEFAULT_FEATURE_TOGGLES_JSON: &'static str = "{}";
 

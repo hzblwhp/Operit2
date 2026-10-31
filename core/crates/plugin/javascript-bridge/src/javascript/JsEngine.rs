@@ -1210,9 +1210,25 @@ impl JsEngineState {
             // at once, dropping the smallest ids first.
             if contexts.len() > ACTIVE_CALL_CONTEXT_LIMIT {
                 let excess = contexts.len() - ACTIVE_CALL_CONTEXT_LIMIT;
-                let victims: Vec<String> = contexts.keys().take(excess).cloned().collect();
-                for id in victims {
-                    contexts.remove(&id);
+                // B-trees order by key, and keys start with a uuid, so blindly
+                // taking the first N can evict a call that is still running
+                // while retired-but-kept entries survive. Evict retired entries
+                // first; only touch live ones when everything is live.
+                let retired: Vec<String> = contexts
+                    .iter()
+                    .filter(|(_, context)| context.retired)
+                    .map(|(id, _)| id.clone())
+                    .take(excess)
+                    .collect();
+                for id in &retired {
+                    contexts.remove(id);
+                }
+                let remaining = contexts.len().saturating_sub(ACTIVE_CALL_CONTEXT_LIMIT);
+                if remaining > 0 {
+                    let victims: Vec<String> = contexts.keys().take(remaining).cloned().collect();
+                    for id in victims {
+                        contexts.remove(&id);
+                    }
                 }
             }
             let after = contexts.keys().cloned().collect::<Vec<String>>();

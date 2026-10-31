@@ -369,8 +369,12 @@ class _ComposeProgramStore {
 
   /// Commits typed program data from transport or Flutter-owned inline instructions.
   void applyProgram(compose_buffer.ComposeProgramTransaction update) {
-    if (!update.reset && update.revision != _revision + 1)
-      throw StateError('Compose transaction revision is out of order');
+    if (!update.reset) {
+      // 并发渲染/重试会让事务乱序：重复提交（revision 相同）或旧事务晚到
+      // （revision 更小）都说明状态已经在更前面，直接丢弃即可。
+      // 抛 Bad state 会把整个 Compose 页面打成错误横幅，代价远大于丢弃一次增量。
+      if (update.revision <= _revision) return;
+    }
     final definitions = <String, _ComposeLayoutProgram>{};
     for (final definition in update.programs) {
       if (definitions.containsKey(definition.id) ||

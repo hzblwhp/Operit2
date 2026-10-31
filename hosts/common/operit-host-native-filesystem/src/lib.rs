@@ -145,7 +145,18 @@ impl FileSystemHost for PosixFileSystemHost {
             if recursive {
                 fs::remove_dir_all(target)?;
             } else {
-                fs::remove_dir(target)?;
+                // A bare ENOTEMPTY ("Directory not empty (os error 39)") tells the
+                // caller nothing actionable; name the fix instead. (Reported as C1 by
+                // the on-device smoke-test agent 2026-10-31.)
+                fs::remove_dir(target).map_err(|error| {
+                    if error.raw_os_error() == Some(39) {
+                        HostError::new(format!(
+                            "Directory is not empty: {path}. Pass recursive: true to delete it with its contents (os error 39)"
+                        ))
+                    } else {
+                        HostError::from(error)
+                    }
+                })?;
             }
         } else {
             fs::remove_file(target)?;

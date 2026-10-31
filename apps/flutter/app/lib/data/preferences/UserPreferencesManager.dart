@@ -166,7 +166,9 @@ class UserPreferencesManager {
     'bubbleAiFontType': 'bubble_ai_font_type',
     'bubbleAiSystemFontName': 'bubble_ai_system_font_name',
     'bubbleAiCustomFontPath': 'bubble_ai_custom_font_path',
-    'showThinkingProcess': 'show_thinking_process',
+    // v2：旧键 show_thinking_process 在已装机用户里是 true（旧默认），
+    // 改名让旧值作废，新默认 false 生效（2026-10-31 鹏哥指出思考不得出现在正文）
+    'showThinkingProcess': 'show_thinking_process_v2',
     'showModelProvider': 'show_model_provider',
     'showModelName': 'show_model_name',
     'showRoleName': 'show_role_name',

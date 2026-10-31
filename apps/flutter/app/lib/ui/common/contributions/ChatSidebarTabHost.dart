@@ -359,7 +359,9 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
         throw StateError('The activating sidebar tab is no longer current.');
       }
       if (_activating) {
-        throw StateError('A sidebar chat activation is already running.');
+        // 连点或插件重复派发会让第二次激活在同一时刻进来。第一次已经在跑，
+        // 这一次直接忽略——把界面打成 Bad state 错误态没有任何好处。
+        return;
       }
       _activating = true;
       acquiredActivation = true;

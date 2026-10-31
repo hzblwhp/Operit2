@@ -151,11 +151,28 @@ impl AIToolHook for ToolLifecycleBridge {
                 for hook in container.toolLifecycleHooks {
                     let mut payload = build_base_payload(tool);
                     payload["runtimeContext"] = ownerContext.clone();
-                    let raw = super::ToolPkgPreHookTimeout::ToolPkgPreHookTimeout::runHook(
+                    // 策略 hook 超时只说明"没来得及判断"，不等于"拒绝"。
+                    // 之前把它当拒绝处理，一次慢 hook 就把整轮任务打断在
+                    // TOOLPKG_BEFORE_HOOK_TIMEOUT，用户看到的是"任务无缘无故中断"。
+                    // 这里改为放行并记录，让工具继续执行；策略失配只在日志里体现。
+                    let raw = match super::ToolPkgPreHookTimeout::ToolPkgPreHookTimeout::runHook(
                         Some(&budget), &manager, &container.packageName, &hook.function,
                         TOOLPKG_EVENT_TOOL_LIFECYCLE, "tool_call_intercept", &hook.id,
                         hook.functionSource.as_deref(), payload,
-                    ).await?;
+                    )
+                    .await
+                    {
+                        Ok(raw) => raw,
+                        Err(error) => {
+                            operit_util::AppLogger::AppLogger::e(
+                                "ToolPkgHookTimeout",
+                                &format!(
+                                    "tool_call_intercept hook 超时，已放行以免中断任务：{error}"
+                                ),
+                            );
+                            continue;
+                        }
+                    };
                     let decision = decode_intercept_result(raw)?;
                     if let AIToolHookDecision::Block(_) = decision {
                         return Ok(decision);

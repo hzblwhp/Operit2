@@ -87,6 +87,56 @@ pub struct AITool {
     pub parameters: Vec<ToolParameter>,
 }
 
+/// Rewrites leaked physical storage prefixes in user-facing tool errors back to
+/// their virtual /app form. Host walk/grep errors embed real identity paths like
+/// `/data/user/0/app.pengsong/files/runtime/identities/identity-...`; leaking them
+/// is both a privacy smell and inconsistent with the VFS the model was given.
+/// (B4, reported by the on-device smoke-test agent 2026-10-31)
+#[allow(non_snake_case)]
+pub fn sanitizeErrorPathsForUser(message: &str) -> String {
+    // 1. Physical identity roots to their virtual /app form.
+    let collapsed = message.replace(
+        "/data/user/0/app.pengsong/files/runtime/identities/",
+        "/app/",
+    );
+    let collapsed = collapsed.replace(
+        "/data/user/0/app.pengsong/files/workspaces/identities/",
+        "/app/workspaces/",
+    );
+    let collapsed = collapsed.replace("/data/user/0/app.pengsong/files", "/app");
+    // 2. Fold any residual identity segment (identity-xxxx) wherever it appears
+    //    under /app, keeping the surrounding tree shape.
+    let mut out = String::with_capacity(collapsed.len() + 8);
+    let mut i = 0;
+    while i < collapsed.len() {
+        let rest = &collapsed[i..];
+        if let Some(stripped) = rest.strip_prefix("identities/identity-") {
+            if let Some(slash) = stripped.find('/') {
+                i += "identities/identity-".len() + slash + 1;
+            } else {
+                break;
+            }
+        } else if let Some(stripped) = rest.strip_prefix("identity-") {
+            if let Some(slash) = stripped.find('/') {
+                i += "identity-".len() + slash + 1;
+            } else {
+                break;
+            }
+        } else if rest.starts_with("/app//") {
+            out.push_str("/app/");
+            i += "/app//".len();
+        } else if rest.starts_with("//") {
+            out.push('/');
+            i += 2;
+        } else {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
 /// Preserves structured parameters through the common invocation pipeline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -465,9 +515,11 @@ impl ToolExecutionManager {
                         } else {
                             format!(
                                 "Step error: {}",
-                                item.error
-                                    .clone()
-                                    .unwrap_or_else(|| "Unknown error".to_string())
+                                sanitizeErrorPathsForUser(
+                                    &item.error
+                                        .clone()
+                                        .unwrap_or_else(|| "Unknown error".to_string()),
+                                )
                             )
                         }
                     })
@@ -479,7 +531,7 @@ impl ToolExecutionManager {
                     toolName: displayToolName.clone(),
                     success: last.success,
                     result: stringResultData(combinedResultString),
-                    error: last.error.clone(),
+                    error: last.error.clone().map(|error| sanitizeErrorPathsForUser(&error)),
                 };
                 if let Some(intent) = Self::routeChangeIntentForResult(&invocation.tool, last) {
                     routeChangeIntent = Some(intent);

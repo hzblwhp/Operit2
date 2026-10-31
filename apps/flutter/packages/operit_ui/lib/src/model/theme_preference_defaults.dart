@@ -118,7 +118,7 @@ class ThemePreferenceDefaults {
     bubbleAiFontType: FONT_TYPE_SYSTEM,
     bubbleAiSystemFontName: SYSTEM_FONT_DEFAULT,
     bubbleAiCustomFontPath: null,
-    showThinkingProcess: true,
+    showThinkingProcess: false, // 默认不显示思考：思考内容不得出现在正文区（2026-10-31 鹏哥指出）
     showModelProvider: false,
     showModelName: false,
     showRoleName: true,

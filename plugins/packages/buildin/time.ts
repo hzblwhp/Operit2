@@ -27,7 +27,26 @@
         zh: "格式化时间。提供各种时间格式化选项。"
         en: "Format time. Provides various time formatting options."
       }
-      parameters: []
+      parameters: [
+          {
+            name: time
+            type: integer
+            required: false
+            description: {
+              zh: "要格式化的 Unix 时间戳（毫秒）。缺省为当前时间。"
+              en: "Unix timestamp in milliseconds to format. Defaults to now."
+            }
+          },
+          {
+            name: pattern
+            type: string
+            required: false
+            description: {
+              zh: "输出模式。可选 24h、12h、date、iso，缺省为 24h。"
+              en: "Output pattern. One of 24h, 12h, date, iso. Defaults to 24h."
+            }
+          }
+        ]
     }
   ]
 }*/
@@ -54,8 +73,10 @@ const timePackage = (function () {
     };
   }
 
-  async function format_time(): Promise<any> {
-    const now = new Date();
+  async function format_time(params: any): Promise<any> {
+    const args = params && typeof params === 'object' ? params : {};
+    const now = args.time != null ? new Date(Number(args.time)) : new Date();
+    const pattern = (args.pattern != null ? String(args.pattern) : '24h').toLowerCase();
 
     const pad = (n: number) => n.toString().padStart(2, '0');
 
@@ -69,12 +90,14 @@ const timePackage = (function () {
     const hour12 = hours % 12 === 0 ? 12 : hours % 12;
     const time12h = `${pad(hour12)}:${pad(minutes)}:${pad(seconds)} ${suffix}`;
 
-    return {
-      iso: now.toISOString(),
-      date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
-      time24h,
-      time12h
-    };
+    const iso = now.toISOString();
+    const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const ts = now.getTime();
+
+    if (pattern === '12h') return { pattern: '12h', value: time12h, timestamp: ts };
+    if (pattern === 'date') return { pattern: 'date', value: date, timestamp: ts };
+    if (pattern === 'iso') return { pattern: 'iso', value: iso, timestamp: ts };
+    return { pattern: '24h', value: time24h, timestamp: ts };
   }
 
   return {
