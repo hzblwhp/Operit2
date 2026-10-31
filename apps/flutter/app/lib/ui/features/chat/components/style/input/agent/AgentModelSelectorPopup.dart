@@ -1,5 +1,7 @@
 // ignore_for_file: file_names
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'package:operit2/ui/main/navigation/AppNavigationModels.dart';
@@ -7,6 +9,7 @@ import 'package:operit2/ui/main/screens/OperitScreens.dart';
 import 'package:operit2/ui/main/screens/ScreenRouteRegistry.dart';
 import 'package:operit2/ui/features/settings/models/SettingsModels.dart';
 
+import '../../../../../../../core/chat/ChatScopedModelBinding.dart';
 import '../../../../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../../../../core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
@@ -19,9 +22,14 @@ class AgentModelSelectorPopup extends StatefulWidget {
     required this.viewModel,
     required this.onDismiss,
     required this.onModelChanged,
+    this.chatId,
   });
 
   final ChatViewModel viewModel;
+
+  /// 当前会话 id；用于把选中模型只固定到这一个会话。
+  /// 为空时「仅本会话」开关不可用。
+  final String? chatId;
   final VoidCallback onDismiss;
   final void Function(
     String modelId, {
@@ -41,6 +49,8 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
   String? _expandedProviderId;
   String? _expandedFamilyKey;
   int? _thinkingStop;
+  bool _applyToCurrentChatOnly = false;
+  ChatScopedModelBinding? _scopedBinding;
 
   GeneratedCoreProxyClients get _clients => widget.viewModel.clients;
 
@@ -49,6 +59,40 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
   void initState() {
     super.initState();
     _settingsFuture = _loadSettings();
+    unawaited(_reloadScopedBinding());
+  }
+
+  /// 读取本会话已保存的模型绑定，用于开关与「清除」入口的展示。
+  Future<void> _reloadScopedBinding() async {
+    final chatId = widget.chatId?.trim() ?? '';
+    final binding = chatId.isEmpty
+        ? null
+        : await ChatScopedModelBinding.read(_clients, chatId);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _scopedBinding = binding;
+      if (binding != null) {
+        _applyToCurrentChatOnly = true;
+      }
+    });
+  }
+
+  /// 清除本会话绑定，回到跟随全局对话模型。
+  Future<void> _clearScopedBinding() async {
+    final chatId = widget.chatId?.trim() ?? '';
+    if (chatId.isEmpty) {
+      return;
+    }
+    await ChatScopedModelBinding.clear(_clients, chatId);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _scopedBinding = null;
+      _applyToCurrentChatOnly = false;
+    });
   }
 
   /// Loads model, context, and thinking settings for the popup.
@@ -69,11 +113,26 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
       );
       return;
     }
-    await _clients.preferencesFunctionalConfigManager.setModelForFunction(
-      functionType: core_proxy.FunctionType.chat,
-      providerId: provider.id,
-      modelId: model.id,
-    );
+    final chatId = widget.chatId?.trim() ?? '';
+    if (_applyToCurrentChatOnly && chatId.isNotEmpty) {
+      // 仅本会话：写会话级绑定，不动全局对话模型
+      await ChatScopedModelBinding.write(
+        _clients,
+        chatId,
+        providerId: provider.id,
+        modelId: model.id,
+      );
+      _scopedBinding = ChatScopedModelBinding(
+        providerId: provider.id,
+        modelId: model.id,
+      );
+    } else {
+      await _clients.preferencesFunctionalConfigManager.setModelForFunction(
+        functionType: core_proxy.FunctionType.chat,
+        providerId: provider.id,
+        modelId: model.id,
+      );
+    }
     widget.onModelChanged(
       model.id,
       providerTypeId: provider.providerTypeId,
@@ -198,6 +257,17 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
+                    _ChatModelScopeRow(
+                      chatId: widget.chatId,
+                      checked: _applyToCurrentChatOnly,
+                      scopedBinding: _scopedBinding,
+                      onToggle: (value) {
+                        setState(() {
+                          _applyToCurrentChatOnly = value;
+                        });
+                      },
+                      onClear: _clearScopedBinding,
+                    ),
                     AgentThinkingSliderRow(
                       stops: stops,
                       stop: _thinkingStop ?? _resolveThinkingStop(data, levels),
@@ -248,10 +318,14 @@ class AgentModelMenuSection extends StatefulWidget {
     super.key,
     required this.viewModel,
     required this.onDismiss,
+    this.chatId,
   });
 
   final ChatViewModel viewModel;
   final VoidCallback onDismiss;
+
+  /// 当前会话 id；为空时「仅本会话」开关不可用。
+  final String? chatId;
 
   /// Creates the mutable state for the embedded model menu section.
   @override
@@ -265,6 +339,8 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
   bool _modelSectionExpanded = false;
   bool _modelDropdownExpanded = false;
   bool? _enableThinkingMode;
+  bool _applyToCurrentChatOnly = false;
+  ChatScopedModelBinding? _scopedBinding;
 
   GeneratedCoreProxyClients get _clients => widget.viewModel.clients;
 
@@ -273,6 +349,40 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
   void initState() {
     super.initState();
     _settingsFuture = _loadSettings();
+    unawaited(_reloadScopedBinding());
+  }
+
+  /// 读取本会话已保存的模型绑定。
+  Future<void> _reloadScopedBinding() async {
+    final chatId = widget.chatId?.trim() ?? '';
+    final binding = chatId.isEmpty
+        ? null
+        : await ChatScopedModelBinding.read(_clients, chatId);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _scopedBinding = binding;
+      if (binding != null) {
+        _applyToCurrentChatOnly = true;
+      }
+    });
+  }
+
+  /// 清除本会话绑定，回到跟随全局对话模型。
+  Future<void> _clearScopedBinding() async {
+    final chatId = widget.chatId?.trim() ?? '';
+    if (chatId.isEmpty) {
+      return;
+    }
+    await ChatScopedModelBinding.clear(_clients, chatId);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _scopedBinding = null;
+      _applyToCurrentChatOnly = false;
+    });
   }
 
   /// Loads model selector state for the embedded input menu section.
@@ -293,11 +403,26 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
       );
       return;
     }
-    await _clients.preferencesFunctionalConfigManager.setModelForFunction(
-      functionType: core_proxy.FunctionType.chat,
-      providerId: provider.id,
-      modelId: model.id,
-    );
+    final chatId = widget.chatId?.trim() ?? '';
+    if (_applyToCurrentChatOnly && chatId.isNotEmpty) {
+      // 仅本会话：写会话级绑定，不动全局对话模型
+      await ChatScopedModelBinding.write(
+        _clients,
+        chatId,
+        providerId: provider.id,
+        modelId: model.id,
+      );
+      _scopedBinding = ChatScopedModelBinding(
+        providerId: provider.id,
+        modelId: model.id,
+      );
+    } else {
+      await _clients.preferencesFunctionalConfigManager.setModelForFunction(
+        functionType: core_proxy.FunctionType.chat,
+        providerId: provider.id,
+        modelId: model.id,
+      );
+    }
     widget.onDismiss();
   }
 
@@ -403,6 +528,17 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
+                        _ChatModelScopeRow(
+                          chatId: widget.chatId,
+                          checked: _applyToCurrentChatOnly,
+                          scopedBinding: _scopedBinding,
+                          onToggle: (value) {
+                            setState(() {
+                              _applyToCurrentChatOnly = value;
+                            });
+                          },
+                          onClear: _clearScopedBinding,
+                        ),
                         _ModelSelectorItem(
                           popupContainerColor: embeddedPanelColor,
                           headerIcon: Icons.tune_outlined,
@@ -1911,4 +2047,115 @@ int _selectedOptionIndex(_AgentModelSelectorData data) {
 /// Returns whether the model is reserved for UI control instead of chat.
 bool _isDisallowedChatModel(String modelId) {
   return modelId.toLowerCase().contains('autoglm');
+}
+
+/// 会话级模型作用范围开关。
+///
+/// 打开后，在下面选中的模型只写进当前会话的绑定，不影响全局对话模型；
+/// 已有会话级绑定时额外提供「清除」入口以恢复跟随全局。
+class _ChatModelScopeRow extends StatelessWidget {
+  const _ChatModelScopeRow({
+    required this.chatId,
+    required this.checked,
+    required this.scopedBinding,
+    required this.onToggle,
+    required this.onClear,
+  });
+
+  final String? chatId;
+  final bool checked;
+  final ChatScopedModelBinding? scopedBinding;
+  final ValueChanged<bool> onToggle;
+  final Future<void> Function() onClear;
+
+  /// Builds the scope switch row.
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final hasChat = (chatId ?? '').trim().isNotEmpty;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        InkWell(
+          onTap: hasChat ? () => onToggle(!checked) : null,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 8, 2),
+            child: Row(
+              children: <Widget>[
+                Icon(
+                  Icons.filter_alt_outlined,
+                  size: 16,
+                  color: hasChat
+                      ? (checked
+                            ? colorScheme.primary
+                            : colorScheme.onSurfaceVariant.withValues(
+                                alpha: 0.7,
+                              ))
+                      : colorScheme.onSurfaceVariant.withValues(alpha: 0.35),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Text(
+                        '仅对本会话生效',
+                        style: textTheme.bodySmall?.copyWith(
+                          color: hasChat
+                              ? (checked
+                                    ? colorScheme.primary
+                                    : colorScheme.onSurface)
+                              : colorScheme.onSurfaceVariant.withValues(
+                                  alpha: 0.5,
+                                ),
+                          fontWeight: checked
+                              ? FontWeight.w600
+                              : FontWeight.normal,
+                        ),
+                      ),
+                      Text(
+                        hasChat
+                            ? '打开后所选模型只作用于当前会话，其他会话不变'
+                            : '当前没有可用的会话',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: textTheme.labelSmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant.withValues(
+                            alpha: 0.75,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Switch.adaptive(
+                  value: checked,
+                  onChanged: hasChat ? onToggle : null,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (scopedBinding != null)
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: TextButton.icon(
+                onPressed: () {
+                  unawaited(onClear());
+                },
+                icon: const Icon(Icons.restart_alt, size: 16),
+                label: Text(
+                  '清除本会话模型（当前 ${scopedBinding!.modelId}）',
+                  style: textTheme.labelSmall,
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
 }

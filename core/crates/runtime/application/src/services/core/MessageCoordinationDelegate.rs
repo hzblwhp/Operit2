@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 
 use crate::core::chat::AIMessageManager::{AIMessageManager, StableContextWindowRequest};
 use crate::data::preferences::ApiPreferences::ApiPreferences;
+use crate::data::preferences::PreferenceStorageManager::PreferenceStorageManager;
 use crate::services::core::ChatHistoryDelegate::ChatHistoryDelegate;
 use crate::services::core::MessageProcessingDelegate::ChatTurnSubmission;
 use crate::services::core::MessageProcessingDelegate::{
@@ -30,6 +31,57 @@ use operit_providers::chat::EnhancedAIService::{EnhancedAIService, SendMessageOp
 use operit_providers::runtime_support::ChatConfigurationResult;
 use operit_util::AppLogger::AppLogger;
 use operit_util::ChainLogger::{self, SEND_CHAIN};
+
+/// 会话级模型绑定所在的 preference 文件名。
+///
+/// key 是 chatId，value 是 `{"providerId": "...", "modelId": "..."}`。
+/// 读写两侧必须逐字对齐：Flutter 侧在 `ChatScopedModelBinding` 里用同一个
+/// 文件名和同样的 JSON 形状（见 `lib/core/chat/ChatScopedModelBinding.dart`）。
+pub const CHAT_SCOPED_MODEL_PREFERENCES: &str = "chat_scoped_model_binding";
+
+/// 读取某个会话单独配置的模型绑定；没有配置时返回 None。
+#[allow(non_snake_case)]
+pub fn readChatScopedModelBinding(chatId: &str) -> Option<(String, String)> {
+    if chatId.trim().is_empty() {
+        return None;
+    }
+    let value = PreferenceStorageManager::getInstance()
+        .getPreference(CHAT_SCOPED_MODEL_PREFERENCES, chatId)
+        .ok()??;
+    let providerId = value.get("providerId")?.as_str()?.trim().to_string();
+    let modelId = value.get("modelId")?.as_str()?.trim().to_string();
+    if providerId.is_empty() || modelId.is_empty() {
+        return None;
+    }
+    Some((providerId, modelId))
+}
+
+/// 写入某个会话的模型绑定。
+#[allow(non_snake_case)]
+pub fn writeChatScopedModelBinding(
+    chatId: &str,
+    providerId: &str,
+    modelId: &str,
+) -> Result<(), String> {
+    PreferenceStorageManager::getInstance()
+        .setPreference(
+            CHAT_SCOPED_MODEL_PREFERENCES,
+            chatId,
+            serde_json::json!({
+                "providerId": providerId,
+                "modelId": modelId,
+            }),
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// 清除某个会话的模型绑定，让它回落到全局配置。
+#[allow(non_snake_case)]
+pub fn clearChatScopedModelBinding(chatId: &str) -> Result<(), String> {
+    PreferenceStorageManager::getInstance()
+        .removePreference(CHAT_SCOPED_MODEL_PREFERENCES, chatId)
+        .map_err(|error| error.to_string())
+}
 
 /// Preserves the originating user turn and execution lease through context compaction.
 pub(crate) struct SummaryContinuationRequest {
@@ -593,6 +645,16 @@ impl MessageCoordinationDelegate {
             },
         };
         self.chatHistoryDelegate.requireChatExists(&chatId)?;
+        // 会话级模型：调用方显式传入的 override 优先级最高；没传时用本会话单独
+        // 保存的绑定；两者都没有才回落到全局 CHAT 配置。放在这里是因为此后
+        // 所有下游（正常发送、自动续写、摘要、分组编排）都统一读
+        // currentChat*Override，改一处即可覆盖全链路。
+        if self.currentChatProviderIdOverride.is_none() && self.currentChatModelIdOverride.is_none() {
+            if let Some((providerId, modelId)) = readChatScopedModelBinding(&chatId) {
+                self.currentChatProviderIdOverride = Some(providerId);
+                self.currentChatModelIdOverride = Some(modelId);
+            }
+        }
         if let Some(continuation) = &turnOptions.continuation {
             if !messageText.is_empty() || !attachments.is_empty() || replyToMessage.is_some() || proxySenderNameOverride.is_some() {
                 return Err("Continuation cannot resubmit text, attachments, reply target or sender name".to_string());

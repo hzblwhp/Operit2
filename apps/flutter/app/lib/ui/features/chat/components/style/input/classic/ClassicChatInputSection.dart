@@ -276,6 +276,7 @@ class _ClassicChatInputSectionState extends State<ClassicChatInputSection>
             leadingChildren: <Widget>[
               AgentModelMenuSection(
                 viewModel: widget.viewModel,
+                chatId: chatId,
                 onDismiss: _dismissInputMenuPopup,
               ),
               const Divider(height: 1),

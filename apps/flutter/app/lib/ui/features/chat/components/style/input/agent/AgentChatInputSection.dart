@@ -318,6 +318,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
                   child: AgentModelSelectorPopup(
                     key: _modelPopupWidgetKey,
                     viewModel: widget.viewModel,
+                    chatId: widget.currentChatId,
                     onDismiss: _dismissModelSettingsPopup,
                     onModelChanged: _handleModelChanged,
                   ),

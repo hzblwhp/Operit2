@@ -92,15 +92,11 @@ class _AboutHeaderState extends State<_AboutHeader> {
     final colorScheme = Theme.of(context).colorScheme;
     return Column(
       children: <Widget>[
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: colorScheme.primaryContainer,
-            shape: BoxShape.circle,
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: OperitLogoMark(size: 76, color: colorScheme.primary),
-          ),
+        // logo 自身是绿底品牌图，外面再套 primaryContainer 圆底会串色，
+        // 所以这里只留内边距，让品牌标记本身成为视觉焦点。
+        const Padding(
+          padding: EdgeInsets.all(20),
+          child: OperitLogoMark(size: 76),
         ),
         const SizedBox(height: 14),
         Text(

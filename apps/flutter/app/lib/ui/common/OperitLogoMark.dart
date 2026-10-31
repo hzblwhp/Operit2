@@ -2,103 +2,67 @@
 
 import 'package:flutter/material.dart';
 
+/// 品牌标记：显示 PengSong 的官方 logo 图片。
+///
+/// 历史上这个组件是用 CustomPainter 画 Operit 的矢量图形；改成显示
+/// `assets/images/pengsong_logo.png`，一次替换后关于页、开机引导、
+/// 启动页、侧边栏收起态、Toast、聊天分享图都会同步生效。
 class OperitLogoMark extends StatelessWidget {
   const OperitLogoMark({
     super.key,
     this.size = 32,
     this.contentScale = 0.88,
     this.color = const Color(0xFF3882C7),
+    this.shape = BoxShape.circle,
   });
 
   final double size;
+
+  /// 图标在方框内所占比例（1.0 表示铺满）。保留原名以兼容旧调用点。
   final double contentScale;
+
+  /// 旧接口的颜色参数。logo 使用自身品牌色，此参数不再参与绘制。
   final Color color;
+
+  /// 裁剪形状。默认圆形，与各处的圆形徽标容器一致。
+  final BoxShape shape;
 
   @override
   Widget build(BuildContext context) {
+    final inset = size * (1 - contentScale).clamp(0.0, 1.0) / 2;
     return SizedBox.square(
       dimension: size,
-      child: CustomPaint(
-        painter: _OperitLogoPainter(contentScale: contentScale, color: color),
+      child: Padding(
+        padding: EdgeInsets.all(inset),
+        child: _clip(
+          Image.asset(
+            'assets/images/pengsong_logo.png',
+            fit: BoxFit.cover,
+            filterQuality: FilterQuality.medium,
+            // logo 只是装饰性品牌标记，读不到时不阻塞界面
+            errorBuilder: (context, error, stackTrace) => ColoredBox(
+              color: const Color(0xFF13713D),
+              child: Center(
+                child: Icon(
+                  Icons.spa_outlined,
+                  size: size * 0.5,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
-}
 
-class _OperitLogoPainter extends CustomPainter {
-  const _OperitLogoPainter({required this.contentScale, required this.color});
-
-  final double contentScale;
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final path = _parsePathData(_pathData);
-    final bounds = path.getBounds();
-    final scale = size.shortestSide * contentScale / bounds.longestSide;
-    canvas.save();
-    canvas.translate(
-      (size.width - bounds.width * scale) / 2 - bounds.left * scale,
-      (size.height - bounds.height * scale) / 2 - bounds.top * scale,
-    );
-    canvas.scale(scale);
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = color
-        ..style = PaintingStyle.fill
-        ..isAntiAlias = true,
-    );
-    canvas.restore();
-  }
-
-  @override
-  bool shouldRepaint(covariant _OperitLogoPainter oldDelegate) {
-    return oldDelegate.contentScale != contentScale ||
-        oldDelegate.color != color;
-  }
-}
-
-Path _parsePathData(String data) {
-  final path = Path()..fillType = PathFillType.evenOdd;
-  final tokens = RegExp(
-    r'[MLCZ]|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?',
-  ).allMatches(data).map((match) => match.group(0)!).toList();
-  var index = 0;
-  var command = '';
-  while (index < tokens.length) {
-    final token = tokens[index++];
-    if (_isCommand(token)) {
-      command = token;
-    } else {
-      index--;
+  Widget _clip(Widget child) {
+    if (shape == BoxShape.circle) {
+      return ClipOval(child: child);
     }
-    switch (command) {
-      case 'M':
-        path.moveTo(_number(tokens[index++]), _number(tokens[index++]));
-      case 'L':
-        path.lineTo(_number(tokens[index++]), _number(tokens[index++]));
-      case 'C':
-        path.cubicTo(
-          _number(tokens[index++]),
-          _number(tokens[index++]),
-          _number(tokens[index++]),
-          _number(tokens[index++]),
-          _number(tokens[index++]),
-          _number(tokens[index++]),
-        );
-      case 'Z':
-        path.close();
-      default:
-        throw FormatException('Unsupported logo path command: $command');
-    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(size * 0.22),
+      child: child,
+    );
   }
-  return path;
 }
-
-bool _isCommand(String token) => token.length == 1 && 'MLCZ'.contains(token);
-
-double _number(String token) => double.parse(token);
-
-const String _pathData =
-    'M67.5,53.5C37.5,39.9 26,66.5 24,81.5C24,81.5 21.7352,71.3825 28.5,56.5C29.8723,53.481 32.3659,48.342 37.5,42C39.5226,39.5015 41.8759,37.2004 45.5,34.1715C47.5,32.5 51.5,29.5 53,28C62,20 72.8,7.50001 44,23.5C41.1144,25.1031 35.3742,29.6019 30,35.5C25.5932,40.3364 21.478,46.2693 19,51C14.0187,60.5098 13.335,66.4898 12.5,71.5C12,74.5 12,77 12,81.5C12,104.316 20,118.5 30,130C35.6352,135.917 42.4732,141.449 51.5,146C58.4919,149.525 66.5,152 77.5,153C80.4537,153.269 87,153 91,152.5C96.2573,151.843 103.011,149.889 106.9,148.5C117.322,144.778 125.325,138.797 131.5,132.5C138.784,125.389 145.27,114.5 148.27,106.5C151.5,99 152,93 152.5,82.5C153.237,67.0175 145.08,48.5 136,37.5C122.997,21.7472 101.596,14.1406 90,13L89,13C80.6,7.40001 73.8333,7.33333 71.5,8.00001C71.5,8.00001 84,10 74.5,17C65,24 66.5,30.5 66.5,30.5C67.3,33.3 66.5,39.5 66.5,39.5C65.1667,41.1 64.6481,43.2 64.5,44C65.447,45.9992 68.5884,49.1674 73.5,50C75.0862,50.2689 76.4481,50.2521 78.5,50C80.1583,49.7963 82.0227,48.6591 84,48C88.0734,46.6422 90.5,46.5 92.5,48C93.7305,50.8711 92.1489,52.1803 90.8116,53.2873C90.5186,53.5298 90.2374,53.7626 90,54C88.9573,55.0427 87.0759,56.131 84.5,56.5C83.3789,56.7242 82.2579,56.7473 81.2269,56.7046C80.593,56.6784 80.0448,56.6746 79.5,56.63C79.0518,56.63 78.5,56.5 78,56.5C75.6,56.5 67.5,53.5 67.5,53.5ZM109.586,55.2918L103.168,71.7262C114.703,78.2902 122.515,89.9382 122.978,103.308L40.7502,111.893C40.2578,109.522 40,107.073 40,104.568C40,93.5342 45.0035,83.5843 53.0205,76.5648L43.5565,63.0463C42.5593,61.6218 42.9057,59.6586 44.3301,58.6613C45.7546,57.6641 47.7178,58.0104 48.7151,59.4349L58.0647,72.7901C64.7334,68.5494 72.8044,66.0683 81.5,66.0683C87.1572,66.0683 92.5501,67.1185 97.4644,69.0201L103.72,53.0011C104.353,51.3814 106.179,50.5811 107.798,51.2137C109.418,51.8462 110.218,53.672 109.586,55.2918ZM103,87.5683C103,85.083 100.985,83.0683 98.5,83.0683C96.0147,83.0683 94,85.083 94,87.5683C94,90.0536 96.0147,92.0683 98.5,92.0683C100.985,92.0683 103,90.0536 103,87.5683ZM63.5,87.0683C65.9853,87.0683 68,89.083 68,91.5683C68,94.0536 65.9853,96.0683 63.5,96.0683C61.0147,96.0683 59,94.0536 59,91.5683C59,89.083 61.0147,87.0683 63.5,87.0683ZM42.2329,115.3C48.1215,124.724 65.9414,131.035 85.9089,128C103.705,125.295 118.071,115.947 123.087,106.321L42.2329,115.3Z';

@@ -2755,11 +2755,22 @@ impl ChatServiceCore {
         &self,
         chatId: Option<String>,
     ) -> Result<ChatInputMenuSummary, String> {
-        let binding = FunctionalConfigManager::default()
-            .getModelBindingForFunction(FunctionType::CHAT)
-            .map_err(|e| e.to_string())?;
+        // 会话级模型优先：上下文长度等指标必须按本会话实际使用的模型算，
+        // 否则会话单独换了模型后，输入区的窗口大小会和真实配置对不上。
+        let scoped = chatId
+            .as_deref()
+            .and_then(crate::services::core::MessageCoordinationDelegate::readChatScopedModelBinding);
+        let (providerId, modelId) = match scoped {
+            Some(pair) => pair,
+            None => {
+                let binding = FunctionalConfigManager::default()
+                    .getModelBindingForFunction(FunctionType::CHAT)
+                    .map_err(|e| e.to_string())?;
+                (binding.providerId, binding.modelId)
+            }
+        };
         let config = ModelConfigManager::default()
-            .getResolvedModelConfig(&binding.providerId, &binding.modelId)
+            .getResolvedModelConfig(&providerId, &modelId)
             .map_err(|e| e.to_string())?;
         let chat = match chatId {
             Some(id) => self
