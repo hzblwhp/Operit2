@@ -81,7 +81,7 @@ String _buildCreationPrompt({
     '需要操作包、Skill、MCP、日志或模型时，调用 operit_editor 包的 operit_editor 工具，传入 args 字符串数组实际执行命令；args: [] 获取命令帮助，不使用自然语言 query。',
     '通过 skill show PackageBuilder 读取真实 Skill 目录，通过终端 host 信息和实际文件访问确定用户同意使用的开发根目录，不写死平台路径。',
     packageRuleLine,
-    'Operit2 新建 ToolPkg 显式声明 api_version 为 2.0.0；其对 1.0.0 和 1.0.1 的加载支持并不完整。Operit1 完整支持 1.0.0 和 1.0.1，这两个版本主要面向 Android，是旧版 API 形式。',
+    'PengSong 新建 ToolPkg 显式声明 api_version 为 2.0.0；其对 1.0.0 和 1.0.1 的加载支持并不完整。Operit1 完整支持 1.0.0 和 1.0.1，这两个版本主要面向 Android，是旧版 API 形式。',
     '2.0.0 作者须注重跨平台兼容性。基本所有公共接口都兼容多平台，常规功能使用统一接口即可；遇到平台特异接口时，明确适用范围，并考虑、验证其他平台的安装、界面和核心功能。',
     '在开发根目录下以包 id 建立源码目录，将 Skill 的 types 完整复制到同级 types；包项目通过 ../types 引用。核对 VFS、终端与导入使用的实际路径。',
     '按实际可用终端和编译器开发 TypeScript 并输出 CommonJS JavaScript；确认构建结果，使用统一 host API，不写平台分支。',

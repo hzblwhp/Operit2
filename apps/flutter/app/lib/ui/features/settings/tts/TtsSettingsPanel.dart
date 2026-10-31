@@ -20,7 +20,7 @@ part 'TtsSettingsModels.dart';
 part 'SttProviderWidgets.dart';
 part 'SttProviderDialogs.dart';
 
-const String _ttsTestText = '你好，我是 Operit 的语音试听。';
+const String _ttsTestText = '你好，我是 PengSong 的语音试听。';
 
 /// Section widget that manages TTS providers and voices.
 class TtsProviderSection extends StatefulWidget {

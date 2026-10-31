@@ -75,7 +75,7 @@ class GitHubOAuthLoginCallback {
     await _writeResponse(
       request.response,
       HttpStatus.ok,
-      'GitHub login complete. You can return to Operit.',
+      'GitHub login complete. You can return to PengSong.',
     );
     if (!_completion.isCompleted) {
       _completion.complete(completionUri);
@@ -103,7 +103,7 @@ class GitHubOAuthLoginCallback {
       ..headers.set(HttpHeaders.cacheControlHeader, 'no-store')
       ..write(
         '<!doctype html><html><head><meta charset="utf-8">'
-        '<title>Operit GitHub login</title></head><body>$message</body></html>',
+        '<title>PengSong GitHub login</title></head><body>$message</body></html>',
       );
     await response.close();
   }

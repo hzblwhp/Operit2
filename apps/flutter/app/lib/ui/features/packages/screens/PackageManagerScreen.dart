@@ -1415,7 +1415,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
     final file = await openFile(
       acceptedTypeGroups: const <XTypeGroup>[
         XTypeGroup(
-          label: 'Operit package',
+          label: 'PengSong package',
           extensions: <String>['toolpkg', 'hjson', 'js', 'ts'],
         ),
       ],

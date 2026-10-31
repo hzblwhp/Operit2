@@ -476,7 +476,7 @@ class _GitHubOAuthLoginMethodDialog extends StatelessWidget {
             _GitHubOAuthLoginMethodTile(
               icon: Icons.web,
               title: '内置浏览器',
-              subtitle: '在 Operit 内完成 GitHub 登录',
+              subtitle: '在 PengSong 内完成 GitHub 登录',
               onTap: () =>
                   Navigator.of(context).pop(GitHubOAuthLoginMode.embedded),
             ),

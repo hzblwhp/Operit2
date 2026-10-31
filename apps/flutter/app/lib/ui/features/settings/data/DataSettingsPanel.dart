@@ -26,12 +26,12 @@ import '../components/SettingsControlStyles.dart';
 import 'UsageStatisticsDetailScreen.dart';
 
 const XTypeGroup _rawSnapshotFileTypeGroup = XTypeGroup(
-  label: 'Operit snapshot',
+  label: 'PengSong snapshot',
   extensions: <String>['opsnapshot', 'zip'],
 );
 
 const XTypeGroup _backupJsonFileTypeGroup = XTypeGroup(
-  label: 'Operit JSON backup',
+  label: 'PengSong JSON backup',
   extensions: <String>['json'],
 );
 

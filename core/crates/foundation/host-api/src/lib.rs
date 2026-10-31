@@ -894,7 +894,7 @@ fn androidOnboardingRequirements() -> Vec<HostOnboardingRequirement> {
         HostOnboardingRequirement {
             id: "android.shizuku".to_string(),
             title: "Shizuku".to_string(),
-            description: "可选。需先启动 Shizuku 或 Sui；授权后 Operit 可以使用支持 Shizuku 的 Android 系统能力。"
+            description: "可选。需先启动 Shizuku 或 Sui；授权后 PengSong 可以使用支持 Shizuku 的 Android 系统能力。"
                 .to_string(),
             capabilityIds: vec!["host.privilege".to_string()],
             isRequired: false,
@@ -904,7 +904,7 @@ fn androidOnboardingRequirements() -> Vec<HostOnboardingRequirement> {
         HostOnboardingRequirement {
             id: "android.root".to_string(),
             title: "Root".to_string(),
-            description: "可选。授权后 Operit 可以使用需要 Root 的 Android 系统能力。".to_string(),
+            description: "可选。授权后 PengSong 可以使用需要 Root 的 Android 系统能力。".to_string(),
             capabilityIds: vec!["host.privilege".to_string()],
             isRequired: false,
             status: HostRequirementStatus::Missing,

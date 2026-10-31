@@ -37,7 +37,7 @@ class DataRescueApp extends StatelessWidget {
   /// Builds only framework widgets and a fixed theme independent of user preferences.
   @override
   Widget build(BuildContext context) => MaterialApp(
-    title: 'Operit2 数据救援 / Data Rescue',
+    title: 'PengSong 数据救援 / Data Rescue',
     debugShowCheckedModeBanner: false,
     theme: ThemeData(
       colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff245f9e)),
@@ -188,7 +188,7 @@ class _DataRescueScreenState extends State<_DataRescueScreen> {
 
   /// Prepares Host-owned data locations without exposing storage paths to the user.
   Future<void> _open() async {
-    await _run('正在打开数据救援，请先关闭其他 Operit 窗口和后台进程…', () async {
+    await _run('正在打开数据救援，请先关闭其他 PengSong 窗口和后台进程…', () async {
       final startup = await _map({'operation': 'open'});
       _startup = startup;
       final description = await _taskMap({'operation': 'configureAutomatic'});
@@ -289,7 +289,7 @@ class _DataRescueScreenState extends State<_DataRescueScreen> {
           name: name,
           acceptedTypeGroups: const [
             XTypeGroup(
-              label: 'Operit data rescue',
+              label: 'PengSong data rescue',
               extensions: ['zip'],
               mimeTypes: ['application/zip'],
             ),
@@ -321,7 +321,7 @@ class _DataRescueScreenState extends State<_DataRescueScreen> {
         }),
         acceptedTypeGroups: const [
           XTypeGroup(
-            label: 'Operit data rescue',
+            label: 'PengSong data rescue',
             extensions: ['zip'],
             mimeTypes: ['application/zip'],
           ),
@@ -465,7 +465,7 @@ class _DataRescueScreenState extends State<_DataRescueScreen> {
       canPop: !_busy,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Operit2 数据救援 / Data Rescue'),
+          title: const Text('PengSong 数据救援 / Data Rescue'),
           automaticallyImplyLeading: false,
         ),
         body: Center(
@@ -479,7 +479,7 @@ class _DataRescueScreenState extends State<_DataRescueScreen> {
                   style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 12),
-                const Text('用于在应用无法正常启动时导出或恢复数据。请先关闭其他 Operit 窗口和后台进程。'),
+                const Text('用于在应用无法正常启动时导出或恢复数据。请先关闭其他 PengSong 窗口和后台进程。'),
                 const SizedBox(height: 16),
                 const Text(
                   '备份包含全部身份的数据、工作区、启动配置及必要密钥，配置以明文导出。请妥善保管备份，并保存到其他设备。',

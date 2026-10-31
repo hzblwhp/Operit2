@@ -132,7 +132,7 @@ class ScreenRouteRegistry {
     return RouteSpec(
       routeId: routeIdOf(screen),
       runtime: RouteRuntime.native,
-      title: screen is AiChatScreenRoute ? 'Operit' : screen.title,
+      title: screen is AiChatScreenRoute ? 'PengSong' : screen.title,
       keepAlive: screen.keepAlive,
     );
   }

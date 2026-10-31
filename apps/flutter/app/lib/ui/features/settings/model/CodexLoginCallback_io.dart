@@ -74,7 +74,7 @@ class CodexLoginCallbackListener {
       ..statusCode = HttpStatus.ok
       ..headers.contentType = ContentType.html
       ..write(
-        '<!doctype html><html><body>Codex login complete. You can return to Operit.</body></html>',
+        '<!doctype html><html><body>Codex login complete. You can return to PengSong.</body></html>',
       );
     await request.response.close();
     if (code.isEmpty || state.isEmpty) {

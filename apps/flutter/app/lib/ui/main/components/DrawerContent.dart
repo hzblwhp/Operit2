@@ -622,7 +622,7 @@ class _DrawerContentState extends State<DrawerContent> {
   Widget _sidebarHeader(Widget tabs) => Padding(
     padding: const EdgeInsets.only(top: 26, right: 12),
     child: SidebarInfoCard(
-      brandName: 'Operit',
+      brandName: 'PengSong',
       appearance: widget.appearance,
       trailing: tabs,
     ),

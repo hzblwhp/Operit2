@@ -46,7 +46,7 @@ class DiagnosticLogExporter {
           : left.lineIndex.compareTo(right.lineIndex);
     });
     final output = StringBuffer()
-      ..writeln('Operit diagnostic log')
+      ..writeln('PengSong diagnostic log')
       ..writeln('Exported at: ${now.toIso8601String()}')
       ..writeln('Sources: [CORE] selected Core; [CLIENT] this client')
       ..writeln(

@@ -18,7 +18,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get workspaceDiscardChanges => '放弃修改';
 
   @override
-  String get askOperitHint => '向 Operit 提问';
+  String get askOperitHint => '向 PengSong 提问';
 
   @override
   String get aiChat => 'AI聊天';
@@ -1248,7 +1248,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsModelCodexDeviceInstructions =>
-      '在打开的页面输入这个验证码，然后回到 Operit。';
+      '在打开的页面输入这个验证码，然后回到 PengSong。';
 
   @override
   String get settingsModelCodexOpenPage => '打开验证页面';

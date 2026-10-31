@@ -2384,7 +2384,7 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
       return;
     }
     final identity = _chatUiContext?.identity;
-    final primaryText = identity == null ? 'Operit' : identity.title;
+    final primaryText = identity == null ? 'PengSong' : identity.title;
     final secondaryText = _currentChatTitle.trim();
     controller.setTitleContent(
       TopBarTitleContent((context) {

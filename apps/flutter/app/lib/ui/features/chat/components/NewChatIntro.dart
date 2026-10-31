@@ -81,7 +81,7 @@ class _NewChatIntroOverlayState extends State<NewChatIntroOverlay>
 
   /// Rasterizes the wordmark offscreen and samples opaque pixels on a grid.
   Future<void> _precomputeMarkTargets() async {
-    const word = 'Operit';
+    const word = 'PengSong';
     const markFontSize = 60.0;
     const sampleStep = 2;
     final builder =

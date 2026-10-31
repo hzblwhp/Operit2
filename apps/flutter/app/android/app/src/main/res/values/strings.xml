@@ -1,7 +1,7 @@
 <resources>
     <string name="data_rescue_shortcut_short">数据救援</string>
     <string name="data_rescue_shortcut_long">打开独立数据救援</string>
-    <string name="operit_core_service_name">Operit Core</string>
+    <string name="operit_core_service_name">PengSong Core</string>
     <string name="operit_core_service_status">Core runtime is available in the background</string>
     <string name="ocr_cannot_read_image">无法读取图像文件: %1$s</string>
     <string name="ocr_cannot_decode_bitmap_from_uri">无法从URI解码Bitmap</string>

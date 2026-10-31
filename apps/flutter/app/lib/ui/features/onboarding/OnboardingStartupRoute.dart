@@ -2240,7 +2240,7 @@ class _AiSetupAgreementPage extends StatelessWidget {
                       Text('人话版协议（非法律版本）', style: headingStyle),
                       const SizedBox(height: 10),
                       Text(
-                        'Operit 是在您的设备上运行的开源客户端。我们不运营模型推理服务、不托管聊天记录，也不向您提供共享 API Key。您配置云模型、语音、搜索、绘图、MCP 或其他网络功能时，数据会直接发送给相应服务商，并受其条款和隐私政策约束；本地模型在设备内推理。',
+                        'PengSong 是在您的设备上运行的开源客户端。我们不运营模型推理服务、不托管聊天记录，也不向您提供共享 API Key。您配置云模型、语音、搜索、绘图、MCP 或其他网络功能时，数据会直接发送给相应服务商，并受其条款和隐私政策约束；本地模型在设备内推理。',
                         style: bodyStyle,
                       ),
                       const SizedBox(height: 12),
@@ -2250,7 +2250,7 @@ class _AiSetupAgreementPage extends StatelessWidget {
                       ),
                       const SizedBox(height: 12),
                       Text(
-                        '市场中的插件、脚本、Skill、工具包和其他第三方内容，其著作权及责任归作者或权利人所有。展示或安装不代表 Operit 对其作出保证、背书或取得权利。',
+                        '市场中的插件、脚本、Skill、工具包和其他第三方内容，其著作权及责任归作者或权利人所有。展示或安装不代表 PengSong 对其作出保证、背书或取得权利。',
                         style: bodyStyle,
                       ),
                       const Padding(
@@ -2260,17 +2260,17 @@ class _AiSetupAgreementPage extends StatelessWidget {
                       Text('严谨版法律协议', style: headingStyle),
                       const SizedBox(height: 12),
                       Text(
-                        '1. 适用范围与协议版本\n本协议适用于 Operit 官方发布的客户端及其可选在线功能。使用本应用即表示您已阅读并同意当前版本。应用会记录您确认的版本；协议发生实质更新时，将要求重新确认。开源代码许可由仓库根目录 LICENSE 所载 GNU AGPL-3.0 规定，本协议不排除或缩减适用法律及开源许可证赋予您的权利。',
+                        '1. 适用范围与协议版本\n本协议适用于 PengSong 官方发布的客户端及其可选在线功能。使用本应用即表示您已阅读并同意当前版本。应用会记录您确认的版本；协议发生实质更新时，将要求重新确认。开源代码许可由仓库根目录 LICENSE 所载 GNU AGPL-3.0 规定，本协议不排除或缩减适用法律及开源许可证赋予您的权利。',
                         style: bodyStyle,
                       ),
                       const SizedBox(height: 14),
                       Text(
-                        '2. 产品定位与第三方服务\nOperit 不提供大语言模型推理、共享 API Key、聊天请求中转或聊天记录云端托管。您自行选择、配置和启用第三方服务，并自行判断服务商、模型、端点和扩展的安全性、合法性与适用性，妥善保管凭据。',
+                        '2. 产品定位与第三方服务\nPengSong 不提供大语言模型推理、共享 API Key、聊天请求中转或聊天记录云端托管。您自行选择、配置和启用第三方服务，并自行判断服务商、模型、端点和扩展的安全性、合法性与适用性，妥善保管凭据。',
                         style: bodyStyle,
                       ),
                       const SizedBox(height: 14),
                       Text(
-                        '3. 数据处理与隐私\n聊天记录、角色卡、记忆、模型配置和 API Key 通常保存在设备的应用数据中。您主动导出、备份、上传文件、使用第三方网络功能或向外部 HTTP 服务提交请求时，相关数据将依您的操作被复制、传输或披露。市场、公告、更新检查、GitHub 登录和发布等功能会访问 Operit、GitHub 或相关第三方资源。',
+                        '3. 数据处理与隐私\n聊天记录、角色卡、记忆、模型配置和 API Key 通常保存在设备的应用数据中。您主动导出、备份、上传文件、使用第三方网络功能或向外部 HTTP 服务提交请求时，相关数据将依您的操作被复制、传输或披露。市场、公告、更新检查、GitHub 登录和发布等功能会访问 PengSong、GitHub 或相关第三方资源。',
                         style: bodyStyle,
                       ),
                       const SizedBox(height: 14),
@@ -2518,7 +2518,7 @@ class OnboardingSnapshotImportPage extends StatelessWidget {
                 eyebrow: '导入配置',
                 title: '从 Operit1 导入',
                 description:
-                    '请使用最新版 Operit1 导出的快照，将配置、聊天、角色卡、资源等数据迁移到 Operit2。',
+                    '请使用最新版 Operit1 导出的快照，将配置、聊天、角色卡、资源等数据迁移到 PengSong。',
               ),
               const SizedBox(height: 22),
               Align(
