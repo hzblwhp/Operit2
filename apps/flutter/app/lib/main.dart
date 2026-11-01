@@ -12,6 +12,7 @@ import 'core/bridge/PlatformCoreProxy.dart';
 import 'ui/rescue/DataRescueApp.dart';
 import 'core/errors/UnhandledErrorReporter.dart';
 import 'core/logging/ClientLogger.dart';
+import 'core/mcp/McpHttpServer.dart';
 import 'core/notifications/NotificationActivationService.dart';
 import 'core/runtime/RuntimeBootstrapManager.dart';
 import 'ui/features/packages/screens/GitHubOAuthLoginCallback.dart';
@@ -95,6 +96,18 @@ void main(List<String> arguments) async {
           tag: _appStartupLogTag,
           verboseLevel: VerboseLevel.level1,
         );
+        // 启动设备侧 MCP 服务端（只绑 127.0.0.1，通过 adb forward 给 PC 用）。
+        // 失败不阻塞启动：MCP 是外部集成通道，不是应用功能的前置条件。
+        unawaited(() async {
+          try {
+            await McpHttpServer.instance.start();
+          } catch (error) {
+            ClientLogger.w(
+              'MCP server unavailable: $error',
+              tag: _appStartupLogTag,
+            );
+          }
+        }());
       }
       final glassStopwatch = Stopwatch()..start();
       await prepareLiquidGlass();
