@@ -313,6 +313,12 @@ impl ToolExecutionManager {
                     value: paramValue,
                 });
             }
+            // 模型自创写法用 `<parameter=key>value</parameter>`（等号形式），
+            // 标准写法才是 `<param name="key">value</param>`。前者在 tag_ranges 里
+            // 一个都匹配不到，参数就全空了 —— 空参数的调用往往会失败，进而让整轮停住。
+            if parameters.is_empty() {
+                parameters = Self::extractLooseParameters(&tool_match.body);
+            }
             invocations.push(ToolInvocation {
                 tool: AITool {
                     name: tool_match.name,
@@ -338,6 +344,46 @@ impl ToolExecutionManager {
             operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         invocations
+    }
+
+    /// 解析 `<parameter=key>value` / `<param=key>value` 这种等号写法。
+    ///
+    /// 值取到下一个参数标记为止（与模型的平铺写法一致），并做 XML 反转义。
+    fn extractLooseParameters(body: &str) -> Vec<ToolParameter> {
+        const MARKERS: [&str; 2] = ["<parameter=", "<param="];
+        let mut opens: Vec<(usize, usize)> = Vec::new();
+        for marker in MARKERS {
+            let mut from = 0usize;
+            while let Some(relative) = body[from..].find(marker) {
+                let absolute = from + relative;
+                opens.push((absolute, marker.len()));
+                from = absolute + marker.len();
+            }
+        }
+        opens.sort_by_key(|(position, _)| *position);
+
+        let mut parameters = Vec::new();
+        for (index, (start, markerLen)) in opens.iter().enumerate() {
+            let after = &body[start + markerLen..];
+            let Some(keyEnd) = after.find('>') else { continue };
+            let key = after[..keyEnd].trim().trim_matches('"').trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+            let valueStart = start + markerLen + keyEnd + 1;
+            let valueEnd = opens
+                .get(index + 1)
+                .map(|(position, _)| *position)
+                .unwrap_or(body.len());
+            if valueStart > valueEnd {
+                continue;
+            }
+            let value = Self::unescapeXml(&body[valueStart..valueEnd])
+                .trim()
+                .to_string();
+            parameters.push(ToolParameter { name: key, value });
+        }
+        parameters
     }
 
     /// Executes a serial batch and finalizes one shared display/history result per invocation.

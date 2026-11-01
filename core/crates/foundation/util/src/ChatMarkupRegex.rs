@@ -171,7 +171,14 @@ impl ChatMarkupRegex {
         find_named_blocks(content, Self::is_tool_tag_name)
             .into_iter()
             .filter_map(|block| {
-                let name = attr_value(&block.raw, "name")?;
+                // 标准写法是 `<tool name="X">`；但很多模型（尤其本地小模型）写成
+                // `<tool_call><function=X>...`，外层标签上根本没有 name 属性。
+                // 这里原先直接 `attr_value(...)?` 过滤掉整个块 —— 后果是整段 XML
+                // 留在正文里、工具完全不执行，用户看到的就是「对话说到一半停住」。
+                let name = match attr_value(&block.raw, "name") {
+                    Some(value) if !value.trim().is_empty() => value,
+                    _ => Self::loose_function_name(&block.body)?,
+                };
                 Some(ToolCallMatch {
                     tag_name: block.tag_name,
                     name,
@@ -181,6 +188,23 @@ impl ChatMarkupRegex {
                 })
             })
             .collect()
+    }
+
+    /// 从 `<function=NAME>` 形式里取出真实工具名。
+    ///
+    /// 兼容模型自创的 `<tool_call><function=content_file><parameter=x>…` 写法：
+    /// 外层标签没有 name 属性，工具名藏在这个子标签里。
+    pub fn loose_function_name(body: &str) -> Option<String> {
+        const OPEN: &str = "<function=";
+        let pos = body.find(OPEN)?;
+        let after = &body[pos + OPEN.len()..];
+        let end = after.find(|ch: char| ch == '>' || ch == '\n')?;
+        let name = after[..end].trim().trim_matches('"').trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
     }
 
     /// Extracts tool-result XML blocks from content.
@@ -419,5 +443,38 @@ mod tests {
 
         assert_eq!(attr_value(markup, "name"), None);
         assert_eq!(tag_body(markup, "param"), None);
+    }
+}
+
+#[cfg(test)]
+mod loose_tool_call_tests {
+    use super::ChatMarkupRegex;
+
+    /// 模型常写 `<tool_call><function=X>`（外层无 name 属性、参数用等号写法）。
+    /// 这条必须能被识别出来，否则整段 XML 会留在正文里、工具不执行。
+    #[test]
+    fn matches_function_style_tool_call() {
+        let content = "会。但要自觉，得靠沉淀。\n\n<tool_call>\n<function=content_file>\n<parameter=new>\n---\nname: demo\n---\nbody\n</parameter>\n<parameter=path>\n/app/x/SKILL.md\n</parameter>\n</function>\n</tool_call>";
+        let matches = ChatMarkupRegex::tool_call_matches(content);
+        assert_eq!(matches.len(), 1, "应识别出 1 个工具调用");
+        assert_eq!(matches[0].name, "content_file", "工具名应取自 <function=>");
+        assert!(matches[0].body.contains("SKILL.md"));
+    }
+
+    /// 标准写法必须保持原有行为不变。
+    #[test]
+    fn matches_standard_tool_call() {
+        let content = r#"<tool name="grep_code"><param name="path">/app</param><param name="pattern">x</param></tool>"#;
+        let matches = ChatMarkupRegex::tool_call_matches(content);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "grep_code");
+    }
+
+    /// 既没有 name 属性、也没有 <function=> 的块，仍旧不当作工具调用。
+    #[test]
+    fn ignores_unresolvable_block() {
+        let content = "<tool_call><parameter=x>y</parameter></tool_call>";
+        let matches = ChatMarkupRegex::tool_call_matches(content);
+        assert!(matches.is_empty());
     }
 }
