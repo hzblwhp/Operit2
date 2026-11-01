@@ -448,7 +448,7 @@ export class DatabaseMemoryRepository {
         CASE WHEN ?8>0 THEN ?8*(SELECT sum(q.value*v.value) FROM json_each(chunks.value,'$.embedding.vector') v JOIN query_vector q ON q.dimension=v.key) ELSE 0 END END AS score
       FROM chunks
     ), page AS (SELECT * FROM scored WHERE score>0 ORDER BY score DESC,position LIMIT ?9), stats AS (
-      SELECT count(*) AS total,sum(CASE WHEN ?8>0 AND (NOT (json_extract(value,'$.embedding.text') IS json_extract(value,'$.record.content')) OR NOT (json_extract(value,'$.embedding.space') IS ?5) OR NOT (json_array_length(value,'$.embedding.vector') IS json_array_length(?6))) THEN 1 ELSE 0 END) AS invalid FROM chunks
+      SELECT count(*) AS total,sum(CASE WHEN ?8>0 AND (IFNULL(json_extract(value,'$.embedding.text'),'') <> IFNULL(json_extract(value,'$.record.content'),'') OR IFNULL(json_extract(value,'$.embedding.space'),'') <> IFNULL(?5,'') OR json_array_length(value,'$.embedding.vector') <> json_array_length(?6)) THEN 1 ELSE 0 END) AS invalid FROM chunks
     ) SELECT json_extract(page.value,'$.record') AS record,stats.total,stats.invalid FROM stats LEFT JOIN page ON 1 ORDER BY page.score DESC,page.position`,
       [ownerKey + "/", ownerKey + "0", memory.uuid, query.trim() === "*" ? "*" : query, space, JSON.stringify(vector), owner.searchConfig.keywordWeight, semantic ? owner.searchConfig.vectorWeight : 0, count]);
     if (rows[0].invalid !== null && Number(rows[0].invalid) !== 0) throw new Error("Document vector index requires an explicit rebuild");

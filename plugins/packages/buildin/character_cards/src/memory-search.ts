@@ -91,9 +91,9 @@ WITH query_vector AS (SELECT CAST(key AS INTEGER) AS dimension,value FROM json_e
   SELECT (SELECT count(*) FROM scoped) AS total,
     (SELECT count(*) FROM scored WHERE score>0 AND score>=?14 AND id IN (SELECT value FROM json_each(?16))) AS excluded,
     (SELECT count(*) FROM units WHERE ?12>0 AND (
-      NOT (json_extract(value,'$.embedding.text') IS CASE WHEN json_extract(value,'$.record.isDocumentNode')=1 THEN json_extract(value,'$.record.title') ELSE json_extract(value,'$.record.content') END) OR
-      NOT (json_extract(value,'$.embedding.space') IS ?8) OR
-      NOT (json_array_length(value,'$.embedding.vector') IS json_array_length(?9)))) AS invalid
+      IFNULL(json_extract(value,'$.embedding.text'),'') <> IFNULL(CASE WHEN json_extract(value,'$.record.isDocumentNode')=1 THEN json_extract(value,'$.record.title') ELSE json_extract(value,'$.record.content') END,'') OR
+      IFNULL(json_extract(value,'$.embedding.space'),'') <> IFNULL(?8,'') OR
+      json_array_length(value,'$.embedding.vector') <> json_array_length(?9))) AS invalid
 )
 SELECT json_extract(page.value,'$.record') AS record,page.keywordScore,page.tagScore,page.vectorScore,page.edgeScore,page.score,stats.total,stats.invalid,stats.excluded
 FROM stats LEFT JOIN page ON 1 ORDER BY page.score DESC,page.id`;
