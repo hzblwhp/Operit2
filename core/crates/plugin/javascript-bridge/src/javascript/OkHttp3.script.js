@@ -10,6 +10,16 @@
  * - Cookie management
  */
 
+// 去掉值为 undefined 的键：结构化传输快照器拒绝 undefined。
+function stripUndefined(source) {
+    const out = {};
+    if (!source) return out;
+    for (const key of Object.keys(source)) {
+        if (source[key] !== undefined) out[key] = source[key];
+    }
+    return out;
+}
+
 // OkHttp3 Client builder wrapper
 class OkHttpClientBuilder {
     constructor() {
@@ -97,32 +107,38 @@ class OkHttpClient {
             modifiedRequest = interceptor(modifiedRequest) || modifiedRequest;
         }
 
-        // Build parameters for the http_request tool
-        const params = {
+        // Build parameters for the http_request tool.
+        // 注意：绝不能把值为 undefined 的键传进 toolCall —— 结构化传输快照器会先做
+        // typeof entry !== 'object' 判定，undefined 直接命中并抛
+        // TypeError('Tool request contains a non-JSON value')。
+        // crossref 的三种查询全挂在这一点上，就因为 body 和 onIntermediateResult 是 undefined。
+        const params = stripUndefined({
             url: modifiedRequest.url,
             method: modifiedRequest.method,
-            headers: JSON.stringify(modifiedRequest.headers),
+            headers: JSON.stringify(modifiedRequest.headers || {}),
             body: modifiedRequest.body,
             body_type: modifiedRequest.bodyType || 'text',
             follow_redirects: this._config.followRedirects,
             connect_timeout: Math.max(1, Math.ceil((this._config.timeouts.connect || 10000) / 1000)),
             read_timeout: Math.max(1, Math.ceil((this._config.timeouts.read || 30000) / 1000)),
             write_timeout: Math.max(1, Math.ceil((this._config.timeouts.write || 30000) / 1000))
-        };
+        });
 
-        if (options && typeof options.onIntermediateResult === 'function') {
+        const hasIntermediate =
+            options && typeof options.onIntermediateResult === 'function';
+        if (hasIntermediate) {
             params.stream = true;
         }
 
         // Execute the request using the underlying http_request tool
-        const response = await toolCall({
+        const call = {
             name: "http_request",
-            params,
-            onIntermediateResult:
-                options && typeof options.onIntermediateResult === 'function'
-                    ? options.onIntermediateResult
-                    : undefined
-        });
+            params
+        };
+        if (hasIntermediate) {
+            call.onIntermediateResult = options.onIntermediateResult;
+        }
+        const response = await toolCall(call);
 
         // Parse response
         return new Response(response);
