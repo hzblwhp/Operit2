@@ -1402,9 +1402,9 @@ WITH query_vector AS (SELECT CAST(key AS INTEGER) AS dimension,value FROM json_e
   SELECT (SELECT count(*) FROM scoped) AS total,
     (SELECT count(*) FROM scored WHERE score>0 AND score>=?14 AND id IN (SELECT value FROM json_each(?16))) AS excluded,
     (SELECT count(*) FROM units WHERE ?12>0 AND (
-      json_extract(value,'$.embedding.text') IS NOT CASE WHEN json_extract(value,'$.record.isDocumentNode')=1 THEN json_extract(value,'$.record.title') ELSE json_extract(value,'$.record.content') END OR
-      json_extract(value,'$.embedding.space') IS NOT ?8 OR
-      json_array_length(value,'$.embedding.vector') IS NOT json_array_length(?9))) AS invalid
+      NOT (json_extract(value,'$.embedding.text') IS CASE WHEN json_extract(value,'$.record.isDocumentNode')=1 THEN json_extract(value,'$.record.title') ELSE json_extract(value,'$.record.content') END) OR
+      NOT (json_extract(value,'$.embedding.space') IS ?8) OR
+      NOT (json_array_length(value,'$.embedding.vector') IS json_array_length(?9)))) AS invalid
 )
 SELECT json_extract(page.value,'$.record') AS record,page.keywordScore,page.tagScore,page.vectorScore,page.edgeScore,page.score,stats.total,stats.invalid,stats.excluded
 FROM stats LEFT JOIN page ON 1 ORDER BY page.score DESC,page.id`;
@@ -3728,7 +3728,7 @@ var DatabaseMemoryRepository = class {
         CASE WHEN ?8>0 THEN ?8*(SELECT sum(q.value*v.value) FROM json_each(chunks.value,'$.embedding.vector') v JOIN query_vector q ON q.dimension=v.key) ELSE 0 END END AS score
       FROM chunks
     ), page AS (SELECT * FROM scored WHERE score>0 ORDER BY score DESC,position LIMIT ?9), stats AS (
-      SELECT count(*) AS total,sum(CASE WHEN ?8>0 AND (json_extract(value,'$.embedding.text') IS NOT json_extract(value,'$.record.content') OR json_extract(value,'$.embedding.space') IS NOT ?5 OR json_array_length(value,'$.embedding.vector') IS NOT json_array_length(?6)) THEN 1 ELSE 0 END) AS invalid FROM chunks
+      SELECT count(*) AS total,sum(CASE WHEN ?8>0 AND (NOT (json_extract(value,'$.embedding.text') IS json_extract(value,'$.record.content')) OR NOT (json_extract(value,'$.embedding.space') IS ?5) OR NOT (json_array_length(value,'$.embedding.vector') IS json_array_length(?6))) THEN 1 ELSE 0 END) AS invalid FROM chunks
     ) SELECT json_extract(page.value,'$.record') AS record,stats.total,stats.invalid FROM stats LEFT JOIN page ON 1 ORDER BY page.score DESC,page.position`,
         [ownerKey + "/", ownerKey + "0", memory.uuid, query.trim() === "*" ? "*" : query, space, JSON.stringify(vector), owner2.searchConfig.keywordWeight, semantic ? owner2.searchConfig.vectorWeight : 0, count]
       );
