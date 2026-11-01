@@ -61,21 +61,49 @@ class AndroidLocationReader(private val activity: MainActivity) {
         require(timeout > 0) { "Location timeout must be positive" }
         val highAccuracy = params.getBoolean("highAccuracy")
         val includeAddress = params.getBoolean("includeAddress")
-        authorize(highAccuracy)
+        // GPS_PROVIDER 需要 FINE 权限，这里统一按最严的精度申请。
+        authorize(true)
         val manager = activity.getSystemService(LocationManager::class.java)
             ?: error("Android LocationManager is unavailable")
-        val provider = if (highAccuracy) LocationManager.GPS_PROVIDER else LocationManager.NETWORK_PROVIDER
-        check(manager.isProviderEnabled(provider)) { "The requested location provider is disabled: $provider" }
-        val cancellation = CancellationSignal()
+
+        // 目的：优先 provider 之外再并发请求备选 provider，谁先给出定位就用谁。
+        //
+        // 起因：调用方通常传 highAccuracy=false，于是只走 NETWORK_PROVIDER。
+        // 但 Android 的网络定位在国内依赖 Google NLP 后端，实测必然 10s 左右
+        // DEADLINE_EXCEEDED（Name resolution delay 0 / remote_addr=null），
+        // 与调用方传的 timeout 无关；而 GPS_PROVIDER 是纯卫星、不需要网络。
+        // 之前只请求单个 provider，所以 non-high-accuracy 场景在这类环境下永远拿不到定位。
+        val preferred = if (highAccuracy) LocationManager.GPS_PROVIDER else LocationManager.NETWORK_PROVIDER
+        val fallback = if (highAccuracy) LocationManager.NETWORK_PROVIDER else LocationManager.GPS_PROVIDER
+        val providers = listOf(preferred, fallback)
+            .filter { runCatching { manager.isProviderEnabled(it) }.getOrDefault(false) }
+            .distinct()
+        check(providers.isNotEmpty()) {
+            "No location provider is enabled. preferred=$preferred fallback=$fallback"
+        }
         val completed = CountDownLatch(1)
         var fix: Location? = null
+        var fixProvider: String = preferred
+        val signals = ArrayList<Pair<String, CancellationSignal>>()
         try {
-            LocationManagerCompat.getCurrentLocation(manager, provider, cancellation,
-                ContextCompat.getMainExecutor(activity)) { location ->
-                fix = location
-                completed.countDown()
+            for (candidate in providers) {
+                val signal = CancellationSignal()
+                signals.add(candidate to signal)
+                runCatching {
+                    LocationManagerCompat.getCurrentLocation(
+                        manager, candidate, signal, ContextCompat.getMainExecutor(activity),
+                    ) { location ->
+                        if (location != null && fix == null) {
+                            fix = location
+                            fixProvider = candidate
+                            completed.countDown()
+                        }
+                    }
+                }
             }
-            check(completed.await(timeout.toLong(), TimeUnit.SECONDS)) { "Current location request timed out" }
+            check(completed.await(timeout.toLong(), TimeUnit.SECONDS)) {
+                "Current location request timed out after ${timeout}s (providers=${providers.joinToString()})"
+            }
             val location = fix ?: error("The location provider did not return a current position")
             val address = if (includeAddress) {
                 check(Geocoder.isPresent()) { "Android reverse geocoding is unavailable" }
@@ -88,7 +116,7 @@ class AndroidLocationReader(private val activity: MainActivity) {
                 "latitude" to location.latitude,
                 "longitude" to location.longitude,
                 "accuracy" to location.accuracy,
-                "provider" to provider,
+                "provider" to fixProvider,
                 "timestamp" to location.time,
                 "rawData" to JSONObject(mapOf("altitude" to location.altitude,
                     "speed" to location.speed, "bearing" to location.bearing)).toString(),
@@ -98,7 +126,9 @@ class AndroidLocationReader(private val activity: MainActivity) {
                 "country" to if (address == null) "" else requireNotNull(address.countryName) { "Reverse geocoder omitted the country" },
             )
         } finally {
-            cancellation.cancel()
+            for ((_, signal) in signals) {
+                runCatching { signal.cancel() }
+            }
         }
     }
 }
