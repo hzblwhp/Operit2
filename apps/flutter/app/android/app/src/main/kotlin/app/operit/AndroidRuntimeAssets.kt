@@ -97,6 +97,10 @@ object AndroidRuntimeAssets {
         ensureRootfsAbsolutePath(rootfsDir, "/data/local/tmp")
         ensureRootfsAbsolutePath(rootfsDir, runtimeRoot.absolutePath)
         ensureRootfsAbsolutePath(rootfsDir, workspaceRoot.absolutePath)
+        // proot 的 -b src:dst 要求目标在 rootfs 里已存在；之前只在 prootBindSetup
+        // 里加了 filesDir→/app，但没在 rootfs 建 /app，结果挂载静默失败——
+        // 对照实验显示 /etc、/sdcard 可访问而 /app 恒 exists:false。
+        ensureRootfsAbsolutePath(rootfsDir, "/app")
         File(rootfsDir, "dev/pts").mkdirs()
         File(rootfsDir, "storage").mkdirs()
         File(rootfsDir, "sdcard").mkdirs()
