@@ -937,6 +937,25 @@ class _CoreLinkBinary {
   final Uint8List bytes;
 }
 
+/// 把 Core Link 里的二进制 part 安全转成 Uint8List。
+///
+/// MessagePack 的 bin 值在多数解码路径上会得到 Uint8List，但也有路径给成
+/// 普通的 List（List<dynamic>）。直接 `part as Uint8List` 会在运行期抛
+/// `type 'List<dynamic>' is not a subtype of type 'Uint8List' in type cast`，
+/// 一旦发生在主题/资源加载链上，整个外观就打成「无法加载外观设置」。
+/// 所有二进制 part 统一走这里收口。
+Uint8List _coreLinkBytesOf(Object part) {
+  if (part is Uint8List) {
+    return part;
+  }
+  if (part is List) {
+    return Uint8List.fromList(part.cast<int>());
+  }
+  throw StateError(
+    'Core Link binary part has unsupported type: ${part.runtimeType}',
+  );
+}
+
 /// Holds one message's metadata and binary values until its carrier consumes it.
 class CoreLinkMessage {
   /// Wraps control bytes without introducing an additional payload allocation.
@@ -973,7 +992,7 @@ class CoreLinkMessage {
         offset += header.length;
         bytes = part.bytes;
       } else {
-        bytes = part as Uint8List;
+        bytes = _coreLinkBytesOf(part);
       }
       destination.setRange(offset, offset + bytes.length, bytes);
       offset += bytes.length;
@@ -983,7 +1002,7 @@ class CoreLinkMessage {
   /// Materializes portable bytes for a carrier that requires inline binary values.
   Uint8List toBytes() {
     if (_parts.length == 1 && _parts.single is Uint8List) {
-      return _parts.single as Uint8List;
+      return _coreLinkBytesOf(_parts.single);
     }
     final bytes = Uint8List(length);
     writeTo(bytes);
@@ -1000,7 +1019,7 @@ class CoreLinkMessage {
         output.add(_sharedReference(buffers.length, span.offset, span.length));
         buffers.add(span);
       } else {
-        output.add(part as Uint8List);
+        output.add(_coreLinkBytesOf(part));
       }
     }
     return CoreLinkSharedMessage(output.takeBytes(), buffers);
@@ -1023,7 +1042,7 @@ class CoreLinkMessage {
           output.add(part.bytes);
         }
       } else {
-        output.add(part as Uint8List);
+        output.add(_coreLinkBytesOf(part));
       }
     }
     final bytes = output.takeBytes();

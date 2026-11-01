@@ -348,11 +348,11 @@ class _FfiConnection implements Finalizable {
     if (envelope.isEmpty || (envelope.length - 1) % 4 != 0) {
       throw const FormatException('Invalid Core FFI shared envelope');
     }
-    final bytes = (envelope[0] as Uint8List).asUnmodifiableView();
+    final bytes = _ffiBytesOf(envelope[0]).asUnmodifiableView();
     final buffers = <CoreLinkSharedBuffer>[];
     for (var index = 1; index < envelope.length; index += 4) {
       final token = envelope[index] as int;
-      final receipt = envelope[index + 1] as Uint8List;
+      final receipt = _ffiBytesOf(envelope[index + 1]);
       final address = envelope[index + 2] as int;
       final length = envelope[index + 3] as int;
       if (receipt.length != 1 || token == 0 || address == 0 || length < 0) {
@@ -434,4 +434,22 @@ class _FfiEnvelope implements Finalizable {
   /// Retains every receipt throughout this delivery callback.
   _FfiEnvelope(this.values);
   final List<dynamic> values;
+}
+
+/// 把 FFI envelope 里的二进制槽位安全转成 Uint8List。
+///
+/// 原生侧通常给 Uint8List，但个别返回路径会给普通 List（`List<dynamic>`）。
+/// 裸 `as Uint8List` 会抛
+/// `type 'List<dynamic>' is not a subtype of type 'Uint8List' in type cast`；
+/// 一旦发生在主题/资源链上，整个外观加载就会打成「无法加载外观设置」。
+Uint8List _ffiBytesOf(Object? value) {
+  if (value is Uint8List) {
+    return value;
+  }
+  if (value is List) {
+    return Uint8List.fromList(value.cast<int>());
+  }
+  throw StateError(
+    'Core FFI binary slot has unsupported type: ${value.runtimeType}',
+  );
 }
