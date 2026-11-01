@@ -4,6 +4,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../bridge/PlatformCoreProxy.dart';
+import '../bridge/ProxyCoreRuntimeBridge.dart';
+import '../proxy/generated/CoreProxyClients.g.dart';
+
+/// 与 ClientLogger 等模块一致：clients 是无状态代理，可直接按需构造。
+const GeneratedCoreProxyClients _deviceClients = GeneratedCoreProxyClients(
+  ProxyCoreRuntimeBridge(coreProxy: platformCoreProxy),
+);
+
 /// PengSong 自己的 MCP 服务端（HTTP + JSON-RPC 2.0）。
 ///
 /// 为什么需要：DSH 那边要直接驱动小吴的工具只能走 MCP，而这个 APP 原本
@@ -225,6 +234,16 @@ class McpHttpServer {
         'properties': <String, Object?>{},
       },
     },
+    <String, Object?>{
+      'name': 'chat_export',
+      'description':
+          '导出全部聊天记录为 JSON 字符串（含 thinking / tool_call / tool_result 等所有 part），'
+          '用于分析对话中断与思考内容。数据量大时注意截断处理。',
+      'inputSchema': <String, Object?>{
+        'type': 'object',
+        'properties': <String, Object?>{},
+      },
+    },
   ];
 
   Future<Map<String, Object?>> _callTool(
@@ -243,6 +262,20 @@ class McpHttpServer {
       'error': <String, Object?>{'code': code, 'message': text},
     };
 
+    if (name == 'chat_export') {
+      try {
+        final json = await _deviceClients.chatRuntimeHolderMain
+            .exportChatHistoriesToJson();
+        return ok(<String, Object?>{
+          'content': <Object?>[
+            <String, Object?>{'type': 'text', 'text': json},
+          ],
+          'isError': false,
+        });
+      } catch (error) {
+        return err(-32603, 'chat_export failed: $error');
+      }
+    }
     if (name == 'app_ping') {
       return ok(<String, Object?>{
         'content': <Object?>[

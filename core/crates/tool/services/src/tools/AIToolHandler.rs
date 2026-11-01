@@ -1007,7 +1007,19 @@ impl AIToolHandler {
     /// Executes under the native caller context and dispatches lifecycle hooks only for AI requests.
     async fn executeInvocationInContext(&mut self, request: &ToolCall, policy: ToolExecutionPolicy, context: &ToolInvocationContext) -> Result<Vec<ToolResult>, String> {
         let entryRequest = request;
-        let resolved = request.resolveTarget(context)?;
+        // 代理参数非法（模型漏填 tool_name / params、或 params 不是对象）不能让整轮悬空。
+        // 之前这里用 `?` 把它冒泡成 Err，上层只处理 Ok，于是 history 里只剩一个
+        // tool_call 而没有 tool_result —— 用户看到的就是「任务无缘无故中断」。
+        // 改成和「工具找不到」一致的明确失败结果，模型能看到原因并自我纠正。
+        let resolved = match request.resolveTarget(context) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return Ok(vec![Self::failedInvocation(
+                    &entryRequest.toLegacyTool(),
+                    error,
+                )]);
+            }
+        };
         let request = &resolved;
         let legacyTool = std::sync::OnceLock::new();
         let tool = || legacyTool.get_or_init(|| request.toLegacyTool());
