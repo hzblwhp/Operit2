@@ -734,12 +734,16 @@ impl MessageCoordinationDelegate {
                 return Err(error.to_string());
             }
         };
+        // 注意：这里必须用 self.currentChat*，不能用入参 chatProviderIdOverride /
+        // chatModelIdOverride。入参通常为 None，而会话级绑定是在上面注入进
+        // self.currentChat* 的；用入参会让绑定在读配置这一步就被丢掉，
+        // 结果总是回落到全局 CHAT 模型（实测表现为「切了模型没反应」）。
         let configurationOptions = SendMessageOptions {
             chatId: Some(chatId.clone()),
             executionParticipantId: participantId.clone(),
             promptFunctionType: promptFunctionType.clone(),
-            chatProviderIdOverride: chatProviderIdOverride.clone(),
-            chatModelIdOverride: chatModelIdOverride.clone(),
+            chatProviderIdOverride: self.currentChatProviderIdOverride.clone(),
+            chatModelIdOverride: self.currentChatModelIdOverride.clone(),
             ..SendMessageOptions::new()
         };
         let configuration = match enhancedAiService
@@ -801,8 +805,8 @@ impl MessageCoordinationDelegate {
                 enableThinking,
                 maxTokens,
                 tokenUsageThreshold,
-                chatProviderIdOverride,
-                chatModelIdOverride,
+                chatProviderIdOverride: self.currentChatProviderIdOverride.clone(),
+                chatModelIdOverride: self.currentChatModelIdOverride.clone(),
                 proxySenderNameOverride,
                 suppressUserMessageInHistory: suppressUserMessageInHistory || isContinuation,
                 isAutoContinuation,

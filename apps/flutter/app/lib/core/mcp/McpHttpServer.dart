@@ -235,6 +235,30 @@ class McpHttpServer {
       },
     },
     <String, Object?>{
+      'name': 'pref_get',
+      'description': '读取任意 preference 文件里的一个键，参数 {fileName, key}。用于核对会话级模型绑定等配置。',
+      'inputSchema': <String, Object?>{
+        'type': 'object',
+        'properties': <String, Object?>{
+          'fileName': <String, Object?>{'type': 'string'},
+          'key': <String, Object?>{'type': 'string'},
+        },
+        'required': <String>['fileName', 'key'],
+      },
+    },
+    <String, Object?>{
+      'name': 'pref_remove',
+      'description': '删除 preference 文件里的一个键，参数 {fileName, key}。用于清除会话级模型绑定这类残留配置。',
+      'inputSchema': <String, Object?>{
+        'type': 'object',
+        'properties': <String, Object?>{
+          'fileName': <String, Object?>{'type': 'string'},
+          'key': <String, Object?>{'type': 'string'},
+        },
+        'required': <String>['fileName', 'key'],
+      },
+    },
+    <String, Object?>{
       'name': 'chat_export',
       'description':
           '导出全部聊天记录为 JSON 字符串（含 thinking / tool_call / tool_result 等所有 part），'
@@ -251,6 +275,12 @@ class McpHttpServer {
     Map<String, Object?> params,
   ) async {
     final name = params['name']?.toString() ?? '';
+    // MCP 的 tools/call 把业务参数放在 params.arguments 里，
+    // 不是直接平铺在 params 上 —— 之前没带参数的工具暴露不出这个问题。
+    final rawArguments = params['arguments'];
+    final args = rawArguments is Map
+        ? Map<String, Object?>.from(rawArguments)
+        : const <String, Object?>{};
     Map<String, Object?> ok(Object? result) => <String, Object?>{
       'jsonrpc': '2.0',
       'id': id,
@@ -262,6 +292,59 @@ class McpHttpServer {
       'error': <String, Object?>{'code': code, 'message': text},
     };
 
+    if (name == 'pref_get') {
+      final fileName = args['fileName']?.toString() ?? '';
+      final key = args['key']?.toString() ?? '';
+      if (fileName.isEmpty || key.isEmpty) {
+        return err(-32602, 'pref_get requires fileName and key');
+      }
+      try {
+        final value = await _deviceClients.preferencesPreferenceStorageManager
+            .getPreference(fileName: fileName, key: key);
+        return ok(<String, Object?>{
+          'content': <Object?>[
+            <String, Object?>{
+              'type': 'text',
+              'text': jsonEncode(<String, Object?>{
+                'fileName': fileName,
+                'key': key,
+                'found': value != null,
+                'value': value,
+              }),
+            },
+          ],
+          'isError': false,
+        });
+      } catch (error) {
+        return err(-32603, 'pref_get failed: $error');
+      }
+    }
+    if (name == 'pref_remove') {
+      final fileName = args['fileName']?.toString() ?? '';
+      final key = args['key']?.toString() ?? '';
+      if (fileName.isEmpty || key.isEmpty) {
+        return err(-32602, 'pref_remove requires fileName and key');
+      }
+      try {
+        await _deviceClients.preferencesPreferenceStorageManager
+            .removePreference(fileName: fileName, key: key);
+        return ok(<String, Object?>{
+          'content': <Object?>[
+            <String, Object?>{
+              'type': 'text',
+              'text': jsonEncode(<String, Object?>{
+                'fileName': fileName,
+                'key': key,
+                'removed': true,
+              }),
+            },
+          ],
+          'isError': false,
+        });
+      } catch (error) {
+        return err(-32603, 'pref_remove failed: $error');
+      }
+    }
     if (name == 'chat_export') {
       try {
         final json = await _deviceClients.chatRuntimeHolderMain
