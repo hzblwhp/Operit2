@@ -233,6 +233,11 @@ object AndroidRuntimeAssets {
             emulatedStoragePath to "/sdcard",
             emulatedStoragePath to emulatedStoragePath,
             "/data/local/tmp" to "/data/local/tmp",
+            // VFS 的虚拟根 `/app` 在 proot 里原本不存在，导致 v1_runtime:file 这类
+            // 走终端文件系统的工具完全看不到 /app/**（探测 /app/data/plugin_data/skills
+            // 恒为 exists:false，而内置文件工具里该目录明明存在）。
+            // 把 filesDir 额外挂到 /app，让两套路径词汇能互通。
+            internalRoot.absolutePath to "/app",
             appDataDir.absolutePath to userDataPackagePath,
             appDataDir.absolutePath to legacyDataPackagePath,
             internalRoot.absolutePath to internalRoot.absolutePath,
