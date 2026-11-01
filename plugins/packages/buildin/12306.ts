@@ -739,7 +739,16 @@ const ticket12306 = (function () {
             if (STATIONS) return;
             try {
                 STATIONS = await getStationsInternal();
-                LCQUERY_PATH = await getLCQueryPath();
+                // LCQUERY_PATH 依赖 12306 网页里一段内联脚本（var lc_search_url = '...'），
+                // 页面一改版就取不到。它只被「候补/余票」这一个接口用到，却写在 init()
+                // 的关键路径上——取不到就让整个 init 失败，连站点查询都不可用
+                // （实测报错 get LCQuery path failed）。这里降级为可选。
+                try {
+                    LCQUERY_PATH = await getLCQueryPath();
+                } catch (error) {
+                    LCQUERY_PATH = undefined;
+                    console.warn('LCQuery path unavailable, candidate/remaining-ticket APIs disabled: ' + String(error));
+                }
 
                 CITY_STATIONS = {};
                 for (const station of Object.values(STATIONS)) {
@@ -868,7 +877,10 @@ const ticket12306 = (function () {
         };
 
         while (interlineData.length < limited_num) {
-            const response = await make12306Request<any>(`${API_BASE}${LCQUERY_PATH}`, queryParams, { Cookie: formatCookies(cookies) });
+            if (LCQUERY_PATH == undefined) {
+            throw new Error('12306 候补/余票接口暂不可用：网页改版导致 LCQuery 路径无法解析，站点与车次查询不受影响。');
+        }
+        const response = await make12306Request<any>(`${API_BASE}${LCQUERY_PATH}`, queryParams, { Cookie: formatCookies(cookies) });
             if (!response) throw new Error('Request interline tickets data failed.');
             if (typeof response.data === 'string') return `很抱歉，未查到相关的列车余票。(${response.errorMsg})`;
 
