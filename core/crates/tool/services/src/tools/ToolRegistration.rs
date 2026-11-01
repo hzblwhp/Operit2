@@ -119,25 +119,38 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
                 errorMessage: String::new(),
             }),
             invoke: Arc::new(|tool| {
+                // duration_ms 的 value 是字符串：可能是 "100"、带引号的 "\"100\""、
+                // 浮点 "100.0"，也可能带单位。原来直接 parse::<i32>() 太严格，
+                // 遇到非纯整数就静默落回 1000ms —— 表现出来就是"传 100 却睡了 1000"。
                 let durationMs = tool
                     .parameters
                     .iter()
                     .find(|parameter| parameter.name == "duration_ms")
-                    .and_then(|parameter| parameter.value.parse::<i32>().ok())
-                    .unwrap_or(1000);
-                let sleptMs = durationMs.max(0);
-                defaultHostRuntimeTaskSchedulerHost()
-                    .scheduleDelayedHostRuntimeTask(
-                        "builtin-tool-sleep",
-                        sleptMs as u64,
-                        Box::new(|| {}),
-                    )
-                    .expect("runtime task scheduler must schedule the sleep tool delay");
+                    .and_then(|parameter| {
+                        let raw = parameter.value.trim().trim_matches('"').trim();
+                        if raw.is_empty() {
+                            return None;
+                        }
+                        raw.parse::<i64>()
+                            .ok()
+                            .or_else(|| raw.parse::<f64>().ok().map(|value| value.round() as i64))
+                    })
+                    .unwrap_or(1000)
+                    // 上限保护：单次最多等 10 分钟，避免模型传个巨大值把线程占死
+                    .clamp(0, 600_000);
+                // 真正等待。原来用的是 scheduleDelayedHostRuntimeTask，它只是把延迟
+                // 任务投递进调度器就立即返回，sleep 因此从不真正生效却回报 success
+                //（静默失效）。这里改成阻塞等待，并把实测时长回报给调用方。
+                let startedAt = std::time::Instant::now();
+                if durationMs > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(durationMs as u64));
+                }
+                let sleptMs = i32::try_from(startedAt.elapsed().as_millis()).unwrap_or(i32::MAX);
                 ToolResult {
                     toolName: tool.name.clone(),
                     success: true,
                     result: ToolResultData::SleepResultData(SleepResultData {
-                        requestedMs: durationMs,
+                        requestedMs: i32::try_from(durationMs).unwrap_or(i32::MAX),
                         sleptMs,
                     }),
                     error: None,
