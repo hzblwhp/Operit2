@@ -88,8 +88,8 @@ class _UserMessageComposableState extends State<UserMessageComposable> {
         : null;
 
     return Padding(
-      // 贴边显示：行内左右由 16 降到 8
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      // 贴边显示：行内左右降到 0（气泡之外）
+      padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[

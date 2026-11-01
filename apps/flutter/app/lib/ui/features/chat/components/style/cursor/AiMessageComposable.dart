@@ -225,8 +225,8 @@ class _AiMessageComposableState extends State<AiMessageComposable> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
                     Padding(
-                      // 贴边显示：行内左右由 16 降到 8
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      // 贴边显示：行内左右降到 0（气泡之外，不影响气泡内文字）
+                      padding: const EdgeInsets.symmetric(horizontal: 0),
                       child: useCardStyle
                           ? BubbleSurface(
                               color: aiBubbleColor,
