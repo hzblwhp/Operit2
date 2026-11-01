@@ -86,6 +86,11 @@ object AndroidRuntimeAssets {
             Log.i(TAG, "runtime rootfs already installed elapsedMs=" + (System.currentTimeMillis() - startedAtMillis))
         }
 
+        // proot 容器重置后 /etc/resolv.conf 会丢，DNS 随即失效。
+        // 症状是「所有网络类工具莫名失败」：wget 报 bad address、
+        // visit_web 超时、插件下载数据文件失败 —— 看起来像网络问题，实则是没有 DNS。
+        // 每次 prepare 都重写一份，保证容器被重置也不会丢。
+        writeRootfsResolvConf(rootfsDir)
         ensureRootfsAbsolutePath(rootfsDir, context.filesDir.absolutePath)
         ensureRootfsAbsolutePath(rootfsDir, context.applicationInfo.dataDir)
         ensureRootfsAbsolutePath(rootfsDir, "/data/data/${context.packageName}")
@@ -163,6 +168,20 @@ object AndroidRuntimeAssets {
                 input.copyTo(output)
             }
         }
+    }
+
+    /// 写入 rootfs 的 DNS 配置。
+    ///
+    /// 用国内公共 DNS（阿里 223.5.5.5 / 腾讯 119.29.29.29）加 Google 兜底，
+    /// 比读系统 DNS 更可靠：Android 的 netd 配置在 proot 里读不到。
+    private fun writeRootfsResolvConf(rootfsDir: File) {
+        val resolv = File(rootfsDir, "etc/resolv.conf")
+        resolv.parentFile?.mkdirs()
+        resolv.writeText(
+            "nameserver 223.5.5.5\n" +
+                "nameserver 119.29.29.29\n" +
+                "nameserver 8.8.8.8\n",
+        )
     }
 
     private fun ensureRootfsAbsolutePath(rootfsDir: File, absolutePath: String) {
