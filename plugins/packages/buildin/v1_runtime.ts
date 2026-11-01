@@ -399,8 +399,8 @@ async function v1FfmpegInfo() {
 }
 
 /** Performs Linux file operations in the same managed filesystem as compatibility terminal commands. */
-const v1FileProgram = String.raw`import base64,json,pathlib,shutil,subprocess,sys,zipfile
-request=json.loads(sys.argv[2])
+const v1FileProgram = String.raw`import base64,binascii,json,pathlib,shutil,subprocess,sys,zipfile
+request=json.loads(binascii.unhexlify(sys.argv[2]).decode('utf-8'))
 args=request['args']
 operation=request['operation']
 # Resolves the explicit runtime path vocabulary selected by the package state.
