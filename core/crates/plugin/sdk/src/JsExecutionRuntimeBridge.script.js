@@ -12,6 +12,10 @@
     var objectPrototype = Object.prototype;
     var arrayPrototype = Array.prototype;
     var hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+    // 跨 realm 时 getPrototypeOf(entry) 永远不会等于本 realm 的 Object.prototype，
+    // 插件里创建的对象因此会被判成「非 JSON」。这里补一个标签判定作为兜底，
+    // 其余严格校验（可枚举自有数据属性、无符号键、循环检测、深度/节点上限）全部保留。
+    var objectToString = Function.prototype.call.bind(Object.prototype.toString);
 
     /** Converts tool identity and error fields to text. */
     function asString(value) {
@@ -28,7 +32,11 @@
             if (entry === null || typeof entry === 'string' || typeof entry === 'boolean') return entry;
             if (typeof entry === 'number' && isFiniteNumber(entry)) return entry;
             var array = isArray(entry);
-            if (typeof entry !== 'object' || (!array && getPrototypeOf(entry) !== objectPrototype && getPrototypeOf(entry) !== null)) throw new TypeError('Tool request contains a non-JSON value');
+            if (typeof entry !== 'object') throw new TypeError('Tool request contains a non-JSON value');
+            if (!array) {
+                var protoOk = getPrototypeOf(entry) === objectPrototype || getPrototypeOf(entry) === null;
+                if (!protoOk && objectToString(entry) !== '[object Object]') throw new TypeError('Tool request contains a non-JSON value');
+            }
             for (var ancestor = 0; ancestor < ancestors.length; ancestor++) {
                 if (ancestors[ancestor] === entry) throw new TypeError('Tool request contains a cyclic value');
             }

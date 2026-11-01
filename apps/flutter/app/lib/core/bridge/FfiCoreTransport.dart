@@ -447,9 +447,28 @@ Uint8List _ffiBytesOf(Object? value) {
     return value;
   }
   if (value is List) {
-    return Uint8List.fromList(value.cast<int>());
+    // 同 CoreLinkCodec：元素可能是 int 或嵌套 Uint8List，统一扁平化。
+    final builder = BytesBuilder(copy: false);
+    _appendFfiBytes(value, builder);
+    return builder.takeBytes();
   }
   throw StateError(
     'Core FFI binary slot has unsupported type: ${value.runtimeType}',
   );
+}
+
+void _appendFfiBytes(List<dynamic> values, BytesBuilder builder) {
+  for (final value in values) {
+    if (value is int) {
+      builder.addByte(value & 0xFF);
+    } else if (value is Uint8List) {
+      builder.add(value);
+    } else if (value is List) {
+      _appendFfiBytes(value, builder);
+    } else {
+      throw StateError(
+        'Core FFI binary slot has unsupported element: ${value.runtimeType}',
+      );
+    }
+  }
 }

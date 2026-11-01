@@ -949,11 +949,33 @@ Uint8List _coreLinkBytesOf(Object part) {
     return part;
   }
   if (part is List) {
-    return Uint8List.fromList(part.cast<int>());
+    // 注意：这里的元素可能是 int，也可能是嵌套的 Uint8List（分片结构）。
+    // 之前直接用 cast<int>() 逐元素断言，遇到嵌套时会抛
+    // 「type 'Uint8List' is not a subtype of type 'int'」——同样是外观加载直接失败。
+    // 统一按字节流扁平化，两种结构都能吃。
+    final builder = BytesBuilder(copy: false);
+    _appendCoreLinkBytes(part, builder);
+    return builder.takeBytes();
   }
   throw StateError(
     'Core Link binary part has unsupported type: ${part.runtimeType}',
   );
+}
+
+void _appendCoreLinkBytes(List<dynamic> values, BytesBuilder builder) {
+  for (final value in values) {
+    if (value is int) {
+      builder.addByte(value & 0xFF);
+    } else if (value is Uint8List) {
+      builder.add(value);
+    } else if (value is List) {
+      _appendCoreLinkBytes(value, builder);
+    } else {
+      throw StateError(
+        'Core Link binary part has unsupported element: ${value.runtimeType}',
+      );
+    }
+  }
 }
 
 /// Holds one message's metadata and binary values until its carrier consumes it.
