@@ -118,7 +118,18 @@ impl ToolCall {
         }
         let value = self.parameters.get("params").ok_or("Proxy params is required")?;
         let object = match value {
-            serde_json::Value::String(text) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text).map_err(|error| error.to_string())?,
+            serde_json::Value::String(text) => {
+                // 模型从 XML 形式给出参数时，引号会被转义成 &quot; / &apos; 等。
+                // 不先还原就解析 JSON 必然失败，表现为
+                // 「Tool request contains a non-JSON value」（crossref 这类严格校验的工具首当其冲）。
+                let unescaped = ToolExecutionManager::unescapeXml(text);
+                match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&unescaped) {
+                    Ok(object) => object,
+                    // 还原后仍失败时退回原文解析，兼容调用方直接传真实 JSON 的情况。
+                    Err(_) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text)
+                        .map_err(|error| error.to_string())?,
+                }
+            }
             serde_json::Value::Object(object) => object.clone(),
             _ => return Err("Proxy params must be a JSON object or its legacy text encoding".into()),
         };
@@ -693,7 +704,7 @@ impl ToolExecutionManager {
         )
     }
 
-    fn unescapeXml(input: &str) -> String {
+    pub(crate) fn unescapeXml(input: &str) -> String {
         let mut result = input.to_string();
         if result.starts_with("<![CDATA[") && result.ends_with("]]>") {
             result = result[9..result.len() - 3].to_string();
