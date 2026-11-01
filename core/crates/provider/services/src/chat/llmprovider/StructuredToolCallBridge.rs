@@ -968,6 +968,66 @@ impl StructuredToolCallBridge {
         }))
     }
 
+    /// 兼容某些模型自己发明的 tool_call 写法。
+    ///
+    /// 标准格式是 `<tool name="X"><param name="k">v</param></tool>`；
+    /// 但本地模型（如 PengSong3.8-Flash）常写成
+    /// `<tool_call> <function=content_file> <parameter=new> ...`
+    /// —— 真实工具名在 `<function=…>` 里，参数用 `<parameter=…>` 平铺。
+    ///
+    /// 不兼容的后果不是报错，而是**工具名被当成外层标签名**（`tool_call`）、
+    /// 参数为空，于是「工具找不到」+ 空参数，界面上看起来就是回复说到一半停住。
+    /// 用户会把这种现象当成「对话被中断」。
+    fn parseLooseToolCallBody(body: &str) -> Option<(String, Map<String, Value>)> {
+        const FUNCTION_OPEN: &str = "<function=";
+        const PARAMETER_OPEN: &str = "<parameter=";
+        const PARAM_OPEN: &str = "<param=";
+
+        let fnPos = body.find(FUNCTION_OPEN)?;
+        let afterFn = &body[fnPos + FUNCTION_OPEN.len()..];
+        let nameEnd = afterFn.find('>')?;
+        let toolName = afterFn[..nameEnd].trim().trim_matches('"').trim().to_string();
+        if toolName.is_empty() {
+            return None;
+        }
+        let tail = &afterFn[nameEnd + 1..];
+
+        // `<parameter=x>` 与 `<param=x>` 两种写法都收
+        let mut opens: Vec<(usize, usize)> = Vec::new();
+        for marker in [PARAMETER_OPEN, PARAM_OPEN] {
+            let mut from = 0usize;
+            while let Some(rel) = tail[from..].find(marker) {
+                let abs = from + rel;
+                opens.push((abs, marker.len()));
+                from = abs + marker.len();
+            }
+        }
+        opens.sort_by_key(|(pos, _)| *pos);
+
+        let mut params = Map::new();
+        for (index, (start, markerLen)) in opens.iter().enumerate() {
+            let after = &tail[start + markerLen..];
+            let Some(keyEnd) = after.find('>') else { continue };
+            let key = after[..keyEnd].trim().trim_matches('"').trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+            let valueStart = start + markerLen + keyEnd + 1;
+            let valueEnd = opens
+                .get(index + 1)
+                .map(|(pos, _)| *pos)
+                .unwrap_or(tail.len());
+            if valueStart > valueEnd {
+                continue;
+            }
+            let value = Self::xmlUnescape(&tail[valueStart..valueEnd])
+                .trim()
+                .to_string();
+            params.insert(key, json!(value));
+        }
+        Some((toolName, params))
+    }
+
     fn parseXmlToolCalls(content: &str) -> (String, Option<Vec<Value>>) {
         let matches = ChatMarkupRegex::tool_call_matches(content);
         if matches.is_empty() {
@@ -992,10 +1052,24 @@ impl StructuredToolCallBridge {
                     .to_string();
                 params.insert(paramName, json!(paramValue));
             }
-            let toolNamePart = Self::sanitizeToolCallId(&toolMatch.name);
+            // 标准格式解析不出参数、或外层标签本身不是真实工具名时，
+            // 回退到模型自创的 `<function=…><parameter=…>` 写法。
+            // 否则工具名会被当成外层标签名（例如 `tool_call`），参数为空。
+            let mut resolvedName = toolMatch.name.clone();
+            if params.is_empty()
+                || matches!(resolvedName.as_str(), "tool_call" | "tool_use" | "function")
+            {
+                if let Some((looseName, looseParams)) = Self::parseLooseToolCallBody(&toolMatch.body) {
+                    resolvedName = looseName;
+                    if !looseParams.is_empty() {
+                        params = looseParams;
+                    }
+                }
+            }
+            let toolNamePart = Self::sanitizeToolCallId(&resolvedName);
             let hashPart = Self::stableIdHashPart(&format!(
                 "{}:{}",
-                toolMatch.name,
+                resolvedName,
                 Value::Object(params.clone())
             ));
             let callId = Self::sanitizeToolCallId(&format!(
@@ -1006,7 +1080,7 @@ impl StructuredToolCallBridge {
                 "id": callId,
                 "type": "function",
                 "function": {
-                    "name": toolMatch.name,
+                    "name": resolvedName,
                     "arguments": Value::Object(params).to_string(),
                 }
             }));
