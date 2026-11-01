@@ -400,7 +400,7 @@ async function v1FfmpegInfo() {
 
 /** Performs Linux file operations in the same managed filesystem as compatibility terminal commands. */
 const v1FileProgram = String.raw`import base64,json,pathlib,shutil,subprocess,sys,zipfile
-request=json.loads(sys.argv[1])
+request=json.loads(sys.argv[2])
 args=request['args']
 operation=request['operation']
 # Resolves the explicit runtime path vocabulary selected by the package state.
@@ -486,8 +486,22 @@ async function v1File(params: V1RuntimeParams) {
 async function v1FileRequest(operation: string, args: V1RuntimeParams) {
     const state = v1RuntimeState();
     const request = JSON.stringify({ operation, args, paths: state.paths });
-    const result = await v1Program(state.python + " -c " + v1ShellQuote(v1FileProgram) + " " + v1ShellQuote(request), 60000);
-    return JSON.parse(result.output);
+    // v1FileProgram 是多行 Python 源码，直接塞进 shell 单引号后会被终端层破坏
+    //（实测报 Unexpected token 'p'——输出变成了命令本身而不是 JSON）。
+    // 与 v1RunNode 同样用 hex 传递，绕开所有引号/换行问题：
+    // python 侧先 unhexlify 出源码再 exec，源码里的 sys.argv[2] 拿到真正请求。
+    const bootstrap = "import binascii,sys;exec(binascii.unhexlify(sys.argv[1]).decode())";
+    const command = state.python + " -c " + v1ShellQuote(bootstrap)
+        + " " + v1ShellQuote(v1Utf8Hex(v1FileProgram))
+        + " " + v1ShellQuote(v1Utf8Hex(request));
+    const result = await v1Program(command, 60000);
+    const output = String(result.output || "").trim();
+    const lastLine = output.split("\n").filter(function(line: string) { return line.trim() !== ""; }).pop() || "";
+    try {
+        return JSON.parse(lastLine);
+    } catch (error) {
+        throw new Error("V1 file operation returned non-JSON output: " + output.slice(0, 400));
+    }
 }
 
 exports.create_session = v1CreateSession;
