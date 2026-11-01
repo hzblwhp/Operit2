@@ -1,3 +1,18 @@
+
+/// 导入内容为空或不是 JSON 时给出可读错误，避免抛出引擎原始信息。
+function parseImportDocument(kind: string, content: string): unknown {
+  const text = content.trim();
+  if (text.length === 0) {
+    throw new Error(kind + "内容为空，请选择导出的 JSON 文件");
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(kind + "不是合法的 JSON：" + detail);
+  }
+}
+
 import { readCharacter } from "./drafts";
 import type { Card, Group, Tag, TagChanges, TagValues } from "./model";
 import { createCharacterDraft } from "./drafts";
@@ -146,7 +161,7 @@ function convertStandardTavern(data: TavernData, spec: string, version: string):
 /** Parses the explicitly selected interchange format without switching transport or input interpretation on error. */
 export function decodeCharacterImport(content: string, format: "operit" | "tavern", tags: Tag[]): CharacterImportPlan {
   assertString(content, "角色卡导入内容");
-  const document: unknown = JSON.parse(content);
+  const document: unknown = parseImportDocument("导入内容", content);
   const tagChanges: TagChanges = { created: [], updated: [], deleted: [] };
   if (format === "operit") {
     const card = readCharacter(document);
@@ -211,7 +226,7 @@ export function encodeCharacterExport(card: Card, format: "operit" | "tavern", t
 /** Imports one complete canonical group record while treating its identity as a new group. */
 export function decodeGroupImport(content: string): Group {
   assertString(content, "群组导入内容");
-  const document: unknown = JSON.parse(content);
+  const document: unknown = parseImportDocument("导入内容", content);
   assertGroup(document);
   return { ...document, id: "", createdAt: 0, updatedAt: 0 };
 }

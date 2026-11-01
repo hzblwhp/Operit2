@@ -229,7 +229,8 @@ class _ChatAreaState extends State<ChatArea>
                   slivers: [
                     if (centerIndex > 0)
                       SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                        // 贴边显示：左右由 16 降到 4（外层列表内边距）
+                        padding: const EdgeInsets.fromLTRB(4, 16, 4, 0),
                         sliver: ChatMessageSliverList(
                           extents: rowExtents
                               .take(centerIndex)
@@ -243,10 +244,11 @@ class _ChatAreaState extends State<ChatArea>
                       ),
                     SliverPadding(
                       key: _centerSliverKey,
+                      // 贴边显示：左右由 16 降到 4（外层列表内边距）
                       padding: EdgeInsets.fromLTRB(
-                        16,
+                        4,
                         _layoutAnchorTimestamp == null ? 16 : 0,
-                        16,
+                        4,
                         16 + widget.bottomContentInset,
                       ),
                       sliver: ChatMessageSliverList(
@@ -1285,7 +1287,8 @@ class _StatusMessage extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      // 贴边显示：左右由 16 降到 8
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: SelectableText(
         text,
         style: theme.textTheme.bodySmall?.copyWith(

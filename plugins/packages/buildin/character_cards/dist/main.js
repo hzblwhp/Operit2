@@ -5791,6 +5791,18 @@ var MemoryJobRunner = class {
 };
 
 // src/serialization.ts
+function parseImportDocument(kind, content) {
+  const text2 = content.trim();
+  if (text2.length === 0) {
+    throw new Error(kind + "\u5185\u5BB9\u4E3A\u7A7A\uFF0C\u8BF7\u9009\u62E9\u5BFC\u51FA\u7684 JSON \u6587\u4EF6");
+  }
+  try {
+    return JSON.parse(text2);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(kind + "\u4E0D\u662F\u5408\u6CD5\u7684 JSON\uFF1A" + detail);
+  }
+}
 function decodeTavernData(value) {
   assertObject(value, "\u9152\u9986\u89D2\u8272\u6570\u636E");
   const data = {
@@ -5934,7 +5946,7 @@ ${data.creator_notes}
 }
 function decodeCharacterImport(content, format2, tags) {
   assertString(content, "\u89D2\u8272\u5361\u5BFC\u5165\u5185\u5BB9");
-  const document2 = JSON.parse(content);
+  const document2 = parseImportDocument("\u5BFC\u5165\u5185\u5BB9", content);
   const tagChanges = { created: [], updated: [], deleted: [] };
   if (format2 === "operit") {
     const card2 = readCharacter(document2);
@@ -6021,7 +6033,7 @@ function encodeCharacterExport(card, format2, tags) {
 }
 function decodeGroupImport(content) {
   assertString(content, "\u7FA4\u7EC4\u5BFC\u5165\u5185\u5BB9");
-  const document2 = JSON.parse(content);
+  const document2 = parseImportDocument("\u5BFC\u5165\u5185\u5BB9", content);
   assertGroup(document2);
   return { ...document2, id: "", createdAt: 0, updatedAt: 0 };
 }
@@ -6335,9 +6347,21 @@ function registerSelectionSettingsAccess() {
 }
 
 // src/backup.ts
+function parseBackupDocument(kind, content) {
+  const text2 = content.trim();
+  if (text2.length === 0) {
+    throw new Error(kind + "\u5185\u5BB9\u4E3A\u7A7A\uFF0C\u8BF7\u9009\u62E9\u5BFC\u51FA\u7684\u5907\u4EFD\u6587\u4EF6\uFF08.json\uFF09");
+  }
+  try {
+    return JSON.parse(text2);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(kind + "\u4E0D\u662F\u5408\u6CD5\u7684 JSON\uFF1A" + detail);
+  }
+}
 function decodeCharacterBackup(content) {
   assertString(content, "character backup");
-  const document2 = JSON.parse(content);
+  const document2 = parseBackupDocument("\u89D2\u8272\u5361\u5907\u4EFD", content);
   assertObject(document2, "character backup");
   if (document2.version !== 2) throw new Error("Unsupported plugin character backup version");
   assertConversationGroups(document2.conversationGroups);
@@ -6348,7 +6372,7 @@ function decodeCharacterBackup(content) {
 }
 function decodeGroupBackup(content) {
   assertString(content, "group backup");
-  const document2 = JSON.parse(content);
+  const document2 = parseBackupDocument("\u7FA4\u7EC4\u5907\u4EFD", content);
   assertObject(document2, "group backup");
   if (!Array.isArray(document2.characterGroups)) throw new Error("Group backup requires complete characterGroups records");
   for (const group of document2.characterGroups) assertGroup(group);
@@ -6368,7 +6392,7 @@ function exportGroupBackup(repository2) {
 }
 function decodeMemoryBackup(content) {
   assertString(content, "memory backup");
-  const document2 = JSON.parse(content);
+  const document2 = parseBackupDocument("\u8BB0\u5FC6\u5907\u4EFD", content);
   assertObject(document2, "memory backup");
   if (document2.version !== "2.0") throw new Error("Unsupported memory backup version; this plugin uses full-record version 2.0");
   assertInteger(document2.exportDate, "exportDate", 0);

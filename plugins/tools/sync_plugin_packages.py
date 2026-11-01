@@ -585,6 +585,13 @@ def _prebuild_plans(repo_root: Path, source_dir: Path, plans: list[SyncPlanItem]
     )
     for child_dir in child_dirs:
         if _is_script_packed_toolpkg(child_dir):
+            # OPERIT_SKIP_TOOLPKG_PACK=1：跳过在宿主上重新打 toolpkg。
+            # 用于 Windows 上 node 撞 libuv 时钟断言（Assertion failed:
+            # new_time >= loop->time, src\win\core.c:327）导致构建中断时，
+            # 前提是 dist/*.toolpkg 已经手工打过并同步进内置资产目录。
+            if os.environ.get("OPERIT_SKIP_TOOLPKG_PACK") == "1":
+                print(f"SKIP-PACK: {child_dir}")
+                continue
             corepack_command = shutil.which("corepack")
             if corepack_command is None:
                 raise FileNotFoundError("Corepack is required to build script-packed ToolPkgs")
