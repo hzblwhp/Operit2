@@ -110,6 +110,26 @@ pub(crate) fn ownerNotifications(limit: i32, includeOngoing: bool) -> HostResult
     )
 }
 
+/// Lists installed apps through the owner's PackageManager bridge.
+///
+/// `AppListData` 没有 Serialize/Deserialize，这里用一个本地 DTO 承接 owner 返回的
+/// `{"packages": ["com.a", ...]}`，再组装成 host 结构。
+pub(crate) fn ownerListInstalledApps(includeSystemApps: bool) -> HostResult<AppListData> {
+    #[derive(serde::Deserialize)]
+    struct OwnerAppList {
+        #[serde(default)]
+        packages: Vec<String>,
+    }
+    let response: OwnerAppList = ownerSystemOperation(
+        "list_installed_apps",
+        serde_json::json!({ "includeSystemApps": includeSystemApps }),
+    )?;
+    Ok(AppListData {
+        includesSystemApps: includeSystemApps,
+        packages: response.packages,
+    })
+}
+
 /// Reads a system setting through the owner's exact settings response schema.
 pub(crate) fn ownerGetSystemSetting(namespace: &str, setting: &str) -> HostResult<SystemSettingData> {
     ownerSystemSetting(
@@ -238,6 +258,8 @@ pub(crate) struct FlutterSystemBindings {
     pub deviceInfo: Arc<dyn Fn() -> HostResult<DeviceInfoData> + Send + Sync>,
     pub screenshot: Arc<dyn Fn() -> HostResult<String> + Send + Sync>,
     pub recognition: Arc<dyn Fn(&str, OCRLanguage, OCRQuality) -> HostResult<String> + Send + Sync>,
+    /// Lists installed apps through the owner PackageManager bridge.
+    pub apps: Arc<dyn Fn(bool) -> HostResult<AppListData> + Send + Sync>,
 }
 
 /// Adds owner authorization and UI operations to an already selected system host.
@@ -283,9 +305,9 @@ impl SystemOperationHost for FlutterSystemOperationBridge {
     fn uninstallApp(&self, name: &str) -> HostResult<AppOperationData> {
         self.host.uninstallApp(name)
     }
-    /// Lists apps through the selected system host.
+    /// Lists apps through the owner PackageManager bridge.
     fn listInstalledApps(&self, includeSystem: bool) -> HostResult<AppListData> {
-        self.host.listInstalledApps(includeSystem)
+        (self.bindings.apps)(includeSystem)
     }
     /// Starts an app through the selected system host.
     fn startApp(&self, name: &str) -> HostResult<AppOperationData> {

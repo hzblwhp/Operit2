@@ -20,6 +20,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.pm.ApplicationInfo
 import android.media.MediaPlayer
 import android.media.projection.MediaProjection
 import android.net.Uri
@@ -279,6 +280,7 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
                         "get_device_info" -> mapOf(
                             "resultJson" to AndroidHostDeviceInfo.read(activity.applicationContext),
                         )
+                        "list_installed_apps" -> systemListInstalledApps(JSONObject(paramsJson))
                         "get_system_setting" -> systemGetSystemSetting(JSONObject(paramsJson))
                         "modify_system_setting" -> systemModifySystemSetting(JSONObject(paramsJson))
                         "execute_privileged_command" -> systemExecutePrivilegedCommand(JSONObject(paramsJson))
@@ -292,6 +294,29 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
             }
         }
     }
+
+    /**
+     * 列出已安装应用（只返回包名，与 host 侧 AppListData.packages 对应）。
+     *
+     * Rust host 的 listInstalledApps 原本是占位实现，直接抛
+     * 「requires the Android package host bridge」，插件工具因此一直不可用。
+     * 这里补上真实的 PackageManager 查询。
+     */
+    private fun systemListInstalledApps(params: JSONObject): Map<String, String> {
+        val includeSystemApps = params.optBoolean("includeSystemApps", false)
+        val packages = activity.packageManager
+            .getInstalledApplications(PackageManager.MATCH_UNINSTALLED_PACKAGES)
+            .asSequence()
+            .filter { includeSystemApps || (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
+            .map { it.packageName }
+            .sorted()
+            .toList()
+        val payload = JSONObject().apply {
+            put("packages", JSONArray(packages))
+        }
+        return mapOf("resultJson" to payload.toString())
+    }
+
 
     /** Reads one exact Android settings namespace and returns its stored value. */
     private fun systemGetSystemSetting(params: JSONObject): Map<String, String> {
