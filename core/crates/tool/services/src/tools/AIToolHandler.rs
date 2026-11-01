@@ -1059,13 +1059,32 @@ impl AIToolHandler {
                 }
             }
             if !self.getToolExecutorOrActivate(&request.name).await? {
-                return Ok(vec![Self::failedInvocation(tool(), format!("Tool not found: {}", request.name))]);
+                // 只报「找不到」不足以让模型继续：它既不知道有哪些工具可用，也不知道
+                // 该换哪条路，往往就此停下（用户看到的正是「对话说到一半中断」）。
+                // 这里把可行的替代路径写清楚，逼它换方法而不是放弃。
+                return Ok(vec![Self::failedInvocation(
+                    tool(),
+                    format!(
+                        "Tool not found: {}. 该工具不存在或所属包未激活。请按以下顺序处理：\
+                         (1) 先检查是不是工具名写错了，直接用提示词里列出的工具名重试；\
+                         (2) 若目标是插件包里的功能，先用 use_package 激活对应包，\
+                         再以 packageName:toolName 的形式经 package_proxy 调用；\
+                         (3) 找不到对应能力时，改用已有工具组合完成，或直接说明做不到。\
+                         不要臆造工具名，也不要因为这一条失败就停止当前任务。",
+                        request.name
+                    ),
+                )]);
             }
             let mut executor = self.acquireToolExecutor(&request.name).await
                 .ok_or_else(|| format!("Registered executor disappeared: {}", request.name))?;
             let prepared = match executor.prepare(request, context, isAiInvocation) {
                 Ok(prepared) => prepared,
-                Err(error) => return Ok(vec![Self::failedInvocation(tool(), format!("Invalid tool invocation: {error}"))]),
+                Err(error) => return Ok(vec![Self::failedInvocation(
+                    tool(),
+                    format!(
+                        "Invalid tool invocation: {error}. 请修正参数后重试，或换用其它工具完成同一目标；不要因这一次失败就停止任务。"
+                    ),
+                )]),
             };
             if isAiInvocation {
                 if let Some(access) = prepared.access {
