@@ -59,7 +59,9 @@ class OwnerSystemCapabilityChannel(
         private const val TAG = "OwnerSystemCapabilityChannel"
         private const val DEFAULT_CLASSIC_UUID = "00001101-0000-1000-8000-00805f9b34fb"
         private const val TTS_ENGINE_INIT_TIMEOUT_MS = 15_000L
-        private const val TTS_SYNTHESIS_TIMEOUT_MS = 120_000L
+        // 原来 120s：引擎不可用时会让整次朗读卡满两分钟（用户实测累计 4~5 分钟）。
+// 60s 足够覆盖长文本合成，又不会把 UI 拖死。
+private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
         private const val APPLICATION_NOTIFICATION_CHANNEL_ID = "operit_app_notifications"
         private const val APPLICATION_NOTIFICATION_CHANNEL_NAME = "Operit"
         private val PNG_SIGNATURE =
@@ -1949,13 +1951,54 @@ class OwnerSystemCapabilityChannel(
         )
     }
 
+    /**
+     * 解析可用的 TTS 引擎名。
+     *
+     * Pixel 上实测 `settings get secure tts_default_synth` 为 null（引擎已安装但没设默认），
+     * 此时 `TextToSpeech(context, listener)` 会一直等不到 onInit，表现为
+     * 「打开朗读卡好几分钟、且完全没有声音」。这里主动兜底：
+     * 系统默认为空时退化为第一个已安装引擎。
+     */
+    private fun resolveTtsEngineName(): String? {
+        // 先读系统设置里的默认引擎（tts_default_synth）。
+        // 注意 TextToSpeech 并没有 getDefaultEngine()/getEngines() 这类静态方法，
+        // 只能通过 Settings 或 PackageManager 拿。
+        val fromSettings = runCatching {
+            Settings.Secure.getString(
+                activity.contentResolver,
+                Settings.Secure.TTS_DEFAULT_SYNTH,
+            )
+        }.getOrNull()
+        if (!fromSettings.isNullOrBlank()) {
+            return fromSettings
+        }
+        // 系统没设默认时，退化为第一个可用的 TTS 服务。
+        val services = runCatching {
+            activity.packageManager.queryIntentServices(
+                Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE),
+                0,
+            )
+        }.getOrNull().orEmpty()
+        return services.firstOrNull()?.serviceInfo?.packageName
+    }
+
     /** Creates an Android TextToSpeech engine without allowing an unbounded initialization wait. */
     private fun createInitializedTtsEngine(label: String): TextToSpeech {
         val initLatch = CountDownLatch(1)
         var initStatus = TextToSpeech.ERROR
-        val tts = TextToSpeech(activity.applicationContext) { status ->
-            initStatus = status
-            initLatch.countDown()
+        // 用 orEmpty() 取非空 String：isNullOrBlank() 是扩展函数、不触发智能转换，
+        // 直接把 String? 传给 3 参数构造函数会编译失败。
+        val engineName = resolveTtsEngineName().orEmpty()
+        val tts = if (engineName.isEmpty()) {
+            TextToSpeech(activity.applicationContext) { status ->
+                initStatus = status
+                initLatch.countDown()
+            }
+        } else {
+            TextToSpeech(activity.applicationContext, { status ->
+                initStatus = status
+                initLatch.countDown()
+            }, engineName)
         }
         if (!initLatch.await(TTS_ENGINE_INIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
             tts.shutdown()
