@@ -756,11 +756,21 @@ impl AIMessageManager {
     /// SUMMARY 与 SYSTEM turn 永远保留 —— 它们是压缩后的锚点，丢了就真的没历史了。
     #[allow(non_snake_case)]
     fn trimTurnsToBudget(turns: Vec<PromptTurn>, maxTokens: i32) -> Vec<PromptTurn> {
-        let budgetChars = (maxTokens as i64).saturating_mul(3).max(1) as usize;
-        let totalChars: usize = turns.iter().map(|turn| turn.content.chars().count()).sum();
-        if totalChars <= budgetChars {
-            return turns;
-        }
+        // 双水位：超过 HIGH 才裁，一次裁到 LOW。
+        //
+        // 单水位会造成「滑动窗口」—— 每轮新增一两条就把切点往前推一格，
+        // 于是相邻两轮保留的区间起点不同，provider 的 prefix cache 从切点开始整段失效。
+        // 实测命中率在 84% 与 52% 之间来回跳，正是这种滑动的指纹。
+        // 改成高/低水位后，一次裁剪能撑很多轮，其间前缀保持 byte-identical。
+        let highChars = (maxTokens as i64).saturating_mul(3).max(1) as usize;
+        let lowChars = highChars.saturating_mul(3) / 5;
+        let budgetChars = {
+            let totalChars: usize = turns.iter().map(|turn| turn.content.chars().count()).sum();
+            if totalChars <= highChars {
+                return turns;
+            }
+            lowChars
+        };
         // 从尾部往回累加，保留能装下的最近若干轮。
         let mut kept: Vec<usize> = Vec::new();
         let mut used = 0usize;
