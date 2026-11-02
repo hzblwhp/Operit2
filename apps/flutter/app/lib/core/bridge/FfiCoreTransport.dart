@@ -471,7 +471,7 @@ void _appendFfiBytes(List<dynamic> values, BytesBuilder builder) {
   // （实测表现就是「无法加载外观设置 / Core FFI binary slot is too large」）。
   // 自引用的特征只有一个 —— 嵌套无限加深，所以判据应该是深度。
   final stackValues = <Object?>[...values.reversed];
-  final stackDepths = List<int>.filled(stackValues.length, 0);
+  final stackDepths = List<int>.filled(stackValues.length, 0, growable: true);
   while (stackValues.isNotEmpty) {
     final value = stackValues.removeLast();
     final depth = stackDepths.removeLast();

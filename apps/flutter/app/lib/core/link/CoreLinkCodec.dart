@@ -969,7 +969,7 @@ void _appendCoreLinkBytes(List<dynamic> values, BytesBuilder builder) {
   // 同 FfiCoreTransport：用深度而非元素总数来防自引用，
   // 否则正常的大二进制 payload 会被误判。
   final stackValues = <Object?>[...values.reversed];
-  final stackDepths = List<int>.filled(stackValues.length, 0);
+  final stackDepths = List<int>.filled(stackValues.length, 0, growable: true);
   while (stackValues.isNotEmpty) {
     final value = stackValues.removeLast();
     final depth = stackDepths.removeLast();
