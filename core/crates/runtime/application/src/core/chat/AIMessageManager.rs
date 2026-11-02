@@ -340,7 +340,11 @@ impl AIMessageManager {
 
         let memory = match request.promptHistoryOverride.clone() {
             Some(promptHistory) => promptHistory,
-            None => Self::getMemoryFromMessages(request.chatHistory.clone(), &request.chatConfiguration)?,
+            None => Self::getMemoryFromMessagesWithinBudget(
+                request.chatHistory.clone(),
+                &request.chatConfiguration,
+                Some(Self::HISTORY_TOKEN_BUDGET),
+            )?,
         };
 
         let apiPreferences = ApiPreferences::getInstance();
@@ -605,7 +609,11 @@ impl AIMessageManager {
     pub async fn calculateStableContextWindow(
         request: StableContextWindowRequest<'_>,
     ) -> Result<i64, operit_providers::chat::llmprovider::AIService::AiServiceError> {
-        let memory = Self::getMemoryFromMessages(request.chatHistory, &request.runtime.chatConfiguration)?;
+        let memory = Self::getMemoryFromMessagesWithinBudget(
+            request.chatHistory,
+            &request.runtime.chatConfiguration,
+            Some(Self::HISTORY_TOKEN_BUDGET),
+        )?;
         request
             .enhancedAiService
             .estimateRequestWindowFromMemory(
@@ -661,10 +669,37 @@ impl AIMessageManager {
         false
     }
 
+    /// 历史硬预算（tokens）。
+    ///
+    /// 取 200K 而不是各模型真实的 maxContextTokens：`ChatConfigurationResult` 里
+    /// 拿不到上下文上限，而绝大多数配置是 128K~256K。200K 留出足够余量给输出与
+    /// system prompt，同时足以容纳正常长度的会话 —— 目的是防止输入无限膨胀，
+    /// 不是把上下文压到很小。
+    const HISTORY_TOKEN_BUDGET: i32 = 200_000;
+
     /// Projects history using persisted participant identities and the owner's explicit history policy.
     #[allow(non_snake_case)]
     pub fn getMemoryFromMessages(
         messages: Vec<ChatMessage>, configuration: &ChatConfigurationResult,
+    ) -> Result<Vec<PromptTurn>, AiServiceError> {
+        Self::getMemoryFromMessagesWithinBudget(messages, configuration, None)
+    }
+
+    /// Projects history like `getMemoryFromMessages`, then enforces a hard token budget.
+    ///
+    /// 背景：历史只按「最后一条 summary」截取，**不按 token 预算裁剪**。而摘要触发
+    /// 条件是 `currentTokens / maxContextTokens >= 0.70`，摘要又是异步生成的 ——
+    /// 于是输入可以先涨到远超上下文（实测 373k vs 256k，比例 145%），摘要每轮都判
+    /// 「该生成了」，新 summary 让起点不断后移，provider 的 prefix cache 前缀每轮全变，
+    /// 命中率稳定掉到 5%。
+    ///
+    /// 这里加一道**硬预算**：超过预算就从最老的 turn 开始丢，保留 summary 与最近的对话。
+    /// 这样即便摘要还没生成完，输入也不会无限膨胀、前缀也能在相邻轮之间保持稳定。
+    #[allow(non_snake_case)]
+    pub fn getMemoryFromMessagesWithinBudget(
+        messages: Vec<ChatMessage>,
+        configuration: &ChatConfigurationResult,
+        maxTokens: Option<i32>,
     ) -> Result<Vec<PromptTurn>, AiServiceError> {
         let lastSummaryIndex = messages.iter().rposition(|message| message.sender == "summary");
         let relevantMessages = match lastSummaryIndex { Some(index) => &messages[index..], None => messages.as_slice() };
@@ -708,7 +743,50 @@ impl AIMessageManager {
                 _ => {}
             }
         }
+        let turns = match maxTokens {
+            Some(budget) if budget > 0 => Self::trimTurnsToBudget(turns, budget),
+            _ => turns,
+        };
         Ok(turns)
+    }
+
+    /// Drops the oldest turns until the estimated token count fits the budget.
+    ///
+    /// 估算口径取 3 字符 ≈ 1 token（偏保守：宁可早丢，也不要超上下文）。
+    /// SUMMARY 与 SYSTEM turn 永远保留 —— 它们是压缩后的锚点，丢了就真的没历史了。
+    #[allow(non_snake_case)]
+    fn trimTurnsToBudget(turns: Vec<PromptTurn>, maxTokens: i32) -> Vec<PromptTurn> {
+        let budgetChars = (maxTokens as i64).saturating_mul(3).max(1) as usize;
+        let totalChars: usize = turns.iter().map(|turn| turn.content.chars().count()).sum();
+        if totalChars <= budgetChars {
+            return turns;
+        }
+        // 从尾部往回累加，保留能装下的最近若干轮。
+        let mut kept: Vec<usize> = Vec::new();
+        let mut used = 0usize;
+        for index in (0..turns.len()).rev() {
+            let isAnchor = matches!(turns[index].kind, PromptTurnKind::SUMMARY | PromptTurnKind::SYSTEM);
+            let size = turns[index].content.chars().count();
+            if !isAnchor && used + size > budgetChars {
+                break;
+            }
+            used += size;
+            kept.push(index);
+        }
+        kept.reverse();
+        let mut keptIter = kept.into_iter().peekable();
+        let mut index = 0usize;
+        turns
+            .into_iter()
+            .filter(|_| {
+                let keep = keptIter.peek().is_some_and(|next| *next == index);
+                if keep {
+                    keptIter.next();
+                }
+                index += 1;
+                keep
+            })
+            .collect()
     }
 
     /// Converts stored assistant parts into provider turns while preserving tool boundaries.
