@@ -458,13 +458,28 @@ Uint8List _ffiBytesOf(Object? value) {
 }
 
 void _appendFfiBytes(List<dynamic> values, BytesBuilder builder) {
-  for (final value in values) {
+  // 用显式栈代替递归。
+  //
+  // 递归版在原生侧返回「嵌套很深」或「自引用」的 List 时会直接打爆 Dart 栈：
+  // 实测表现是整个 isolate 连续报 `Stack Overflow`，连外观设置都加载不出来
+  // （AppStartup / AIChatScreen / FlutterFramework 一起失败）。
+  // 显式栈 + 元素总量上限，让这类输入退化为可报告的异常而不是崩溃。
+  final pending = <Object?>[...values.reversed];
+  var budget = 8 * 1024 * 1024;
+  while (pending.isNotEmpty) {
+    final value = pending.removeLast();
+    if (budget-- <= 0) {
+      throw StateError('Core FFI binary slot is too large or self-referencing');
+    }
     if (value is int) {
       builder.addByte(value & 0xFF);
     } else if (value is Uint8List) {
       builder.add(value);
     } else if (value is List) {
-      _appendFfiBytes(value, builder);
+      // 逆序压栈以保持原始顺序。
+      for (var i = value.length - 1; i >= 0; i--) {
+        pending.add(value[i]);
+      }
     } else {
       throw StateError(
         'Core FFI binary slot has unsupported element: ${value.runtimeType}',

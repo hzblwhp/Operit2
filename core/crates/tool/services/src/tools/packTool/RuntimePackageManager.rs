@@ -924,14 +924,16 @@ impl RuntimePackageManager {
                         .next()
                 })
             {
-                // 子包与容器同名时不能再回钻，否则别名解析会把它们互相指回去。
-                if self.isToolPkgContainer(&self.resolveToolPkgContainerAlias(&subpackageName)) {
-                    return format!(
-                        "ToolPkg container '{}' declares subpackage '{}' whose name resolves back to the container itself; cannot activate it by name. Its UI is available from the toolbox.",
-                        normalizedPackageName, subpackageName
-                    );
+                // 子包与容器同名（如 workflow.toolpkg 的子包 id 就叫 workflow）时，
+                // 别名解析会把两者互相指回去，形成环。这种情形下正确的语义是
+                // **容器优先**：直接按容器本身激活，而不是拒绝 —— 容器的工具集就是
+                // 该子包的工具集，拒绝等于把整包判死（实测回归前 workflow 是可用的）。
+                let sameNameCycle = self.resolveToolPkgContainerAlias(&subpackageName)
+                    == normalizedPackageName;
+                if !sameNameCycle {
+                    return self.usePackageWithDepth(&subpackageName, depth + 1);
                 }
-                return self.usePackageWithDepth(&subpackageName, depth + 1);
+                // fall through：把容器当普通包继续走后面的正常激活路径。
             }
             // 没有子包的容器（纯 UI 型插件）本身无法产出工具，如实说明。
             return format!(

@@ -963,13 +963,24 @@ Uint8List _coreLinkBytesOf(Object part) {
 }
 
 void _appendCoreLinkBytes(List<dynamic> values, BytesBuilder builder) {
-  for (final value in values) {
+  // 用显式栈代替递归（与 FfiCoreTransport._appendFfiBytes 同因同治）。
+  // 嵌套过深或自引用的二进制槽位会把 Dart 栈打爆，整个 isolate 连续报
+  // `Stack Overflow`，连外观加载都失败；这里改为可报告的异常。
+  final pending = <Object?>[...values.reversed];
+  var budget = 8 * 1024 * 1024;
+  while (pending.isNotEmpty) {
+    final value = pending.removeLast();
+    if (budget-- <= 0) {
+      throw StateError('Core Link binary part is too large or self-referencing');
+    }
     if (value is int) {
       builder.addByte(value & 0xFF);
     } else if (value is Uint8List) {
       builder.add(value);
     } else if (value is List) {
-      _appendCoreLinkBytes(value, builder);
+      for (var i = value.length - 1; i >= 0; i--) {
+        pending.add(value[i]);
+      }
     } else {
       throw StateError(
         'Core Link binary part has unsupported element: ${value.runtimeType}',
