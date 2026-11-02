@@ -894,7 +894,7 @@ impl RuntimePackageManager {
         // 但子包默认是 disabled，也不会自动启用。两条路都堵死，
         // 于是整包对内表现为「注册了但激活不了」。
         if self.isToolPkgContainer(&normalizedPackageName) {
-            let _ = self.enablePackage(&normalizedPackageName);
+            self.ensurePackageEnabledSilently(&normalizedPackageName);
             if let Some(subpackageName) = self
                 .toolPkgContainersInternal()
                 .get(&normalizedPackageName)
@@ -919,7 +919,7 @@ impl RuntimePackageManager {
         if self.isToolPkgSubpackage(&normalizedPackageName)
             && !self.isPackageEnabled(&normalizedPackageName)
         {
-            let _ = self.enablePackage(&normalizedPackageName);
+            self.ensurePackageEnabledSilently(&normalizedPackageName);
         }
 
         let enabledPackageNames = self.getEnabledPackageNames();
@@ -979,7 +979,7 @@ impl RuntimePackageManager {
             self.resolveToolPkgContainerAlias(&self.normalizePackageName(packageName));
         // 与 usePackage 保持一致的宽容度：容器名自动落子包、子包自动启用。
         let activationTarget = if self.isToolPkgContainer(&normalizedPackageName) {
-            let _ = self.enablePackage(&normalizedPackageName);
+            self.ensurePackageEnabledSilently(&normalizedPackageName);
             self.toolPkgContainersInternal()
                 .get(&normalizedPackageName)
                 .and_then(|container| {
@@ -994,7 +994,7 @@ impl RuntimePackageManager {
             if self.isToolPkgSubpackage(&normalizedPackageName)
                 && !self.isPackageEnabled(&normalizedPackageName)
             {
-                let _ = self.enablePackage(&normalizedPackageName);
+                self.ensurePackageEnabledSilently(&normalizedPackageName);
             }
             normalizedPackageName.clone()
         };
@@ -4903,6 +4903,39 @@ impl RuntimePackageManager {
             return matches[0].clone();
         }
         packageName.to_string()
+    }
+
+    /// Enables a package for activation without notifying runtime change listeners.
+    ///
+    /// `enablePackage` 末尾会 `notifyToolPkgRuntimeChangeListeners()`。而 `usePackage`
+    /// 是从 core proxy 的持锁路径里被调用的，listener 会同步回调 UI / 其它 runtime；
+    /// 重入 core 后在持锁期间 panic，锁就永久 poisoned ——
+    /// 实测表现为 `FATAL_CORE_PANIC: core proxy object mutex poisoned: PoisonError`，
+    /// 之后整个 core 调用面全废。所以这里只落状态、不发通知。
+    #[allow(non_snake_case)]
+    fn ensurePackageEnabledSilently(&mut self, target: &str) {
+        let mut enabledPackageNames = BTreeSet::from_iter(self.getEnabledPackageNames());
+        let mut subpackageStates = self.getToolPkgSubpackageStatesInternal();
+        let mut touched = false;
+
+        if let Some(child) = self
+            .toolPkgManager()
+            .resolveToolPkgSubpackageRuntimeInternal(target)
+        {
+            enabledPackageNames.insert(child.containerPackageName.clone());
+            subpackageStates.insert(target.to_string(), true);
+            touched = true;
+        } else if enabledPackageNames.insert(target.to_string()) {
+            touched = true;
+        }
+
+        if !touched {
+            return;
+        }
+        let names = enabledPackageNames.into_iter().collect::<Vec<_>>();
+        let _ = self.saveEnabledPackageNames(&names);
+        let _ = self.saveToolPkgSubpackageStates(&subpackageStates);
+        let _ = self.removeFromDisabledPackages(target);
     }
 
     #[allow(non_snake_case)]
