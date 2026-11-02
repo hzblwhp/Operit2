@@ -635,39 +635,51 @@ impl AIMessageManager {
 
     #[allow(non_snake_case)]
     pub fn shouldGenerateSummary(
-        messages: Vec<ChatMessage>,
+        _messages: Vec<ChatMessage>,
         currentTokens: i64,
         maxTokens: i32,
         tokenUsageThreshold: f64,
         enableSummary: bool,
-        enableSummaryByMessageCount: bool,
-        summaryMessageCountThreshold: i32,
+        _enableSummaryByMessageCount: bool,
+        _summaryMessageCountThreshold: i32,
     ) -> bool {
         if !enableSummary {
             return false;
         }
-        if maxTokens > 0 {
-            let usageRatio = currentTokens as f64 / f64::from(maxTokens);
-            if usageRatio >= tokenUsageThreshold {
-                return true;
-            }
+        if maxTokens <= 0 {
+            return false;
         }
-        if enableSummaryByMessageCount {
-            let lastSummaryIndex = messages
-                .iter()
-                .rposition(|message| message.sender == "summary");
-            let relevantMessages = match lastSummaryIndex {
-                Some(index) => &messages[index + 1..],
-                None => messages.as_slice(),
-            };
-            let userAiMessagesSinceLastSummary = relevantMessages
-                .iter()
-                .filter(|message| message.sender == "user")
-                .count() as i32;
-            return userAiMessagesSinceLastSummary >= summaryMessageCountThreshold;
-        }
-        false
+
+        // 落盘（写摘要）只认一个指标：当前窗口已用 token 占上限的比例。
+        //
+        // **刻意不按消息条数判断。** 条数与上下文压力没有对应关系：
+        // 几十条短消息可能只占几个百分点，而两三段长代码就能顶满窗口。
+        // 按条数触发在两端都会判错 —— 空转的时候频繁重写摘要、
+        // 真快爆窗的时候反而迟迟不动。
+        //
+        // 水位的含义：历史截取起点是「最后一条 summary 之后」，
+        // 每写一次摘要，起点就往前挪一次，provider 的 prefix cache 前缀
+        // 随之整段作废。所以落盘必须足够稀疏 —— 用 90% 这个高位，
+        // 让中间绝大多数轮次共享同一段前缀。
+        let usageRatio = currentTokens as f64 / f64::from(maxTokens);
+
+        // 配置里的阈值可能被存成更小的历史值（旧默认是 0.70），
+        // 但落盘水位不允许低于 90%；配置只能把它调得更保守。
+        let watermark = if tokenUsageThreshold > 0.0 {
+            tokenUsageThreshold.max(Self::SUMMARIZE_TOKEN_WATERMARK)
+        } else {
+            Self::SUMMARIZE_TOKEN_WATERMARK
+        };
+
+        usageRatio >= watermark
     }
+
+    /// 写入摘要（落盘）的 token 水位。
+    ///
+    /// 用「已用 token / 窗口上限」判断，而不是消息条数 —— 条数与上下文压力无关。
+    /// 取 0.90：摘要会移动历史截取起点、让 prefix cache 前缀整段作废，
+    /// 所以必须让它足够稀疏，把 90% 以下的所有轮次留给稳定命中。
+    const SUMMARIZE_TOKEN_WATERMARK: f64 = 0.90;
 
     /// 历史硬预算（tokens）。
     ///
