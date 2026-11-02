@@ -675,7 +675,7 @@ impl AIMessageManager {
     /// 拿不到上下文上限，而绝大多数配置是 128K~256K。200K 留出足够余量给输出与
     /// system prompt，同时足以容纳正常长度的会话 —— 目的是防止输入无限膨胀，
     /// 不是把上下文压到很小。
-    const HISTORY_TOKEN_BUDGET: i32 = 200_000;
+    const HISTORY_TOKEN_BUDGET: i32 = 400_000;
 
     /// Projects history using persisted participant identities and the owner's explicit history policy.
     #[allow(non_snake_case)]
@@ -762,15 +762,25 @@ impl AIMessageManager {
         // 于是相邻两轮保留的区间起点不同，provider 的 prefix cache 从切点开始整段失效。
         // 实测命中率在 84% 与 52% 之间来回跳，正是这种滑动的指纹。
         // 改成高/低水位后，一次裁剪能撑很多轮，其间前缀保持 byte-identical。
-        let highChars = (maxTokens as i64).saturating_mul(3).max(1) as usize;
+        // 字符→token 的换算必须按「中文 1 字符 ≈ 1 token」算，不能按英文的 3 字符/token。
+        // 之前用 3 倍，等于把预算放大三倍去装中文内容，实际长期贴着高水位震荡、
+        // 每轮都触发一次裁剪，于是相邻两轮的前缀起点都不同，命中率一直是 4%。
+        let highChars = (maxTokens as i64).max(1) as usize;
         let lowChars = highChars.saturating_mul(3) / 5;
+        let totalChars: usize = turns.iter().map(|turn| turn.content.chars().count()).sum();
         let budgetChars = {
-            let totalChars: usize = turns.iter().map(|turn| turn.content.chars().count()).sum();
             if totalChars <= highChars {
                 return turns;
             }
             lowChars
         };
+        operit_util::AppLogger::AppLogger::i(
+            "HistoryBudget",
+            &format!(
+                "trimmed totalChars={} high={} low={} turns={}",
+                totalChars, highChars, lowChars, turns.len()
+            ),
+        );
         // 从尾部往回累加，保留能装下的最近若干轮。
         let mut kept: Vec<usize> = Vec::new();
         let mut used = 0usize;
