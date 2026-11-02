@@ -168,10 +168,10 @@ impl ToolCall {
                 _ => return Err("tool_name must use packageName:toolName format".into()),
             }
         }
+        // `params` 完全可选：无参工具（get_bluetooth_state、get_device_info、workflow:list …）
+        // 直接 package_proxy {"tool_name":"..."} 就该能调，不必写一个空对象占位。
+        // 之前强制要求 params，导致这类工具必须被逼着传 "{}"，属于无谓的形状负担。
         let explicitParams = self.parameters.get("params");
-        if explicitParams.is_none() && foldedTopLevel.is_empty() {
-            return Err("Proxy params is required".into());
-        }
         let object = match explicitParams.unwrap_or(&serde_json::Value::Null) {
             serde_json::Value::Null => serde_json::Map::new(),
             serde_json::Value::String(text) => {

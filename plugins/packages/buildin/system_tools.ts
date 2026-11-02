@@ -228,8 +228,12 @@ async function get_notifications(params: { limit?: number; include_ongoing?: boo
 
 /** Gets application foreground usage time. */
 async function get_app_usage_time(params: UsageParams): Promise<ToolResponse> {
+    // package_name 在 schema 里是 optional；直接透传会让对象里出现 `undefined`，
+    // 而 SDK 的 snapshotJsonObject 明确拒绝 undefined（报
+    // 「Tool request contains a non-JSON value」）。同一对象里其余三个字段都有 ?? 兜底，
+    // 唯独这个没有 —— 于是「只传 since_hours/limit、不传 package_name」必定失败。
     const result = await Tools.System.getAppUsageTime({
-        packageName: params.package_name,
+        packageName: params.package_name ?? "",
         sinceHours: params.since_hours ?? 24,
         limit: params.limit ?? 10,
         includeSystemApps: params.include_system_apps ?? false,
@@ -389,10 +393,34 @@ async function get_device_info(_params: EmptyParams): Promise<ToolResponse> {
     return { success: true, message: "成功获取设备信息", data: result };
 }
 
+/**
+ * 递归剥掉值为 undefined 的键。
+ *
+ * SDK 的 snapshotJsonObject 明确拒绝 undefined（报「Tool request contains a non-JSON
+ * value」），而本包各工具会把 params 再拼进 `Tools.System.*` 的对象字面量里 ——
+ * 只要有一个可选参数没传、又被原样透传，整次调用就失败。
+ * 实测 get_app_usage_time 因为 `packageName: params.package_name` 少了 ?? 兜底而必炸；
+ * 同类未兜底写法全文件还有 21 处，逐个补 ?? 既易漏又难维护，改在入口统一清理。
+ */
+function stripUndefined<T>(value: T): T {
+    if (value === null || typeof value !== "object") return value;
+    if (Array.isArray(value)) {
+        return value.map((item) => stripUndefined(item)) as unknown as T;
+    }
+    const source = value as unknown as Record<string, unknown>;
+    const target: Record<string, unknown> = {};
+    for (const key of Object.keys(source)) {
+        const item = source[key];
+        if (item === undefined) continue;
+        target[key] = stripUndefined(item);
+    }
+    return target as unknown as T;
+}
+
 /** Completes a package tool call and reports unexpected errors. */
 async function completeTool<P>(func: (params: P) => Promise<ToolResponse>, params: P): Promise<void> {
     try {
-        complete(await func(params));
+        complete(await func(stripUndefined(params)));
     } catch (error: any) {
         console.error(`Tool ${func.name} failed unexpectedly`, error);
         complete({ success: false, message: `工具执行时发生意外错误: ${error.message}` });
