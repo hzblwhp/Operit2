@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use operit_store::PreferencesDataStore::mutableStateFlow;
 use operit_store::PreferencesDataStore::MutableStateFlow;
@@ -541,6 +542,81 @@ impl PromptHistoryHookDispatcher for RuntimePromptHistoryHooks {
     }
 }
 
+/// Caches the composed system prompt for the most recent request signature.
+///
+/// 为什么需要它：`RuntimeSystemPromptComposer` 每个请求都会新建一个实例，
+/// 而它的 `get_system_prompt_with_custom_prompts` 会**全量重算** system prompt ——
+/// 取宿主环境、重建 PathMapper、锁 PackageManager 遍历所有启用包与 MCP server、
+/// 枚举技能包、再让 SystemToolPrompts 重新渲染全部工具描述。
+/// `SystemPromptConfig.rs` / `SystemToolPrompts.rs` 里没有任何 OnceLock/OnceCell，
+/// 所以这条链在每一轮对话都完整跑一遍。
+///
+/// system turn 位于整条消息序列的最前面，它一旦字节级变化，历史部分即使
+/// byte-identical 也会让 provider 的 prefix cache 全部作废。因此这里缓存
+/// **最近一次成功拼装的结果**：签名相同就直接复用，既省掉重算，
+/// 又保证连续轮次发出完全相同的前缀。
+static SYSTEM_PROMPT_CACHE: OnceLock<Mutex<Option<CachedSystemPrompt>>> = OnceLock::new();
+
+struct CachedSystemPrompt {
+    key: u64,
+    prompt: String,
+}
+
+/// Computes a signature covering every input that can change the composed prompt.
+///
+/// 判定原则：**宁可多失效，不可少失效**。漏掉一个输入会导致返回过期的
+/// system prompt（比无缓存危险得多），所以这里把 composer 里所有显式传入的
+/// 字段都纳入，包括包集合的描述文本与 hook metadata。
+#[allow(non_snake_case)]
+fn computeSystemPromptCacheKey(
+    request: &PrepareConversationHistoryRequest,
+    use_english: bool,
+    workspace_path_mappings: &[operit_tools::files::PathMapper::ResolvedVfsPath],
+    enabled_packages: &[PackageInfo],
+    mcp_servers: &[PackageInfo],
+    skill_packages: &[PackageInfo],
+    host_environment: &str,
+    executionContext: &Value,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    request.chat_id.hash(&mut hasher);
+    request.workspace_path.hash(&mut hasher);
+    request.workspace_folders.hash(&mut hasher);
+    request.custom_system_prompt_template.hash(&mut hasher);
+    request.intro_prompt.hash(&mut hasher);
+    request.prompt_function_type.hash(&mut hasher);
+    request.participant_id.hash(&mut hasher);
+    request.proxy_sender_name.hash(&mut hasher);
+    use_english.hash(&mut hasher);
+    request.has_image_recognition.hash(&mut hasher);
+    request.has_audio_recognition.hash(&mut hasher);
+    request.has_video_recognition.hash(&mut hasher);
+    request.chat_model_has_direct_image.hash(&mut hasher);
+    request.chat_model_has_direct_audio.hash(&mut hasher);
+    request.chat_model_has_direct_video.hash(&mut hasher);
+    request.use_tool_call_api.hash(&mut hasher);
+    format!("{:?}", request.tool_exposure_mode).hash(&mut hasher);
+    format!("{:?}", workspace_path_mappings).hash(&mut hasher);
+    host_environment.hash(&mut hasher);
+    executionContext.to_string().hash(&mut hasher);
+    for (key, value) in &request.prompt_metadata {
+        key.hash(&mut hasher);
+        value.to_string().hash(&mut hasher);
+    }
+    // 包集合：名字和描述都要进 key，任何包激活/卸载/描述变化都会使缓存失效。
+    for list in [enabled_packages, mcp_servers, skill_packages] {
+        list.len().hash(&mut hasher);
+        for package in list {
+            package.name.hash(&mut hasher);
+            package.description.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 pub struct RuntimeSystemPromptComposer {
     tool_handler: AIToolHandler,
     provider_runtime_context: ProviderRuntimeContext,
@@ -620,12 +696,32 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                     description: package.description,
                 })
                 .collect::<Vec<_>>();
+            let host_environment_debug = format!("{:?}", host_environment);
+            let cache_key = computeSystemPromptCacheKey(
+                request,
+                use_english,
+                &workspace_path_mappings,
+                &enabled_packages,
+                &mcp_servers,
+                &skill_packages,
+                &host_environment_debug,
+                &self.executionContext,
+            );
+            // 命中就直接返回，连 hook dispatch 与工具描述渲染都省掉。
+            let cache = SYSTEM_PROMPT_CACHE.get_or_init(|| Mutex::new(None));
+            if let Ok(guard) = cache.lock() {
+                if let Some(cached) = guard.as_ref() {
+                    if cached.key == cache_key {
+                        return Ok(cached.prompt.clone());
+                    }
+                }
+            }
             let mut hookMetadata = btree_to_value_map(&request.prompt_metadata);
             hookMetadata.insert(
                 "executionContext".to_string(),
                 self.executionContext.clone(),
             );
-            SystemPromptConfig::getSystemPromptWithCustomPrompts(SystemPromptWithCustomOptions {
+            let composed = SystemPromptConfig::getSystemPromptWithCustomPrompts(SystemPromptWithCustomOptions {
                 base: SystemPromptOptions {
                     chat_id: request.chat_id.clone(),
                     workspace_path: request.workspace_path.clone(),
@@ -654,7 +750,14 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                 },
                 custom_intro_prompt: request.intro_prompt.clone(),
             })
-            .await
+            .await?;
+            if let Ok(mut guard) = cache.lock() {
+                *guard = Some(CachedSystemPrompt {
+                    key: cache_key,
+                    prompt: composed.clone(),
+                });
+            }
+            Ok(composed)
         })
     }
 }
