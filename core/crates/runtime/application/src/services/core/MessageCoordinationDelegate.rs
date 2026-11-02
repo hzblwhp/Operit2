@@ -889,6 +889,18 @@ impl MessageCoordinationDelegate {
             .getResolvedModelConfig(&providerId, &modelId)
             .map_err(|error| error.to_string())?;
         let maxTokens = settings.context.maxContextTokens();
+        AppLogger::w(
+            "SummaryGate",
+            &format!(
+                "enter enableSummary={} cfgEnable={} maxTokens={} ratio={:.3} checkBeforeSend={} taskActive={}",
+                enableSummary,
+                settings.summary.enableSummary,
+                maxTokens,
+                settings.summary.tokenThresholdRatio(),
+                checkBeforeSend,
+                self.messageProcessingDelegate.summaryTaskForChat(chatId).is_some(),
+            ),
+        );
         if !enableSummary || !settings.summary.enableSummary {
             return Ok((maxTokens, f64::MAX));
         }
@@ -908,7 +920,9 @@ impl MessageCoordinationDelegate {
                 .loadChatHistory(chatId.to_string())
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("Chat does not exist: {chatId}"))?;
-            if !messages.is_empty()
+            let gateMessages = messages.len();
+            let gateWindow = chat.currentWindowSize;
+            let gateShould = !messages.is_empty()
                 && AIMessageManager::shouldGenerateSummary(
                     messages.clone(),
                     chat.currentWindowSize,
@@ -917,8 +931,15 @@ impl MessageCoordinationDelegate {
                     true,
                     settings.summary.enableSummaryByMessageCount,
                     settings.summary.summaryMessageCountThreshold,
-                )
-            {
+                );
+            AppLogger::w(
+                "SummaryGate",
+                &format!(
+                    "judge messages={} window={} maxTokens={} threshold={:.3} => {}",
+                    gateMessages, gateWindow, maxTokens, threshold, gateShould,
+                ),
+            );
+            if gateShould {
                 let _summaryCompletion = self.launchSummary(
                     enhancedAiService,
                     messages,

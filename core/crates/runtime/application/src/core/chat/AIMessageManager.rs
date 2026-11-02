@@ -635,7 +635,7 @@ impl AIMessageManager {
 
     #[allow(non_snake_case)]
     pub fn shouldGenerateSummary(
-        _messages: Vec<ChatMessage>,
+        messages: Vec<ChatMessage>,
         currentTokens: i64,
         maxTokens: i32,
         tokenUsageThreshold: f64,
@@ -661,7 +661,37 @@ impl AIMessageManager {
         // 每写一次摘要，起点就往前挪一次，provider 的 prefix cache 前缀
         // 随之整段作废。所以落盘必须足够稀疏 —— 用 90% 这个高位，
         // 让中间绝大多数轮次共享同一段前缀。
-        let usageRatio = currentTokens as f64 / f64::from(maxTokens);
+        // 摘要水位必须衡量「未裁剪的历史总量」，而不是裁剪之后的残余。
+        //
+        // 裁剪和摘要是两道不同的闸门：
+        //   1. 摘要：历史超过 maxContextTokens 的 90% 时落盘，压缩起点前移；
+        //   2. 裁剪：历史超过 HISTORY_TOKEN_BUDGET 时从最老的 turn 开始丢。
+        // 如果摘要判断用的 currentTokens 取自「裁剪后的窗口」，那么只要
+        // 裁剪先发生，currentTokens 就永远低于水位，摘要一次都不会触发 ——
+        // 历史无限膨胀，每轮都全量投影 + 裁剪，旧对话永久丢失。
+        // 实测：totalChars=1,396,833（约 499K token）被裁到 336,000 字符
+        // （约 113K token），水位 180K 永远达不到，turns 只涨不降。
+        //
+        // 因此这里直接从原始消息算一遍总量，与裁剪前的历史对齐。
+        // 范围与裁剪一致：从最后一条 summary 开始（更早的消息本来就不发送）。
+        let lastSummaryIndex = messages.iter().rposition(|message| message.sender == "summary");
+        let relevantMessages = match lastSummaryIndex {
+            Some(index) => &messages[index..],
+            None => messages.as_slice(),
+        };
+        let historyChars: usize = relevantMessages
+            .iter()
+            .map(|message| {
+                MessagePartCodec::orderedParts(&message.parts)
+                    .iter()
+                    .map(|part| part.content.chars().count())
+                    .sum::<usize>()
+            })
+            .sum();
+        let historyTokens = (historyChars as f64 / Self::CHARS_PER_TOKEN_ESTIMATE) as i64;
+        // 取较大者：未裁剪时 currentTokens 就是真实值；被裁剪过则 historyTokens 更接近真实量。
+        let effectiveTokens = currentTokens.max(historyTokens);
+        let usageRatio = effectiveTokens as f64 / f64::from(maxTokens);
 
         // 配置里的阈值可能被存成更小的历史值（旧默认是 0.70），
         // 但落盘水位不允许低于 90%；配置只能把它调得更保守。
@@ -671,6 +701,13 @@ impl AIMessageManager {
             Self::SUMMARIZE_TOKEN_WATERMARK
         };
 
+        AppLogger::w(
+            "SummaryGate",
+            &format!(
+                "watermark currentTokens={} historyChars={} historyTokens={} effective={} maxTokens={} ratio={:.3} wm={:.3}",
+                currentTokens, historyChars, historyTokens, effectiveTokens, maxTokens, usageRatio, watermark,
+            ),
+        );
         usageRatio >= watermark
     }
 
@@ -687,7 +724,14 @@ impl AIMessageManager {
     /// 拿不到上下文上限，而绝大多数配置是 128K~256K。200K 留出足够余量给输出与
     /// system prompt，同时足以容纳正常长度的会话 —— 目的是防止输入无限膨胀，
     /// 不是把上下文压到很小。
-    const HISTORY_TOKEN_BUDGET: i32 = 400_000;
+    const HISTORY_TOKEN_BUDGET: i32 = 200_000;
+
+    /// 估算 chars -> tokens 的换算比例。
+    ///
+    /// 实测：240,000 字符的历史被 provider 记为 84,475 input tokens，
+    /// 比例约 2.84。取 2.8 偏保守：同样字符数换算出更少 token，
+    /// 预算更容易被触发，宁可早裁一点也不要放行超长请求。
+    const CHARS_PER_TOKEN_ESTIMATE: f64 = 2.8;
 
     /// Projects history using persisted participant identities and the owner's explicit history policy.
     #[allow(non_snake_case)]
@@ -772,7 +816,13 @@ impl AIMessageManager {
         //
         // 单水位会造成「滑动窗口」—— 每轮新增一两条就把切点往前推一格，
         // 于是相邻两轮保留的区间起点不同，provider 的 prefix cache 从切点开始整段失效。
-        let highChars = (maxTokens as i64).max(1) as usize;
+        // maxTokens 是 token 预算，而下面的累加是字符。
+        // 早期版本直接把 maxTokens 当字符数用（400_000 token 被当成 400_000 字符
+        // 约 141K token），于是裁剪水位反而低于摘要水位（0.90 x maxContextTokens），
+        // 每轮都是裁剪先于摘要触发，摘要永远等不到时机，历史只能被裁掉。
+        // 后果：前缀每轮滑动导致缓存失效，且被裁掉的对话对模型永久不可见。
+        let highChars =
+            ((maxTokens as f64).max(1.0) * Self::CHARS_PER_TOKEN_ESTIMATE) as usize;
         let lowChars = highChars.saturating_mul(3) / 5;
         let totalChars: usize = turns.iter().map(|turn| turn.content.chars().count()).sum();
         if totalChars <= highChars {

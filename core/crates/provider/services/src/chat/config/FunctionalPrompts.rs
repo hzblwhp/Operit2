@@ -40,9 +40,9 @@ pub const SUMMARY_PROMPT: &str = r#"你是负责生成对话摘要的AI助手。
 
 **内容要求：**
 1. 语言风格：专业、清晰、客观.
-2. 内容长度：不要限制字数，根据对话内容的复杂程度和重要性，自行决定合适的长度。可以写得详细一些，确保重要信息不丢失。宁可内容多一点，也不要因为过度精简导致关键信息丢失或失真。每个部分都要具备充分篇幅，绝不能以一句话敷衍.
+2. 内容长度：总长度硬上限 14000 字符（含标点），超过必须先删减再输出。优先删除已解决、已失效、可由现状推断的细节，保留当前仍有效的事实与结论。宁可精简，也不要超限.
 3. 信息完整性：优先保证信息的完整性和准确性，技术与非技术内容都需提供必要证据或引用.
-4. 内容还原：摘要既要说明“过程如何推进”，也要写清“实际产出/讨论内容是什么”，必要时引用结果文本、结论、代码片段或参数，确保在没有原始对话的情况下依然能完全还原信息本身.
+4. 内容还原：摘要既要说明“过程如何推进”，也要写清“实际产出/讨论内容是什么”，必要时引用结论、代码片段或关键参数，确保在没有原始对话的情况下也能理解信息本身。严禁整段复制原始工具调用记录——包括 [工具: xxx]、[结果: xxx]、{"command":"..."}、JSON 响应体、命令输出、日志原文在内，一律压缩成一句结论（例如“已在电脑端执行补丁脚本并确认三处改动写入成功”），不得保留命令原文与返回体.
 5. 目标：生成的摘要必须是自包含的。即使AI完全忘记了之前的对话，仅凭这份摘要也能够准确理解历史背景、当前状态、具体进度和下一步行动.
 6. 时序重点：请先聚焦于最新一段对话（约占输入的最后30%），明确最新指令、问题和进展，再回顾更早的内容。若新消息与旧内容冲突或更新，应以最新对话为准，并解释差异."#;
 
@@ -86,9 +86,9 @@ pub const SUMMARY_PROMPT_EN: &str = r#"You are an AI assistant responsible for g
 
 **Content requirements:**
 1. Style: professional, clear, objective.
-2. Length: do not limit length. Decide an appropriate length based on complexity and importance. Prefer being detailed to avoid missing key information.
+2. Length: hard cap of 14000 characters (including punctuation). This limit is mandatory; if you exceed it, cut content before outputting. Remove resolved, obsolete, or inferable details first and keep only facts and conclusions that are still valid.
 3. Completeness: prioritize completeness and accuracy. Provide evidence/quotes when needed.
-4. Reconstruction: the summary must describe both “how the process progressed” and “what the actual outputs/discussion were”. Quote resulting text, conclusions, code snippets, or parameters when needed.
+4. Reconstruction: the summary must describe both “how the process progressed” and “what the actual outputs/discussion were”. Quote conclusions, code snippets, or key parameters when needed so the information stays usable without the original conversation. NEVER copy raw tool invocation records verbatim — such as [tool: xxx], [result: xxx], commands, JSON response bodies, command output, or raw log lines. Compress each of them into one conclusion sentence and drop the original command and response body.
 5. Goal: the summary must be self-contained so that even if the AI forgets the original conversation, it can fully reconstruct context, current status, progress, and next actions.
 6. Recency: focus first on the most recent part of the conversation (about the last 30% of input), then review earlier content. If new messages conflict with old content, use the latest messages and explain the differences."#;
 
@@ -159,12 +159,12 @@ impl FunctionalPrompts {
             if !previous_summary.trim().is_empty() {
                 if use_english {
                     prompt.push_str(&format!(
-                        "\n\nPrevious Summary (to inherit context):\n{}\nPlease merge the key information from the previous summary with the new conversation and generate a brand-new, more complete summary.",
+                        "\n\nPrevious Summary (to inherit context):\n{}\nPlease rewrite the summary based on the new conversation: keep only information that is still valid, and drop anything already resolved, obsolete, or superseded. Do not merely append to the previous summary. The total length must not exceed 14000 characters.",
                         previous_summary.trim()
                     ));
                 } else {
                     prompt.push_str(&format!(
-                        "\n\n上一次的摘要（用于继承上下文）：\n{}\n请将以上摘要中的关键信息，与本次新的对话内容相融合，生成一份全新的、更完整的摘要。",
+                        "\n\n上一次的摘要（用于继承上下文）：\n{}\n请以本次新对话为准重写摘要：只保留仍然有效的信息，删除已经解决、已经失效或已被推翻的内容；不要在旧摘要基础上简单追加。总长度不得超过 14000 字符。",
                         previous_summary.trim()
                     ));
                 }
