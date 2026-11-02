@@ -136,14 +136,37 @@ impl ConversationService {
                 .last()
                 .map(|turn| turn.content.chars().count())
                 .unwrap_or(0);
+            // 只打长度不够 —— 还得知道「第一条是谁」。
+            // 入口第一条正常应是 SYSTEM turn（system prompt，约 13K 字符）。
+            // 如果它是 USER/TOOL_RESULT，说明有东西在 prepare 之后把块塞进了
+            // 历史头部，或者上一轮的结果被整体改写过。
+            let firstKind = request
+                .chat_history
+                .first()
+                .map(|turn| format!("{:?}", turn.kind))
+                .unwrap_or_else(|| "none".to_string());
+            let firstTool = request
+                .chat_history
+                .first()
+                .and_then(|turn| turn.tool_name.clone())
+                .unwrap_or_default();
+            // 第一条前 40 个字符，足以认出是不是记忆块/附件块这类注入内容。
+            let firstHead: String = request
+                .chat_history
+                .first()
+                .map(|turn| turn.content.chars().take(40).collect())
+                .unwrap_or_default();
             operit_util::AppLogger::AppLogger::i(
                 "HistoryIntake",
                 &format!(
-                    "count={} hash={:016x} firstLen={} lastLen={}",
+                    "count={} hash={:016x} firstKind={} firstTool={} firstLen={} lastLen={} head={}",
                     request.chat_history.len(),
                     hasher.finish(),
+                    firstKind,
+                    if firstTool.is_empty() { "-" } else { firstTool.as_str() },
                     firstLen,
                     lastLen,
+                    firstHead.replace('\n', "\\n"),
                 ),
             );
         }
