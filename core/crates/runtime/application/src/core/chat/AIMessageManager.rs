@@ -856,9 +856,21 @@ impl AIMessageManager {
         let mut assistantMarkup = String::new();
         for part in MessagePartCodec::orderedParts(&message.parts) {
             match part.kind {
-                MessagePartKind::Markdown | MessagePartKind::Thinking | MessagePartKind::Status => {
+                // Thinking 不进历史。
+                //
+                // 1) 它会被序列化成字面的 `<think>...</think>` 标签塞进 assistant turn，
+                //    模型看到历史里这个格式后会去模仿，实测出现过正文里直接输出
+                //    未闭合的 `<think>`（markdown part 内容以 `<think>` 开头），
+                //    导致 UI 解析异常、整轮对话中断。
+                // 2) 它又是超长内容的主要来源：历史总量 1.5M 字符里有相当比例是
+                //    历次思考块，直接推高裁剪触发频率。
+                //
+                // 业界通行的做法也是如此：历史只保留最终回复，不保留推理过程。
+                MessagePartKind::Markdown | MessagePartKind::Status => {
                     assistantMarkup.push_str(&Self::assistantMarkupForPart(part));
                 }
+                // 思考块只用于当场展示，不进历史（理由见上方注释）。
+                MessagePartKind::Thinking => {}
                 MessagePartKind::ToolCall => {
                     if !assistantMarkup.trim().is_empty() {
                         turns.push(PromptTurn::new(
