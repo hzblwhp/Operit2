@@ -724,7 +724,9 @@ impl AIMessageManager {
     /// 拿不到上下文上限，而绝大多数配置是 128K~256K。200K 留出足够余量给输出与
     /// system prompt，同时足以容纳正常长度的会话 —— 目的是防止输入无限膨胀，
     /// 不是把上下文压到很小。
-    const HISTORY_TOKEN_BUDGET: i32 = 200_000;
+    // 截剪线必须高于摘要水位，否则截剪永远抢在摘要前面。
+    // 窗口 256K × 水位 0.9 = 230.4K token（摘要触发线）；此处取 240K，留 ~9.6K token 余量。
+    const HISTORY_TOKEN_BUDGET: i32 = 240_000;
 
     /// 估算 chars -> tokens 的换算比例。
     ///
