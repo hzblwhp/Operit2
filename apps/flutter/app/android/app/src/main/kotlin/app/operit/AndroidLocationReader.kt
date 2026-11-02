@@ -4,10 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.location.Geocoder
 import android.location.Location
+import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Bundle
+import android.os.Looper
 import androidx.core.content.ContextCompat
-import androidx.core.location.LocationManagerCompat
-import androidx.core.os.CancellationSignal
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -20,6 +21,9 @@ class AndroidLocationReader(private val activity: MainActivity) {
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 48261
+
+        /** 已知位置可以当"当前位置"复用的最大年龄；超过就不该再冒充新定位。 */
+        private const val MAX_KNOWN_FIX_AGE_MS = 120_000L
     }
 
     /** Completes only permission requests owned by this location reader. */
@@ -55,6 +59,11 @@ class AndroidLocationReader(private val activity: MainActivity) {
         }
     }
 
+    /**
+     * 收集一次定位结果，记录它是否来自「刚拿到的卫星/网络定位」还是「复用的已知位置」。
+     */
+    private class Fix(val location: Location, val provider: String, val reused: Boolean, val ageMs: Long)
+
     /** Acquires one current location with cancellation and an exact caller timeout. */
     fun read(params: JSONObject): Map<String, Any> {
         val timeout = params.getInt("timeout")
@@ -66,13 +75,11 @@ class AndroidLocationReader(private val activity: MainActivity) {
         val manager = activity.getSystemService(LocationManager::class.java)
             ?: error("Android LocationManager is unavailable")
 
-        // 目的：优先 provider 之外再并发请求备选 provider，谁先给出定位就用谁。
+        // 同时请求首选与备选 provider，谁先给出定位就用谁。
         //
-        // 起因：调用方通常传 highAccuracy=false，于是只走 NETWORK_PROVIDER。
-        // 但 Android 的网络定位在国内依赖 Google NLP 后端，实测必然 10s 左右
-        // DEADLINE_EXCEEDED（Name resolution delay 0 / remote_addr=null），
-        // 与调用方传的 timeout 无关；而 GPS_PROVIDER 是纯卫星、不需要网络。
-        // 之前只请求单个 provider，所以 non-high-accuracy 场景在这类环境下永远拿不到定位。
+        // highAccuracy 只决定「谁优先」，不决定「只试谁」：网络定位在国内依赖
+        // Google NLP 后端，常常根本不可达；而 GPS 是纯卫星、不需要网络。
+        // 只请求单个 provider 会让某一种环境下永远拿不到定位。
         val preferred = if (highAccuracy) LocationManager.GPS_PROVIDER else LocationManager.NETWORK_PROVIDER
         val fallback = if (highAccuracy) LocationManager.NETWORK_PROVIDER else LocationManager.GPS_PROVIDER
         val providers = listOf(preferred, fallback)
@@ -81,42 +88,103 @@ class AndroidLocationReader(private val activity: MainActivity) {
         check(providers.isNotEmpty()) {
             "No location provider is enabled. preferred=$preferred fallback=$fallback"
         }
+
+        // 刻意不用 androidx 的 LocationManagerCompat.getCurrentLocation。
+        //
+        // 在带 GMS 的设备上它会被导向 Google 融合定位，而那条链路是 gRPC：
+        // 实测报 `DEADLINE_EXCEEDED ... remote_addr=null`，**调用方传的 timeout 被无视**，
+        // 固定 ~10s 就抛错，即使 GPS 明明能给出坐标。直接调系统
+        // LocationManager.requestLocationUpdates 可以完全绕开这层。
         val completed = CountDownLatch(1)
-        var fix: Location? = null
-        var fixProvider: String = preferred
-        val signals = ArrayList<Pair<String, CancellationSignal>>()
+        val fixLock = Any()
+        var fresh: Fix? = null
+        val listener = object : LocationListener {
+            override fun onLocationChanged(location: Location) {
+                synchronized(fixLock) {
+                    if (fresh == null) {
+                        fresh = Fix(
+                            location = location,
+                            provider = location.provider ?: preferred,
+                            reused = false,
+                            ageMs = 0L,
+                        )
+                    }
+                }
+                completed.countDown()
+            }
+
+            @Deprecated("Required by LocationListener below API 30")
+            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+
+            override fun onProviderEnabled(provider: String) {}
+
+            override fun onProviderDisabled(provider: String) {}
+        }
+
         try {
-            for (candidate in providers) {
-                val signal = CancellationSignal()
-                signals.add(candidate to signal)
-                runCatching {
-                    LocationManagerCompat.getCurrentLocation(
-                        manager, candidate, signal, ContextCompat.getMainExecutor(activity),
-                    ) { location ->
-                        if (location != null && fix == null) {
-                            fix = location
-                            fixProvider = candidate
-                            completed.countDown()
-                        }
+            activity.runOnUiThread {
+                for (candidate in providers) {
+                    runCatching {
+                        manager.requestLocationUpdates(
+                            candidate,
+                            0L,
+                            0f,
+                            listener,
+                            Looper.getMainLooper(),
+                        )
                     }
                 }
             }
-            check(completed.await(timeout.toLong(), TimeUnit.SECONDS)) {
-                // 把「授权状态」和「环境是否可用」分开写清楚，否则调用方无法判断该改设置还是该换个地方再试。
-                val fine = ContextCompat.checkSelfPermission(
-                    activity, Manifest.permission.ACCESS_FINE_LOCATION,
-                ) == PackageManager.PERMISSION_GRANTED
-                val coarse = ContextCompat.checkSelfPermission(
-                    activity, Manifest.permission.ACCESS_COARSE_LOCATION,
-                ) == PackageManager.PERMISSION_GRANTED
-                "Current location request timed out after ${timeout}s " +
-                    "(providers=${providers.joinToString()}, fineLocationGranted=$fine, " +
-                    "coarseLocationGranted=$coarse). " +
-                    "Location permission is granted but no provider produced a fix within the timeout - " +
-                    "this usually means indoor GPS is unavailable and the network provider cannot reach " +
-                    "its backend. Retry outdoors, or raise timeout."
+            val gotFreshFix = completed.await(timeout.toLong(), TimeUnit.SECONDS)
+            val resolved = synchronized(fixLock) { fresh } ?: run {
+                // 超时没拿到新定位。只有在存在「足够新的已知位置」时才回退，
+                // 并且把它标成 reused —— 不能让调用方把一小时前的坐标当成当前位置。
+                val now = System.currentTimeMillis()
+                val known = providers
+                    .mapNotNull { providerName ->
+                        runCatching { manager.getLastKnownLocation(providerName) }.getOrNull()
+                            ?.let { providerName to it }
+                    }
+                    .maxByOrNull { it.second.time }
+                val reusable = known?.takeIf { (_, location) ->
+                    now - location.time in 0..MAX_KNOWN_FIX_AGE_MS
+                }
+                if (reusable == null) {
+                    val fine = ContextCompat.checkSelfPermission(
+                        activity, Manifest.permission.ACCESS_FINE_LOCATION,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    val coarse = ContextCompat.checkSelfPermission(
+                        activity, Manifest.permission.ACCESS_COARSE_LOCATION,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    val providerStates = providers.joinToString { providerName ->
+                        val enabled = runCatching { manager.isProviderEnabled(providerName) }
+                            .getOrDefault(false)
+                        val knownAge = runCatching { manager.getLastKnownLocation(providerName) }
+                            .getOrNull()
+                            ?.let { "${(now - it.time) / 1000}s ago" }
+                            ?: "none"
+                        "$providerName(enabled=$enabled, lastKnown=$knownAge)"
+                    }
+                    error(
+                        "Current location request timed out after ${timeout}s. " +
+                            "providers=[$providerStates] " +
+                            "fineLocationGranted=$fine coarseLocationGranted=$coarse " +
+                            "gotFreshFix=$gotFreshFix. " +
+                            "Permission is granted and no provider produced a fix within the timeout - " +
+                            "this normally means indoor GPS reception is unavailable and the network " +
+                            "provider cannot reach its backend. Retry outdoors, raise timeout, " +
+                            "or supply known coordinates instead.",
+                    )
+                }
+                Fix(
+                    location = reusable.second,
+                    provider = reusable.first,
+                    reused = true,
+                    ageMs = now - reusable.second.time,
+                )
             }
-            val location = fix ?: error("The location provider did not return a current position")
+
+            val location = resolved.location
             val address = if (includeAddress) {
                 check(Geocoder.isPresent()) { "Android reverse geocoding is unavailable" }
                 val addresses = Geocoder(activity, Locale.getDefault()).getFromLocation(
@@ -128,19 +196,23 @@ class AndroidLocationReader(private val activity: MainActivity) {
                 "latitude" to location.latitude,
                 "longitude" to location.longitude,
                 "accuracy" to location.accuracy,
-                "provider" to fixProvider,
+                "provider" to resolved.provider,
                 "timestamp" to location.time,
-                "rawData" to JSONObject(mapOf("altitude" to location.altitude,
-                    "speed" to location.speed, "bearing" to location.bearing)).toString(),
+                "rawData" to JSONObject(mapOf(
+                    "altitude" to location.altitude,
+                    "speed" to location.speed,
+                    "bearing" to location.bearing,
+                    // 明确标注这个坐标是不是刚采到的，调用方据此判断可信度。
+                    "reused" to resolved.reused,
+                    "ageMs" to resolved.ageMs,
+                )).toString(),
                 "address" to if (address == null) "" else requireNotNull(address.getAddressLine(0)) { "Reverse geocoder omitted the address" },
                 "city" to if (address == null) "" else requireNotNull(address.locality) { "Reverse geocoder omitted the city" },
                 "province" to if (address == null) "" else requireNotNull(address.adminArea) { "Reverse geocoder omitted the province" },
                 "country" to if (address == null) "" else requireNotNull(address.countryName) { "Reverse geocoder omitted the country" },
             )
         } finally {
-            for ((_, signal) in signals) {
-                runCatching { signal.cancel() }
-            }
+            runCatching { manager.removeUpdates(listener) }
         }
     }
 }
