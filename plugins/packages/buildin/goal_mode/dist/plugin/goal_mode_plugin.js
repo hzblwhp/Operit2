@@ -57,9 +57,57 @@ function buildGoalReviewPrompt(objective, response) {
         `Assistant response: ${response}`,
     ].join("\n");
 }
+/**
+ * 从模型回复里取出 JSON 对象。
+ *
+ * 直接 JSON.parse 整段文本会炸：不同 provider 的输出形态不一致，
+ * 即使 enableThinking=false，也可能带 `<think>...</think>` 前缀、
+ * markdown 代码围栏、或者 JSON 前后的解释性文字。
+ * 实测报错：`Unexpected token '<', "<think>The"... is not valid JSON`
+ * —— 这会让 goal 复核抛错，进而中断整条消息链，表现为「无缘无故中断」。
+ *
+ * 处理顺序：去 think 块 → 去代码围栏 → 取第一个平衡的 {…} → 解析。
+ */
+function extractJsonObject(text) {
+    let body = text.replace(/<think\b[\s\S]*?<\/think>/gi, "").trim();
+    body = body.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    const start = body.indexOf("{");
+    if (start < 0) {
+        throw new Error("Goal review response contains no JSON object. Raw: " + body.slice(0, 300));
+    }
+    // 逐个字符数大括号，跳过字符串字面量，避免把值里的 { } 当成结构
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < body.length; index++) {
+        const character = body[index];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (character === "\\") {
+            escaped = true;
+            continue;
+        }
+        if (character === '"') {
+            inString = !inString;
+            continue;
+        }
+        if (inString)
+            continue;
+        if (character === "{")
+            depth++;
+        else if (character === "}") {
+            depth--;
+            if (depth === 0)
+                return body.slice(start, index + 1);
+        }
+    }
+    throw new Error("Goal review response has an unterminated JSON object. Raw: " + body.slice(0, 300));
+}
 /** Parses and validates the three-state goal review response. */
 function parseGoalReviewResult(text) {
-    const parsed = JSON.parse(text.trim());
+    const parsed = JSON.parse(extractJsonObject(text));
     if (typeof parsed !== "object" || parsed === null) {
         throw new Error("Goal review response must be a JSON object.");
     }
@@ -135,6 +183,13 @@ async function onChatMessagePersisted(event) {
         const review = parseGoalReviewResult(result.text);
         await applyGoalReviewDecision(payload.chatId, review);
         await goal_mode_ipc_js_1.GoalService.reviewed(payload.chatId, payload.timestamp);
+    }
+    catch (error) {
+        // goal 复核只是「附加评审」，它失败绝不能连累用户正在进行的对话。
+        // 之前只有 finally 没有 catch，解析失败会把异常抛回插件链，
+        // 整条消息链就此中断 —— 用户看到的就是「无缘无故中断」。
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error("Goal review skipped: " + detail);
     }
     finally {
         reviewedMessageTimestamps.delete(reviewKey);
