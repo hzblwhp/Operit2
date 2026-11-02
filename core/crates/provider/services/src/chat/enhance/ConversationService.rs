@@ -167,6 +167,38 @@ impl ConversationService {
                 ..before_context
             })
             .await?;
+        // 记录最终发出历史的指纹。
+        //
+        // prefix cache 以「字节级前缀相同」为前提；system prompt 只占几 KB，
+        // 真正的大头是历史。命中率掉到 5% 时要能判断是「哪一条 turn 变了」，
+        // 否则只能在十几万 token 里猜。这里打印条数、总哈希，以及每条的前 16 位哈希，
+        // 连续两轮对比即可定位第一个出现差异的 turn。
+        {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut total = DefaultHasher::new();
+            let mut per_turn = String::new();
+            for turn in after_context.prepared_history.iter() {
+                let mut turn_hasher = DefaultHasher::new();
+                format!("{:?}", turn.kind).hash(&mut turn_hasher);
+                turn.tool_name.hash(&mut turn_hasher);
+                turn.content.hash(&mut turn_hasher);
+                let turn_hash = turn_hasher.finish();
+                total.write_u64(turn_hash);
+                if per_turn.len() < 512 {
+                    per_turn.push_str(&format!("{:016x},", turn_hash));
+                }
+            }
+            operit_util::AppLogger::AppLogger::i(
+                "HistoryFingerprint",
+                &format!(
+                    "turns={} total={:016x} first=[{}]",
+                    after_context.prepared_history.len(),
+                    total.finish(),
+                    per_turn.trim_end_matches(','),
+                ),
+            );
+        }
         Ok(after_context.prepared_history)
     }
 
