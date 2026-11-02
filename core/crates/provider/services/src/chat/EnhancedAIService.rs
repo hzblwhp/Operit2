@@ -3303,7 +3303,7 @@ fn resolveToolDisplayName(tool: &RuntimeAITool) -> String {
 fn buildPackageProxyToolPrompt() -> ToolPrompt {
     ToolPrompt {
         name: "package_proxy".to_string(),
-        description: "Proxy tool for package tools activated by use_package.".to_string(),
+        description: "Proxy tool for package tools activated by use_package. Target-tool arguments may be passed either inside `params` or directly as top-level parameters; stray top-level keys are folded into `params` automatically.".to_string(),
         parameters: buildToolParametersJson(&[
             crate::chat::config::SystemToolPrompts::ToolParameterSchema {
                 name: "tool_name".to_string(),
@@ -3317,8 +3317,8 @@ fn buildPackageProxyToolPrompt() -> ToolPrompt {
             crate::chat::config::SystemToolPrompts::ToolParameterSchema {
                 name: "params".to_string(),
                 value_type: "object".to_string(),
-                description: "JSON object of parameters to forward to the target tool".to_string(),
-                required: true,
+                description: "Parameters to forward to the target tool. Optional when they are supplied as top-level arguments instead.".to_string(),
+                required: false,
                 default: None,
             },
         ]),
@@ -3335,8 +3335,8 @@ fn buildPackageProxyToolPrompt() -> ToolPrompt {
             ToolParameterSchema {
                 name: "params".to_string(),
                 r#type: "object".to_string(),
-                description: "JSON object of parameters to forward to the target tool".to_string(),
-                required: true,
+                description: "Parameters to forward to the target tool. Optional when they are supplied as top-level arguments instead; stray top-level keys are folded in automatically.".to_string(),
+                required: false,
                 default: None,
             },
         ]),

@@ -101,9 +101,25 @@ impl ToolCall {
         if self.name == CLI_PROXY_TOOL_NAME && context.turnSnapshot().map(|turn| &turn.toolExposureMode) != Some(&ToolExposureMode::CLI) {
             return Err(CliToolModeSupport::buildCliModeUnavailableMessage(false));
         }
-        for key in self.parameters.keys() {
-            if !matches!(key.as_str(), "tool_name" | "params" | PACKAGE_CALLER_NAME_PARAM | PACKAGE_CHAT_ID_PARAM | PACKAGE_CALLER_PARTICIPANT_ID_PARAM | PACKAGE_CALLER_OWNER_PARAM) {
-                return Err(format!("Unexpected proxy parameter: {key}"));
+        // 模型经常把目标工具的参数直接放到顶层（`command`、`background`、`city` …），
+        // 而不是塞进 `params`。过去这里直接报 `Unexpected proxy parameter: <key>` 拒绝，
+        // 实测同一位调用方连续踩了 10 次（每次都要重发一遍正确形状），
+        // 属于对调用方极端不友好的形状校验。
+        //
+        // 现在改为**自动折叠**：顶层出现的不属于 proxy 信封本身的键，
+        // 一律并入 `params`（`params` 里已有的同名键优先，不覆盖调用方显式写的值）。
+        let mut foldedTopLevel: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        for (key, value) in &self.parameters {
+            if !matches!(
+                key.as_str(),
+                "tool_name"
+                    | "params"
+                    | PACKAGE_CALLER_NAME_PARAM
+                    | PACKAGE_CHAT_ID_PARAM
+                    | PACKAGE_CALLER_PARTICIPANT_ID_PARAM
+                    | PACKAGE_CALLER_OWNER_PARAM
+            ) {
+                foldedTopLevel.insert(key.clone(), value.clone());
             }
         }
         let name = self.parameters.get("tool_name").and_then(serde_json::Value::as_str)
@@ -116,8 +132,12 @@ impl ToolCall {
                 _ => return Err("tool_name must use packageName:toolName format".into()),
             }
         }
-        let value = self.parameters.get("params").ok_or("Proxy params is required")?;
-        let object = match value {
+        let explicitParams = self.parameters.get("params");
+        if explicitParams.is_none() && foldedTopLevel.is_empty() {
+            return Err("Proxy params is required".into());
+        }
+        let object = match explicitParams.unwrap_or(&serde_json::Value::Null) {
+            serde_json::Value::Null => serde_json::Map::new(),
             serde_json::Value::String(text) => {
                 // 模型从 XML 形式给出参数时，引号会被转义成 &quot; / &apos; 等。
                 // 不先还原就解析 JSON 必然失败，表现为
@@ -134,6 +154,10 @@ impl ToolCall {
             _ => return Err("Proxy params must be a JSON object or its legacy text encoding".into()),
         };
         let mut parameters = object.into_iter().collect::<BTreeMap<_, _>>();
+        // 折叠的顶层参数只补缺失键，不覆盖调用方在 params 里显式写的值。
+        for (key, value) in foldedTopLevel {
+            parameters.entry(key).or_insert(value);
+        }
         for key in [PACKAGE_CALLER_NAME_PARAM, PACKAGE_CHAT_ID_PARAM, PACKAGE_CALLER_PARTICIPANT_ID_PARAM, PACKAGE_CALLER_OWNER_PARAM] {
             parameters.remove(key);
             if let Some(value) = self.parameters.get(key) { parameters.insert(key.to_string(), value.clone()); }
