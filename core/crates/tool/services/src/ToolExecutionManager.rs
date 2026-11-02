@@ -122,8 +122,44 @@ impl ToolCall {
                 foldedTopLevel.insert(key.clone(), value.clone());
             }
         }
-        let name = self.parameters.get("tool_name").and_then(serde_json::Value::as_str)
-            .ok_or("Proxy tool_name must be text")?;
+        // `tool_name` 可能缺失，也可能被写进 `params` 里 —— 两者都实测出现过。
+        // 过去这里只回一句 "must be text"，既没说是缺失还是类型不对，也没给正确形状，
+        // 调用方无法自我纠正（同一位调用方在同类问题上连续踩了十几次）。
+        // 现在：先从 params 回收，再给一条能直接照着改的错误信息。
+        let reclaimedName = match self.parameters.get("tool_name").and_then(serde_json::Value::as_str) {
+            Some(text) if !text.trim().is_empty() => Some(text.to_string()),
+            _ => match self.parameters.get("params") {
+                Some(serde_json::Value::Object(object)) => object
+                    .get("tool_name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|text| text.to_string()),
+                Some(serde_json::Value::String(text)) => {
+                    let unescaped = ToolExecutionManager::unescapeXml(text);
+                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&unescaped)
+                        .ok()
+                        .and_then(|object| {
+                            object
+                                .get("tool_name")
+                                .and_then(serde_json::Value::as_str)
+                                .map(|text| text.to_string())
+                        })
+                }
+                _ => None,
+            },
+        };
+        let name = reclaimedName.ok_or_else(|| {
+            let received = self
+                .parameters
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                r#"Proxy call is missing the required `tool_name` field (received parameters: [{}]). Pass it as a top-level string alongside `params`, using the exact form package_proxy {{"tool_name":"<packageName>:<toolName>","params":{{...}}}}, for example {{"tool_name":"super_admin:bash","params":{{"command":"ls"}}}}."#,
+                if received.is_empty() { "none".to_string() } else { received }
+            )
+        })?;
+        let name = name.as_str();
         if name.trim().is_empty() || name.trim() != name { return Err("Proxy tool_name must be exact nonblank text".into()); }
         if CliToolModeSupport::isReservedProxyTarget(name) { return Err(format!("Proxy cannot target another proxy or catalog entry: {name}")); }
         if self.name == PACKAGE_PROXY_TOOL_NAME {
