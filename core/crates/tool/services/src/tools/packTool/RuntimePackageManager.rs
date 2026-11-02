@@ -884,6 +884,24 @@ impl RuntimePackageManager {
     /// Activates a package and returns its system prompt contribution.
     #[operit_route_macros::operit_plugin_sdk_expose]
     pub fn usePackage(&mut self, packageName: &str) -> String {
+        self.usePackageWithDepth(packageName, 0)
+    }
+
+    /// 带递归深度保护的激活实现。
+    ///
+    /// 需要这一层是因为：容器名 → 子包名的映射可能**形成环**。实测
+    /// `workflow.toolpkg` 的子包 id 就叫 `workflow`，而 `workflow` 会被别名解析
+    /// 回 `com.operit.workflow`（容器），于是「取子包 → 又是 workflow → 再解析」
+    /// 无限递归，直接把 native 栈打爆（一次闪退，tombstone 里 130+ 帧同一个 pc）。
+    /// 这里限制最多下钻 3 层，超限就如实报错而不是继续递归。
+    #[allow(non_snake_case)]
+    fn usePackageWithDepth(&mut self, packageName: &str, depth: usize) -> String {
+        if depth > 3 {
+            return format!(
+                "Package activation recursion limit reached while resolving '{}'; the container and its subpackage share the same name. Try the explicit id.",
+                packageName
+            );
+        }
         let normalizedPackageName = self.resolveToolPkgContainerAlias(&self.normalizePackageName(packageName));
 
         // 激活一个 toolpkg 容器时，自动落到它可激活的子包上，而不是直接拒绝。
@@ -906,7 +924,14 @@ impl RuntimePackageManager {
                         .next()
                 })
             {
-                return self.usePackage(&subpackageName);
+                // 子包与容器同名时不能再回钻，否则别名解析会把它们互相指回去。
+                if self.isToolPkgContainer(&self.resolveToolPkgContainerAlias(&subpackageName)) {
+                    return format!(
+                        "ToolPkg container '{}' declares subpackage '{}' whose name resolves back to the container itself; cannot activate it by name. Its UI is available from the toolbox.",
+                        normalizedPackageName, subpackageName
+                    );
+                }
+                return self.usePackageWithDepth(&subpackageName, depth + 1);
             }
             // 没有子包的容器（纯 UI 型插件）本身无法产出工具，如实说明。
             return format!(
