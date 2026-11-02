@@ -1,6 +1,6 @@
 --- selection_container.dart	2026-10-07 13:40:12.000000000 +0800
-+++ selection_container.dart	2026-11-03 05:18:20.956324000 +0800
-@@ -215,7 +215,25 @@
++++ selection_container.dart	2026-11-03 05:29:07.554371200 +0800
+@@ -215,7 +215,27 @@
    Size get size => (context.findRenderObject()! as RenderBox).size;
  
    @override
@@ -16,10 +16,12 @@
 +    // 以 `Unhandled error source: Zone` 的形式弹到用户面前。
 +    // 返回空列表把「尚未就绪」如实表达出去，由调用方跳过它。
 +    final RenderObject? renderObject = context.findRenderObject();
-+    if (renderObject is! RenderBox ||
-+        !renderObject.attached ||
-+        !renderObject.hasSize ||
-+        renderObject.debugNeedsLayout) {
++    // 注意：这里绝对不能用 debugNeedsLayout。
++    // 它是 debug-only 的 getter，release 构建里它依赖的字段是未初始化的 late 变量，
++    // 一访问就抛 `LateInitializationError: Local 'result' has not been initialized`，
++    // 反而把原本的布局竞态换成更糟的崩溃。
++    // 只用 release 也安全的两项判断：attached 与 hasSize。
++    if (renderObject is! RenderBox || !renderObject.attached || !renderObject.hasSize) {
 +      return const <Rect>[];
 +    }
 +    return <Rect>[renderObject.paintBounds];
