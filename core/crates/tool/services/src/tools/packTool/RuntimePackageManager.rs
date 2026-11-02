@@ -913,33 +913,51 @@ impl RuntimePackageManager {
         // 于是整包对内表现为「注册了但激活不了」。
         if self.isToolPkgContainer(&normalizedPackageName) {
             self.ensurePackageEnabledSilently(&normalizedPackageName);
-            if let Some(subpackageName) = self
+            let subpackages = self
                 .toolPkgContainersInternal()
                 .get(&normalizedPackageName)
-                .and_then(|container| {
+                .map(|container| {
                     container
                         .subpackages
                         .iter()
                         .map(|child| child.packageName.clone())
-                        .next()
+                        .collect::<Vec<_>>()
                 })
-            {
-                // 子包与容器同名（如 workflow.toolpkg 的子包 id 就叫 workflow）时，
-                // 别名解析会把两者互相指回去，形成环。这种情形下正确的语义是
-                // **容器优先**：直接按容器本身激活，而不是拒绝 —— 容器的工具集就是
-                // 该子包的工具集，拒绝等于把整包判死（实测回归前 workflow 是可用的）。
-                let sameNameCycle = self.resolveToolPkgContainerAlias(&subpackageName)
-                    == normalizedPackageName;
-                if !sameNameCycle {
-                    return self.usePackageWithDepth(&subpackageName, depth + 1);
-                }
-                // fall through：把容器当普通包继续走后面的正常激活路径。
+                .unwrap_or_default();
+
+            if subpackages.is_empty() {
+                // 纯 UI 型容器（如 thinking_guidance）本身不产出工具，如实说明。
+                return format!(
+                    "ToolPkg container '{}' is enabled but declares no subpackage, so it exposes no tools to activate. Its UI is available from the toolbox.",
+                    normalizedPackageName
+                );
             }
-            // 没有子包的容器（纯 UI 型插件）本身无法产出工具，如实说明。
-            return format!(
-                "ToolPkg container '{}' is enabled but declares no subpackage, so it exposes no tools to activate. Its UI is available from the toolbox.",
-                normalizedPackageName
-            );
+
+            // 子包与容器同名（workflow.toolpkg 的子包 id 就叫 workflow）时，真正的
+            // 子包名会被别名解析指回容器本身，形成环。此时正确语义是「子包优先」：
+            // 直接用子包自己的名字激活，绕过别名解析 —— 也就是把裸名当作**已解析**
+            // 的子包名使用，而不是交给别名层再绕一圈。
+            if let Some(subpackageName) = subpackages.iter().find(|name| {
+                self.resolveToolPkgContainerAlias(name) == normalizedPackageName
+            }) {
+                let child = subpackageName.clone();
+                self.ensurePackageEnabledSilently(&child);
+                if self.isPackageEnabled(&child) {
+                    if let Some(toolPackage) = self.availablePackages().get(&child).cloned() {
+                        let selected = self.selectToolPackageState(&toolPackage);
+                        let _ = self.activatePackage(&child);
+                        return self.generatePackageSystemPrompt(&selected);
+                    }
+                }
+            }
+
+            // 其余情况：落到第一个子包。
+            if let Some(subpackageName) = subpackages.first() {
+                let child = subpackageName.clone();
+                if self.resolveToolPkgContainerAlias(&child) != normalizedPackageName {
+                    return self.usePackageWithDepth(&child, depth + 1);
+                }
+            }
         }
 
         // 子包默认 disabled，这里自动启用后再继续，避免「必须先去 UI 手动开」的隐性前提。
