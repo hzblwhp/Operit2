@@ -886,11 +886,40 @@ impl RuntimePackageManager {
     pub fn usePackage(&mut self, packageName: &str) -> String {
         let normalizedPackageName = self.normalizePackageName(packageName);
 
+        // 激活一个 toolpkg 容器时，自动落到它可激活的子包上，而不是直接拒绝。
+        //
+        // 起因：`use_package("character_cards")` 查不到（toolpkg_id 是
+        // `com.operit.character_cards`），而 `use_package("com.operit.character_cards")`
+        // 又会命中容器判定被拒；真正的子包 id 是 `character_memory`，
+        // 但子包默认是 disabled，也不会自动启用。两条路都堵死，
+        // 于是整包对内表现为「注册了但激活不了」。
         if self.isToolPkgContainer(&normalizedPackageName) {
+            let _ = self.enablePackage(&normalizedPackageName);
+            if let Some(subpackageName) = self
+                .toolPkgContainersInternal()
+                .get(&normalizedPackageName)
+                .and_then(|container| {
+                    container
+                        .subpackages
+                        .iter()
+                        .map(|child| child.packageName.clone())
+                        .next()
+                })
+            {
+                return self.usePackage(&subpackageName);
+            }
+            // 没有子包的容器（纯 UI 型插件）本身无法产出工具，如实说明。
             return format!(
-                "ToolPkg container '{}' is not a package and cannot be activated.",
+                "ToolPkg container '{}' is enabled but declares no subpackage, so it exposes no tools to activate. Its UI is available from the toolbox.",
                 normalizedPackageName
             );
+        }
+
+        // 子包默认 disabled，这里自动启用后再继续，避免「必须先去 UI 手动开」的隐性前提。
+        if self.isToolPkgSubpackage(&normalizedPackageName)
+            && !self.isPackageEnabled(&normalizedPackageName)
+        {
+            let _ = self.enablePackage(&normalizedPackageName);
         }
 
         let enabledPackageNames = self.getEnabledPackageNames();
@@ -947,17 +976,28 @@ impl RuntimePackageManager {
         }
 
         let normalizedPackageName = self.normalizePackageName(packageName);
-        if self.isToolPkgContainer(&normalizedPackageName) {
-            return ToolResult {
-                toolName: toolName.to_string(),
-                success: false,
-                result: stringResultData(""),
-                error: Some(format!(
-                    "ToolPkg container '{}' is not a package and cannot be activated.",
-                    normalizedPackageName
-                )),
-            };
-        }
+        // 与 usePackage 保持一致的宽容度：容器名自动落子包、子包自动启用。
+        let activationTarget = if self.isToolPkgContainer(&normalizedPackageName) {
+            let _ = self.enablePackage(&normalizedPackageName);
+            self.toolPkgContainersInternal()
+                .get(&normalizedPackageName)
+                .and_then(|container| {
+                    container
+                        .subpackages
+                        .iter()
+                        .map(|child| child.packageName.clone())
+                        .next()
+                })
+                .unwrap_or_else(|| normalizedPackageName.clone())
+        } else {
+            if self.isToolPkgSubpackage(&normalizedPackageName)
+                && !self.isPackageEnabled(&normalizedPackageName)
+            {
+                let _ = self.enablePackage(&normalizedPackageName);
+            }
+            normalizedPackageName.clone()
+        };
+        let normalizedPackageName = activationTarget;
 
         let skillManager = SkillManager::fromDefaultPaths(self.fileSystemHost());
         if skillManager
