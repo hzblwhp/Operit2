@@ -567,6 +567,40 @@ struct CachedSystemPrompt {
 /// 判定原则：**宁可多失效，不可少失效**。漏掉一个输入会导致返回过期的
 /// system prompt（比无缓存危险得多），所以这里把 composer 里所有显式传入的
 /// 字段都纳入，包括包集合的描述文本与 hook metadata。
+/// 打印 system prompt 的指纹，用于判断 prefix cache 为什么没命中。
+///
+/// provider 的 prefix cache 以「字节级前缀相同」为前提。system turn 位于整条
+/// 消息序列最前面，它一旦变化，后面历史再稳定也全部作废。这里把长度、哈希、
+/// 包数量、缓存命中状态一起打进日志，连续两轮对比就能区分：
+///   - hash 相同 → system prompt 稳定，命中率低应归因于历史裁剪或 provider 侧
+///   - hash 不同 → 就是这里在变，再往下查是哪一段
+#[allow(non_snake_case)]
+fn logSystemPromptFingerprint(
+    prompt: &str,
+    cacheKey: u64,
+    packageCounts: (usize, usize, usize),
+    cacheHit: bool,
+) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    prompt.hash(&mut hasher);
+    let promptHash = hasher.finish();
+    AppLogger::i(
+        "SystemPromptCache",
+        &format!(
+            "len={} hash={:016x} inputKey={:016x} hit={} packages={}/{}/{}",
+            prompt.len(),
+            promptHash,
+            cacheKey,
+            cacheHit,
+            packageCounts.0,
+            packageCounts.1,
+            packageCounts.2,
+        ),
+    );
+}
+
 #[allow(non_snake_case)]
 fn computeSystemPromptCacheKey(
     request: &PrepareConversationHistoryRequest,
@@ -696,6 +730,13 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                     description: package.description,
                 })
                 .collect::<Vec<_>>();
+            // 在下面把这些集合 move 进 SystemPromptWithCustomOptions 之前先记下规模，
+            // 否则借用检查会拦住日志函数对它们的引用。
+            let packageCounts = (
+                enabled_packages.len(),
+                mcp_servers.len(),
+                skill_packages.len(),
+            );
             let host_environment_debug = format!("{:?}", host_environment);
             let cache_key = computeSystemPromptCacheKey(
                 request,
@@ -712,6 +753,12 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
             if let Ok(guard) = cache.lock() {
                 if let Some(cached) = guard.as_ref() {
                     if cached.key == cache_key {
+                        logSystemPromptFingerprint(
+                            &cached.prompt,
+                            cache_key,
+                            packageCounts,
+                            true,
+                        );
                         return Ok(cached.prompt.clone());
                     }
                 }
@@ -751,6 +798,7 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                 custom_intro_prompt: request.intro_prompt.clone(),
             })
             .await?;
+            logSystemPromptFingerprint(&composed, cache_key, packageCounts, false);
             if let Ok(mut guard) = cache.lock() {
                 *guard = Some(CachedSystemPrompt {
                     key: cache_key,
