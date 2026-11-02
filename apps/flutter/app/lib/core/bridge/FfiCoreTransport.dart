@@ -464,12 +464,21 @@ void _appendFfiBytes(List<dynamic> values, BytesBuilder builder) {
   // 实测表现是整个 isolate 连续报 `Stack Overflow`，连外观设置都加载不出来
   // （AppStartup / AIChatScreen / FlutterFramework 一起失败）。
   // 显式栈 + 元素总量上限，让这类输入退化为可报告的异常而不是崩溃。
-  final pending = <Object?>[...values.reversed];
-  var budget = 8 * 1024 * 1024;
-  while (pending.isNotEmpty) {
-    final value = pending.removeLast();
-    if (budget-- <= 0) {
-      throw StateError('Core FFI binary slot is too large or self-referencing');
+  // 用显式栈代替递归，并且**只限制嵌套深度**来防自引用。
+  //
+  // 之前用「元素总数预算」是错的：外观资源本身就是几 MB 的字节数组，
+  // 按元素计数会把完全正常的 payload 误判成 self-referencing
+  // （实测表现就是「无法加载外观设置 / Core FFI binary slot is too large」）。
+  // 自引用的特征只有一个 —— 嵌套无限加深，所以判据应该是深度。
+  final stackValues = <Object?>[...values.reversed];
+  final stackDepths = List<int>.filled(stackValues.length, 0);
+  while (stackValues.isNotEmpty) {
+    final value = stackValues.removeLast();
+    final depth = stackDepths.removeLast();
+    if (depth > 512) {
+      throw StateError(
+        'Core FFI binary slot nesting exceeds 512 levels (likely self-referencing)',
+      );
     }
     if (value is int) {
       builder.addByte(value & 0xFF);
@@ -478,7 +487,8 @@ void _appendFfiBytes(List<dynamic> values, BytesBuilder builder) {
     } else if (value is List) {
       // 逆序压栈以保持原始顺序。
       for (var i = value.length - 1; i >= 0; i--) {
-        pending.add(value[i]);
+        stackValues.add(value[i]);
+        stackDepths.add(depth + 1);
       }
     } else {
       throw StateError(
