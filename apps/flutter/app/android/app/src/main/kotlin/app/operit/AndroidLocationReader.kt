@@ -102,7 +102,19 @@ class AndroidLocationReader(private val activity: MainActivity) {
                 }
             }
             check(completed.await(timeout.toLong(), TimeUnit.SECONDS)) {
-                "Current location request timed out after ${timeout}s (providers=${providers.joinToString()})"
+                // 把「授权状态」和「环境是否可用」分开写清楚，否则调用方无法判断该改设置还是该换个地方再试。
+                val fine = ContextCompat.checkSelfPermission(
+                    activity, Manifest.permission.ACCESS_FINE_LOCATION,
+                ) == PackageManager.PERMISSION_GRANTED
+                val coarse = ContextCompat.checkSelfPermission(
+                    activity, Manifest.permission.ACCESS_COARSE_LOCATION,
+                ) == PackageManager.PERMISSION_GRANTED
+                "Current location request timed out after ${timeout}s " +
+                    "(providers=${providers.joinToString()}, fineLocationGranted=$fine, " +
+                    "coarseLocationGranted=$coarse). " +
+                    "Location permission is granted but no provider produced a fix within the timeout - " +
+                    "this usually means indoor GPS is unavailable and the network provider cannot reach " +
+                    "its backend. Retry outdoors, or raise timeout."
             }
             val location = fix ?: error("The location provider did not return a current position")
             val address = if (includeAddress) {
