@@ -108,6 +108,45 @@ impl ConversationService {
         system_prompt_composer: &dyn SystemPromptComposer,
         use_english: bool,
     ) -> Result<Vec<PromptTurn>, String> {
+        // 入口历史指纹：记录「进来时」的历史，与出口的 HistoryFingerprint 配对。
+        //
+        // 只打印出口结果无法区分两种病因：
+        //   - 入口就变了（消息列表层：hidden 标记、删除、合并）
+        //   - 入口没变、是 prepare 阶段改的（hook、part 序列化）
+        // 两者修法完全不同，所以这里必须把入口也钉住。
+        //
+        // 带 hash 而不只是条数：条数不变但内容变了（例如某条消息的 part
+        // 合并顺序不同）时，条数看不出来，hash 能。
+        {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            for turn in request.chat_history.iter() {
+                format!("{:?}", turn.kind).hash(&mut hasher);
+                turn.tool_name.hash(&mut hasher);
+                turn.content.hash(&mut hasher);
+            }
+            let firstLen = request
+                .chat_history
+                .first()
+                .map(|turn| turn.content.chars().count())
+                .unwrap_or(0);
+            let lastLen = request
+                .chat_history
+                .last()
+                .map(|turn| turn.content.chars().count())
+                .unwrap_or(0);
+            operit_util::AppLogger::AppLogger::i(
+                "HistoryIntake",
+                &format!(
+                    "count={} hash={:016x} firstLen={} lastLen={}",
+                    request.chat_history.len(),
+                    hasher.finish(),
+                    firstLen,
+                    lastLen,
+                ),
+            );
+        }
         let before_context = history_hooks
             .dispatch_prompt_history_hooks(HistoryHookContext {
                 stage: "before_prepare_history".to_string(),
