@@ -1,0 +1,23 @@
+--- selectable_region.dart	2026-10-07 13:40:12.000000000 +0800
++++ selectable_region.dart	2026-11-03 05:18:20.957324200 +0800
+@@ -2562,9 +2562,17 @@
+   }
+ 
+   static Rect _getBoundingBox(Selectable selectable) {
+-    Rect result = selectable.boundingBoxes.first;
+-    for (var index = 1; index < selectable.boundingBoxes.length; index += 1) {
+-      result = result.expandToInclude(selectable.boundingBoxes[index]);
++    final List<Rect> boxes = selectable.boundingBoxes;
++    // 刚加入、还没 layout 的 Selectable 会给出空列表（见
++    // _SelectionContainerState.boundingBoxes）。此时不能读 .first，
++    // 用 Rect.zero 占位：排序暂时把它放在最前，等它完成 layout 后
++    // 会由后续的 layoutDidChange 重新触发排序，结果自然恢复正确。
++    if (boxes.isEmpty) {
++      return Rect.zero;
++    }
++    Rect result = boxes.first;
++    for (var index = 1; index < boxes.length; index += 1) {
++      result = result.expandToInclude(boxes[index]);
+     }
+     return result;
+   }

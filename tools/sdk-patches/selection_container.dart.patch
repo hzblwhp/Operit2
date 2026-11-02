@@ -1,0 +1,29 @@
+--- selection_container.dart	2026-10-07 13:40:12.000000000 +0800
++++ selection_container.dart	2026-11-03 05:18:20.956324000 +0800
+@@ -215,7 +215,25 @@
+   Size get size => (context.findRenderObject()! as RenderBox).size;
+ 
+   @override
+-  List<Rect> get boundingBoxes => <Rect>[(context.findRenderObject()! as RenderBox).paintBounds];
++  List<Rect> get boundingBoxes {
++    // 未完成 layout 时不能读 paintBounds —— 它内部会取 size，而
++    // RenderBox.size 在 hasSize 为假时直接抛
++    // `Bad state: RenderBox was not laid out`。
++    //
++    // 这个 getter 会被 MultiSelectableSelectionContainerDelegate._flushAdditions
++    // 在 postFrame/microtask 里调用，而那一刻刚插入的 Selectable（例如流式
++    // Markdown 新增的段落）可能还没经过 layout，于是整条选择链抛错、
++    // 以 `Unhandled error source: Zone` 的形式弹到用户面前。
++    // 返回空列表把「尚未就绪」如实表达出去，由调用方跳过它。
++    final RenderObject? renderObject = context.findRenderObject();
++    if (renderObject is! RenderBox ||
++        !renderObject.attached ||
++        !renderObject.hasSize ||
++        renderObject.debugNeedsLayout) {
++      return const <Rect>[];
++    }
++    return <Rect>[renderObject.paintBounds];
++  }
+ 
+   @override
+   void dispose() {
