@@ -960,9 +960,17 @@ impl RuntimePackageManager {
             }
         }
 
-        // 子包默认 disabled，这里自动启用后再继续，避免「必须先去 UI 手动开」的隐性前提。
-        if self.isToolPkgSubpackage(&normalizedPackageName)
-            && !self.isPackageEnabled(&normalizedPackageName)
+        // 未启用的包自动启用，避免「必须先去 UI 手动开」的隐性前提。
+        //
+        // 原来只处理子包。但内置 .js 插件（ai_chat / crossref / time …）的 METADATA 里
+        // 没有 enabledByDefault 字段，解析后 enabled_by_default = false，而它们又没有被
+        // 用户启用过，于是 `enabledPackageNames` 里查不到 —— use_package 直接报
+        // `Package not found`，看起来像「包不存在」，实际是「包存在但没启用」。
+        // 实测 ai_chat 就是这么一直不可用的。
+        //
+        // 现在只要它确实存在于 availablePackages，就静默启用后继续激活。
+        if !self.isPackageEnabled(&normalizedPackageName)
+            && self.availablePackages().contains_key(&normalizedPackageName)
         {
             self.ensurePackageEnabledSilently(&normalizedPackageName);
         }
