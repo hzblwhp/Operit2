@@ -884,7 +884,7 @@ impl RuntimePackageManager {
     /// Activates a package and returns its system prompt contribution.
     #[operit_route_macros::operit_plugin_sdk_expose]
     pub fn usePackage(&mut self, packageName: &str) -> String {
-        let normalizedPackageName = self.normalizePackageName(packageName);
+        let normalizedPackageName = self.resolveToolPkgContainerAlias(&self.normalizePackageName(packageName));
 
         // 激活一个 toolpkg 容器时，自动落到它可激活的子包上，而不是直接拒绝。
         //
@@ -975,7 +975,8 @@ impl RuntimePackageManager {
             };
         }
 
-        let normalizedPackageName = self.normalizePackageName(packageName);
+        let normalizedPackageName =
+            self.resolveToolPkgContainerAlias(&self.normalizePackageName(packageName));
         // 与 usePackage 保持一致的宽容度：容器名自动落子包、子包自动启用。
         let activationTarget = if self.isToolPkgContainer(&normalizedPackageName) {
             let _ = self.enablePackage(&normalizedPackageName);
@@ -4871,6 +4872,37 @@ impl RuntimePackageManager {
     #[allow(non_snake_case)]
     pub(crate) fn normalizePackageName(&self, packageName: &str) -> String {
         packageName.trim().to_string()
+    }
+
+    /// Resolves a bare toolpkg container name to its fully qualified id.
+    ///
+    /// 各内置包的注册记录 `members` 并不一致：`workflow` 同时登记了
+    /// `com.operit.workflow` 和 `workflow` 两个名字，而 `thinking_guidance`、
+    /// `character_cards` 只登记了全名。于是 `use_package("character_cards")`
+    /// 查无此包，而 `use_package("workflow")` 却能手到擒来 —— 对调用方是纯粹的
+    /// 命名噪音。这里统一做一层回退：bare 名能找到唯一的同名容器时就用它。
+    #[allow(non_snake_case)]
+    pub(crate) fn resolveToolPkgContainerAlias(&self, packageName: &str) -> String {
+        if packageName.trim().is_empty() {
+            return packageName.to_string();
+        }
+        let containers = self.toolPkgContainersInternal();
+        if containers.contains_key(packageName) {
+            return packageName.to_string();
+        }
+        let matches = containers
+            .iter()
+            .filter(|(fullName, container)| {
+                fullName.rsplit('.').next() == Some(packageName)
+                    || container.packageName == packageName
+            })
+            .map(|(fullName, _)| fullName.clone())
+            .collect::<Vec<_>>();
+        // 只在唯一命中时回退，避免歧义时乱猜。
+        if matches.len() == 1 {
+            return matches[0].clone();
+        }
+        packageName.to_string()
     }
 
     #[allow(non_snake_case)]
