@@ -540,7 +540,20 @@ const superAdmin = (function () {
             const marker = `__OPERIT_TERMINAL_WAIT_DONE_${Date.now()}_${Math.floor(Math.random() * 1000000)}__`;
             const waitCommand = `printf '${marker}\\n'`;
             const startedAt = Date.now();
-            const result = await Tools.System.terminal.exec(sessionId, waitCommand, timeout);
+            // terminal.exec 的 timeout 只覆盖「命令执行」，不覆盖「排队等终端空闲」。
+            // 当前台有长任务（例如后台 git clone）时，exec 会一直挂着不返回 ——
+            // 实测调用方传 timeoutMs=60000，实际挂了 10 分钟仍未回来，整轮对话就此卡死。
+            // 这里加一道硬超时兜底，保证 terminal_wait 一定在 timeout+2s 内返回。
+            const hardTimeout = timeout + 2000;
+            const execPromise = Tools.System.terminal.exec(sessionId, waitCommand, timeout);
+            const hardStopPromise = new Promise<{ timedOut: boolean; output: string; exitCode: number }>(
+                function(resolve) {
+                    setTimeout(function() {
+                        resolve({ timedOut: true, output: "", exitCode: -1 });
+                    }, hardTimeout);
+                },
+            );
+            const result = await Promise.race([execPromise, hardStopPromise]);
             const elapsedMs = Date.now() - startedAt;
             const timedOut = result?.timedOut === true;
             const outputStr = typeof result?.output === "string"
