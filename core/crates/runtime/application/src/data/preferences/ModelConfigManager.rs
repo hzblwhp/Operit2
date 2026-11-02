@@ -1571,7 +1571,7 @@ mod tests {
         let mut model = manager.getModelProfile("LOCAL_MODEL", &model_id).unwrap();
         assert!(!model.localRuntime.inferenceBindingKey.is_empty());
         model.localRuntime.llamaThreadCount = 7;
-        model.localRuntime.llamaContextSize = 4096;
+        model.localRuntime.llamaContextSize = 40960;
         manager
             .updateModelProfile("LOCAL_MODEL", model.clone())
             .unwrap();
@@ -1629,7 +1629,7 @@ mod tests {
         let mut remote = local.clone();
         remote.localRuntime.inferenceBindingKey = "remote-same-model".into();
         remote.localRuntime.llamaThreadCount = 7;
-        remote.localRuntime.llamaContextSize = 4096;
+        remote.localRuntime.llamaContextSize = 40960;
         manager
             .updateModelProfile("LOCAL_MODEL", remote.clone())
             .unwrap();

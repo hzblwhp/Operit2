@@ -49,7 +49,7 @@ json llama_generate(const std::string &path, const json &messages, const json &b
     auto *model = llama_model_cache.get();
     const auto *vocab = llama_model_get_vocab(model);
     auto parameters = llama_context_default_params();
-    parameters.n_ctx = settings.value("llamaContextSize", 2048);
+    parameters.n_ctx = settings.value("llamaContextSize", 40960);
     parameters.n_batch = settings.value("llamaBatchSize", 512);
     parameters.n_ubatch = settings.value("llamaUBatchSize", 512);
     parameters.n_threads = settings.value("llamaThreadCount", 4);
@@ -78,7 +78,7 @@ json llama_generate(const std::string &path, const json &messages, const json &b
     std::vector<llama_token> tokens(-count);
     count = llama_tokenize(vocab, prompt.data(), length, tokens.data(), tokens.size(), true, true);
     if (count <= 0) throw std::runtime_error("Chat prompt is empty");
-    const int maximum = body.value("max_tokens", 512);
+    const int maximum = body.value("max_tokens", 32768);
     if (static_cast<uint32_t>(count) >= llama_n_ctx(context.get())) throw std::runtime_error("Prompt exceeds the configured local context size");
     int generated = 0;
     for (int offset = 0; offset < count;) {
@@ -213,7 +213,7 @@ std::string prepare_mnn_config(const std::string &path) {
 
 json mnn_generate(const std::string &path, const json &messages, const json &body, const json &settings) {
     json generation = {{"sampler_type", body.value("temperature", 0.7) <= 0 ? "greedy" : "mixed"},
-        {"max_new_tokens", body.value("max_tokens", 512)}, {"temperature", body.value("temperature", 0.7)},
+        {"max_new_tokens", body.value("max_tokens", 32768)}, {"temperature", body.value("temperature", 0.7)},
         {"top_p", body.value("top_p", 0.9)}, {"top_k", body.value("top_k", 40)},
         {"jinja", {{"context", {{"enable_thinking", body.value("enable_thinking", false)}}}}}};
     if (!mnn_cache) {
@@ -230,11 +230,11 @@ json mnn_generate(const std::string &path, const json &messages, const json &bod
     for (const auto &message : messages) chat.emplace_back(message.at("role").get<std::string>(), text_content(message));
     const auto prompt = mnn_cache->apply_chat_template(chat);
     const auto tokens = mnn_cache->tokenizer_encode(prompt);
-    const int limit = settings.value("llamaContextSize", 2048);
+    const int limit = settings.value("llamaContextSize", 40960);
     if (tokens.empty() || tokens.size() >= static_cast<size_t>(limit))
         throw std::runtime_error("Prompt exceeds the configured local context size or is empty");
     std::ostringstream sink;
-    mnn_cache->response(tokens, &sink, "", std::min(body.value("max_tokens", 512), limit - static_cast<int>(tokens.size())));
+    mnn_cache->response(tokens, &sink, "", std::min(body.value("max_tokens", 32768), limit - static_cast<int>(tokens.size())));
     const auto *context = mnn_cache->getContext();
     if (context->status == MNN::Transformer::LlmStatus::INTERNAL_ERROR || context->status == MNN::Transformer::LlmStatus::NOT_LOADED || context->status == MNN::Transformer::LlmStatus::TIMEOUT)
         throw std::runtime_error("MNN generation failed");

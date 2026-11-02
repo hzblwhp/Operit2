@@ -18,7 +18,7 @@ pub struct ParameterDefinition {
 pub struct StandardModelParameters;
 
 impl StandardModelParameters {
-    pub const DEFAULT_MAX_TOKENS: i32 = 4096;
+    pub const DEFAULT_MAX_TOKENS: i32 = 32768;
     pub const DEFAULT_TEMPERATURE: f32 = 1.0;
     pub const DEFAULT_TOP_P: f32 = 1.0;
     pub const DEFAULT_TOP_K: i32 = 0;

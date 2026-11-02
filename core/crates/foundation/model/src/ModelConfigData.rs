@@ -404,7 +404,7 @@ impl Default for LocalModelRuntimeSettings {
             mnnForwardType: 0,
             mnnThreadCount: 4,
             llamaThreadCount: 4,
-            llamaContextSize: 2048,
+            llamaContextSize: 40960,
             llamaBatchSize: 512,
             llamaUBatchSize: 512,
             llamaGpuLayers: 0,
