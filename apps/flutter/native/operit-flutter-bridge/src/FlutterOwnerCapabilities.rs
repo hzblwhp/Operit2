@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use operit_host_api::{
-    AppListData, AppOperationData, AppUsageTimeResultData, AudioPlaybackHost, AudioPlaybackStatus,
+    AppListData, AppOperationData, AppUsageTimeEntry, AppUsageTimeResultData, AudioPlaybackHost,
+    AudioPlaybackStatus,
     DeviceInfoData, HostError, HostResult, LocalInferenceHost, LocalSttInferenceHostRequest,
     LocalSttInferenceHostResponse, LocalTtsInferenceHostRequest, LocalTtsInferenceHostResponse,
     LocationData, MusicPlaybackRequest, MusicPlaybackStatus, NotificationData, OCRLanguage,
@@ -127,6 +128,122 @@ pub(crate) fn ownerListInstalledApps(includeSystemApps: bool) -> HostResult<AppL
     Ok(AppListData {
         includesSystemApps: includeSystemApps,
         packages: response.packages,
+    })
+}
+
+/// Owner-side shape of one app operation receipt.
+#[derive(serde::Deserialize)]
+struct OwnerAppOperation {
+    #[serde(default)]
+    packageName: String,
+    #[serde(default)]
+    success: bool,
+    #[serde(default)]
+    details: String,
+}
+
+/// Starts an app through the owner's PackageManager/ActivityManager bridge.
+pub(crate) fn ownerStartApp(packageName: &str) -> HostResult<AppOperationData> {
+    let response: OwnerAppOperation = ownerSystemOperation(
+        "start_app",
+        serde_json::json!({ "packageName": packageName }),
+    )?;
+    Ok(AppOperationData {
+        operationType: "start_app".to_string(),
+        packageName: if response.packageName.is_empty() {
+            packageName.to_string()
+        } else {
+            response.packageName
+        },
+        success: response.success,
+        details: response.details,
+    })
+}
+
+/// Stops an app through the owner's ActivityManager bridge.
+pub(crate) fn ownerStopApp(packageName: &str) -> HostResult<AppOperationData> {
+    let response: OwnerAppOperation = ownerSystemOperation(
+        "stop_app",
+        serde_json::json!({ "packageName": packageName }),
+    )?;
+    Ok(AppOperationData {
+        operationType: "stop_app".to_string(),
+        packageName: if response.packageName.is_empty() {
+            packageName.to_string()
+        } else {
+            response.packageName
+        },
+        success: response.success,
+        details: response.details,
+    })
+}
+
+/// Owner-side shape of one usage entry.
+#[derive(serde::Deserialize)]
+struct OwnerUsageEntry {
+    #[serde(default)]
+    packageName: String,
+    #[serde(default)]
+    appName: String,
+    #[serde(default)]
+    totalForegroundTimeMs: i64,
+    #[serde(default)]
+    lastTimeUsed: i64,
+    #[serde(default)]
+    isSystemApp: bool,
+}
+
+/// Owner-side shape of one usage report.
+#[derive(serde::Deserialize)]
+struct OwnerUsageReport {
+    #[serde(default)]
+    startTime: i64,
+    #[serde(default)]
+    endTime: i64,
+    #[serde(default)]
+    requestedPackageName: Option<String>,
+    #[serde(default)]
+    entries: Vec<OwnerUsageEntry>,
+}
+
+/// Reads per-app foreground usage through the owner's UsageStatsManager bridge.
+pub(crate) fn ownerAppUsageTime(
+    packageName: &str,
+    sinceHours: i32,
+    limit: i32,
+    includeSystemApps: bool,
+) -> HostResult<AppUsageTimeResultData> {
+    let response: OwnerUsageReport = ownerSystemOperation(
+        "get_app_usage_time",
+        serde_json::json!({
+            "packageName": packageName,
+            "sinceHours": sinceHours,
+            "limit": limit,
+            "includeSystemApps": includeSystemApps,
+        }),
+    )?;
+    let entries = response
+        .entries
+        .into_iter()
+        .map(|entry| AppUsageTimeEntry {
+            packageName: entry.packageName,
+            appName: entry.appName,
+            totalForegroundTimeMs: entry.totalForegroundTimeMs,
+            lastTimeUsed: entry.lastTimeUsed,
+            isSystemApp: entry.isSystemApp,
+        })
+        .collect::<Vec<_>>();
+    Ok(AppUsageTimeResultData {
+        startTime: response.startTime,
+        endTime: response.endTime,
+        sinceHours,
+        requestedPackageName: response
+            .requestedPackageName
+            .filter(|value| !value.is_empty())
+            .or_else(|| Some(packageName.to_string()).filter(|value| !value.is_empty())),
+        includesSystemApps: includeSystemApps,
+        totalEntries: entries.len() as i32,
+        entries,
     })
 }
 
@@ -260,6 +377,12 @@ pub(crate) struct FlutterSystemBindings {
     pub recognition: Arc<dyn Fn(&str, OCRLanguage, OCRQuality) -> HostResult<String> + Send + Sync>,
     /// Lists installed apps through the owner PackageManager bridge.
     pub apps: Arc<dyn Fn(bool) -> HostResult<AppListData> + Send + Sync>,
+    /// Starts an app through the owner PackageManager/ActivityManager bridge.
+    pub appStarter: Arc<dyn Fn(&str) -> HostResult<AppOperationData> + Send + Sync>,
+    /// Stops an app through the owner ActivityManager bridge.
+    pub appStopper: Arc<dyn Fn(&str) -> HostResult<AppOperationData> + Send + Sync>,
+    /// Reads per-app foreground usage through the owner UsageStatsManager bridge.
+    pub usageStats: Arc<dyn Fn(&str, i32, i32, bool) -> HostResult<AppUsageTimeResultData> + Send + Sync>,
 }
 
 /// Adds owner authorization and UI operations to an already selected system host.
@@ -309,19 +432,19 @@ impl SystemOperationHost for FlutterSystemOperationBridge {
     fn listInstalledApps(&self, includeSystem: bool) -> HostResult<AppListData> {
         (self.bindings.apps)(includeSystem)
     }
-    /// Starts an app through the selected system host.
+    /// Starts an app through the owner bridge.
     fn startApp(&self, name: &str) -> HostResult<AppOperationData> {
-        self.host.startApp(name)
+        (self.bindings.appStarter)(name)
     }
-    /// Stops an app through the selected system host.
+    /// Stops an app through the owner bridge.
     fn stopApp(&self, name: &str) -> HostResult<AppOperationData> {
-        self.host.stopApp(name)
+        (self.bindings.appStopper)(name)
     }
     /// Reads notifications through the callback selected at host assembly.
     fn getNotifications(&self, limit: i32, includeOngoing: bool) -> HostResult<NotificationData> {
         (self.bindings.notifications)(limit, includeOngoing)
     }
-    /// Reads app usage through the selected system host.
+    /// Reads app usage through the owner UsageStatsManager bridge.
     fn getAppUsageTime(
         &self,
         name: &str,
@@ -329,7 +452,7 @@ impl SystemOperationHost for FlutterSystemOperationBridge {
         limit: i32,
         includeSystem: bool,
     ) -> HostResult<AppUsageTimeResultData> {
-        self.host.getAppUsageTime(name, hours, limit, includeSystem)
+        (self.bindings.usageStats)(name, hours, limit, includeSystem)
     }
     /// Reads current location through the owner's authorization UI.
     fn getDeviceLocation(

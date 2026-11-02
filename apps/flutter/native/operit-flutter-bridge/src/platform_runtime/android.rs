@@ -13,9 +13,9 @@ use operit_link::LinkDeviceInfo;
 use super::{install_owner_media, BridgeStartup, StartupMetadata};
 use crate::FlutterHostAdapters::FlutterWebVisitBridge;
 use crate::FlutterOwnerCapabilities::{
-    ownerBluetooth, ownerDeviceInfo, ownerGetSystemSetting, ownerListInstalledApps, ownerLocation,
-    ownerModifySystemSetting, ownerNotifications, ownerRecognizeText, ownerScreenshot,
-    ownerSendNotification,
+    ownerAppUsageTime, ownerBluetooth, ownerDeviceInfo, ownerGetSystemSetting,
+    ownerListInstalledApps, ownerLocation, ownerModifySystemSetting, ownerNotifications,
+    ownerRecognizeText, ownerScreenshot, ownerSendNotification, ownerStartApp, ownerStopApp,
     FlutterSystemBindings, FlutterSystemOperationBridge, FlutterTtsSynthesisHost,
 };
 
@@ -45,6 +45,9 @@ pub(crate) fn create_host_context(startup: &BridgeStartup) -> Result<HostManager
             screenshot: Arc::new(ownerScreenshot),
             recognition: Arc::new(ownerRecognizeText),
             apps: Arc::new(ownerListInstalledApps),
+            appStarter: Arc::new(ownerStartApp),
+            appStopper: Arc::new(ownerStopApp),
+            usageStats: Arc::new(ownerAppUsageTime),
         },
     )));
     Ok(install_owner_media(context, true)

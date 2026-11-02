@@ -19,6 +19,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.app.ActivityManager
+import android.app.AppOpsManager
+import android.app.usage.UsageStatsManager
 import android.content.pm.PackageManager
 import android.content.pm.ApplicationInfo
 import android.media.MediaPlayer
@@ -281,6 +284,9 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
                             "resultJson" to AndroidHostDeviceInfo.read(activity.applicationContext),
                         )
                         "list_installed_apps" -> systemListInstalledApps(JSONObject(paramsJson))
+                        "start_app" -> systemStartApp(JSONObject(paramsJson))
+                        "stop_app" -> systemStopApp(JSONObject(paramsJson))
+                        "get_app_usage_time" -> systemGetAppUsageTime(JSONObject(paramsJson))
                         "get_system_setting" -> systemGetSystemSetting(JSONObject(paramsJson))
                         "modify_system_setting" -> systemModifySystemSetting(JSONObject(paramsJson))
                         "execute_privileged_command" -> systemExecutePrivilegedCommand(JSONObject(paramsJson))
@@ -316,6 +322,127 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
         }
         return mapOf("resultJson" to payload.toString())
     }
+
+    /** Launches an app through the owner PackageManager, no privileged access needed. */
+    private fun systemStartApp(params: JSONObject): Map<String, String> {
+        val packageName = params.optString("packageName", "")
+        require(packageName.isNotBlank()) { "start_app requires packageName" }
+        val intent = activity.packageManager.getLaunchIntentForPackage(packageName)
+        val payload = JSONObject().apply {
+            put("packageName", packageName)
+            if (intent == null) {
+                put("success", false)
+                put("details", "No launchable activity for package: $packageName")
+            } else {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(intent)
+                put("success", true)
+                put("details", "Launched $packageName")
+            }
+        }
+        return mapOf("resultJson" to payload.toString())
+    }
+
+    /**
+     * Stops an app through ActivityManager.
+     *
+     * killBackgroundProcesses works for ordinary background apps without root; the platform
+     * may ignore it for foreground apps, so the receipt reports what was actually requested
+     * instead of claiming an unconditional success.
+     */
+    private fun systemStopApp(params: JSONObject): Map<String, String> {
+        val packageName = params.optString("packageName", "")
+        require(packageName.isNotBlank()) { "stop_app requires packageName" }
+        val manager = activity.getSystemService(ActivityManager::class.java)
+        manager?.killBackgroundProcesses(packageName)
+        val payload = JSONObject().apply {
+            put("packageName", packageName)
+            put("success", manager != null)
+            put("details", if (manager == null) "ActivityManager unavailable" else "Requested stop for $packageName")
+        }
+        return mapOf("resultJson" to payload.toString())
+    }
+
+    /**
+     * Reports per-app foreground usage from UsageStatsManager.
+     *
+     * Reading usage stats needs the user-granted PACKAGE_USAGE_STATS special permission.
+     * When absent we return an empty report plus the reason instead of throwing, so the
+     * caller can tell "no permission" apart from "tool broken".
+     */
+    private fun systemGetAppUsageTime(params: JSONObject): Map<String, String> {
+        val packageName = params.optString("packageName", "")
+        val sinceHours = params.optInt("sinceHours", 24).coerceAtLeast(1)
+        val limit = params.optInt("limit", 20).coerceAtLeast(1)
+        val includeSystemApps = params.optBoolean("includeSystemApps", false)
+        val now = System.currentTimeMillis()
+        val start = now - sinceHours.toLong() * 60L * 60L * 1000L
+        val usageManager = activity.getSystemService(UsageStatsManager::class.java)
+        val entries = JSONArray()
+        var reason = ""
+        if (usageManager == null) {
+            reason = "UsageStatsManager unavailable"
+        } else if (!hasUsageStatsAccess()) {
+            reason = "Usage access not granted; enable Settings > Special app access > Usage access for this app"
+        } else {
+            val stats = usageManager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, start, now).orEmpty()
+                .filter { it.totalTimeInForeground > 0L }
+                .filter { packageName.isBlank() || it.packageName == packageName }
+                .filter { includeSystemApps || !isSystemPackage(it.packageName) }
+                .sortedByDescending { it.totalTimeInForeground }
+                .take(limit)
+            for (stat in stats) {
+                entries.put(JSONObject().apply {
+                    put("packageName", stat.packageName)
+                    put("appName", appLabelOf(stat.packageName))
+                    put("totalForegroundTimeMs", stat.totalTimeInForeground)
+                    put("lastTimeUsed", stat.lastTimeUsed)
+                    put("isSystemApp", isSystemPackage(stat.packageName))
+                })
+            }
+        }
+        val payload = JSONObject().apply {
+            put("startTime", start)
+            put("endTime", now)
+            put("requestedPackageName", packageName)
+            put("entries", entries)
+            if (reason.isNotEmpty()) put("details", reason)
+        }
+        return mapOf("resultJson" to payload.toString())
+    }
+
+    /** Checks whether the user granted usage-access to this app. */
+    private fun hasUsageStatsAccess(): Boolean {
+        val appOps = activity.getSystemService(AppOpsManager::class.java) ?: return false
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            appOps.unsafeCheckOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                activity.packageName,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            appOps.checkOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                activity.packageName,
+            )
+        }
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    /** Resolves a human-readable label for one package. */
+    private fun appLabelOf(packageName: String): String = runCatching {
+        val info = activity.packageManager.getApplicationInfo(packageName, 0)
+        activity.packageManager.getApplicationLabel(info).toString()
+    }.getOrDefault(packageName)
+
+    /** Reports whether a package belongs to the system image. */
+    private fun isSystemPackage(packageName: String): Boolean = runCatching {
+        val info = activity.packageManager.getApplicationInfo(packageName, 0)
+        (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+    }.getOrDefault(false)
+
 
 
     /** Reads one exact Android settings namespace and returns its stored value. */
