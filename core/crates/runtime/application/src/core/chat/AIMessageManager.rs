@@ -772,40 +772,68 @@ impl AIMessageManager {
         //
         // 单水位会造成「滑动窗口」—— 每轮新增一两条就把切点往前推一格，
         // 于是相邻两轮保留的区间起点不同，provider 的 prefix cache 从切点开始整段失效。
-        // 实测命中率在 84% 与 52% 之间来回跳，正是这种滑动的指纹。
-        // 改成高/低水位后，一次裁剪能撑很多轮，其间前缀保持 byte-identical。
-        // 字符→token 的换算必须按「中文 1 字符 ≈ 1 token」算，不能按英文的 3 字符/token。
-        // 之前用 3 倍，等于把预算放大三倍去装中文内容，实际长期贴着高水位震荡、
-        // 每轮都触发一次裁剪，于是相邻两轮的前缀起点都不同，命中率一直是 4%。
         let highChars = (maxTokens as i64).max(1) as usize;
         let lowChars = highChars.saturating_mul(3) / 5;
         let totalChars: usize = turns.iter().map(|turn| turn.content.chars().count()).sum();
-        let budgetChars = {
-            if totalChars <= highChars {
-                return turns;
-            }
-            lowChars
-        };
-        operit_util::AppLogger::AppLogger::i(
-            "HistoryBudget",
-            &format!(
-                "trimmed totalChars={} high={} low={} turns={}",
-                totalChars, highChars, lowChars, turns.len()
-            ),
-        );
-        // 从尾部往回累加，保留能装下的最近若干轮。
-        let mut kept: Vec<usize> = Vec::new();
+        if totalChars <= highChars {
+            return turns;
+        }
+
+        // **锚点必须无条件保留。**
+        //
+        // SYSTEM turn 承载 system prompt，是整条请求的第一个字节块；
+        // SUMMARY turn 是压缩后的历史起点。二者一旦被裁掉：
+        //   - 序列第一条会变成某条 ASSISTANT turn，而它的内容往往以
+        //     `<think>` 思考块开头 —— 思考块由模型每轮重新生成，内容不同，
+        //     于是前缀从第一个字节就变，缓存只剩 system prompt 那一点。
+        //   - 实测日志：`firstKind=ASSISTANT ... head=<think>**关键线索**`
+        //     命中率恒定卡在 6528（system prompt 的量）。
+        //
+        // 之前的实现用 `break` 跳出累加循环，更早的 turn 全部丢弃 ——
+        // 锚点在最前面，因此必被牺牲。现在改为：先单独挑出锚点，
+        // 再对非锚点做尾部累加，最后按原顺序重组。
+        let anchorIndexes: Vec<usize> = turns
+            .iter()
+            .enumerate()
+            .filter(|(_, turn)| {
+                matches!(turn.kind, PromptTurnKind::SYSTEM | PromptTurnKind::SUMMARY)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let anchorChars: usize = anchorIndexes
+            .iter()
+            .map(|index| turns[*index].content.chars().count())
+            .sum();
+        let budgetChars = lowChars.saturating_sub(anchorChars);
+
+        let mut kept: Vec<usize> = anchorIndexes.clone();
         let mut used = 0usize;
         for index in (0..turns.len()).rev() {
-            let isAnchor = matches!(turns[index].kind, PromptTurnKind::SUMMARY | PromptTurnKind::SYSTEM);
+            if anchorIndexes.contains(&index) {
+                continue;
+            }
             let size = turns[index].content.chars().count();
-            if !isAnchor && used + size > budgetChars {
+            if used + size > budgetChars {
                 break;
             }
             used += size;
             kept.push(index);
         }
-        kept.reverse();
+        kept.sort_unstable();
+
+        operit_util::AppLogger::AppLogger::i(
+            "HistoryBudget",
+            &format!(
+                "trimmed totalChars={} high={} low={} turns={} kept={} anchors={}",
+                totalChars,
+                highChars,
+                lowChars,
+                turns.len(),
+                kept.len(),
+                anchorIndexes.len(),
+            ),
+        );
+
         let mut keptIter = kept.into_iter().peekable();
         let mut index = 0usize;
         turns
