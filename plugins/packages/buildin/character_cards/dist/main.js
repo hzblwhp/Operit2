@@ -9877,7 +9877,7 @@ function registerDomainApis() {
 // src/memory-recall.ts
 var MEMORY_RECALL_MARKER = '<memory_context source="character-memory">';
 var MODEL_PARTICIPANT_ID = "model:chat";
-var RECALL_BUDGET_MS = 8e3;
+var RECALL_BUDGET_MS = 4e3;
 function collapse(value, maxLength) {
   const normalized = String(value ?? "").replace(/\s+/gu, " ").trim();
   if (normalized === "") return "-";
@@ -9945,25 +9945,29 @@ function onMemoryRecallPromptFinalize(event) {
     const query = searchQuery(processedInput);
     if (query === "") return null;
     try {
-      const settings2 = yield dispatch2({ action: "readMemoryRecallSettings" });
-      if (!settings2.enabled) return null;
-      const result2 = yield withBudget(
-        memoryRecallQuery(
-          participant.participantId,
-          query,
-          settings2.limit,
-          settings2.allowRepeated ? null : participant.chatId
-        ),
-        RECALL_BUDGET_MS,
-        "memory recall query"
-      );
-      const block = memoryBlock(result2);
-      if (block === null) return null;
-      return `${processedInput.replace(/\s+$/, "")}
+      return yield withBudget(
+        (function() {
+          return __async(this, null, function* () {
+            const settings2 = yield dispatch2({ action: "readMemoryRecallSettings" });
+            if (!settings2.enabled) return null;
+            const result2 = yield memoryRecallQuery(
+              participant.participantId,
+              query,
+              settings2.limit,
+              settings2.allowRepeated ? null : participant.chatId
+            );
+            const block = memoryBlock(result2);
+            if (block === null) return null;
+            return `${processedInput.replace(/\s+$/, "")}
 
 ${block}`;
+          });
+        })(),
+        RECALL_BUDGET_MS,
+        "memory recall injection"
+      );
     } catch (error) {
-      console.error("Memory recall injection failed: " + String(error));
+      console.error("Memory recall injection skipped (budget or failure): " + String(error));
       return null;
     }
   });

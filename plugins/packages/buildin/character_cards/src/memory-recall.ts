@@ -16,7 +16,7 @@ const MODEL_PARTICIPANT_ID = "model:chat";
  * 所以这里给它一个远小于主机超时的自预算：到点就放弃注入，
  * 让对话继续，而不是把整轮拖死。
  */
-const RECALL_BUDGET_MS = 8000;
+const RECALL_BUDGET_MS = 4000;
 
 /** Collapses structured whitespace so one memory stays one readable block. */
 function collapse(value: string, maxLength: number): string {
@@ -104,23 +104,33 @@ export async function onMemoryRecallPromptFinalize(event: ToolPkg.PromptFinalize
   const query = searchQuery(processedInput);
   if (query === "") return null;
   try {
-    const settings = await dispatch({ action: "readMemoryRecallSettings" });
-    if (!settings.enabled) return null;
-    const result = await withBudget(
-      memoryRecallQuery(
-        participant.participantId,
-        query,
-        settings.limit,
-        settings.allowRepeated ? null : participant.chatId,
-      ),
+    // 整个注入流程共用一个预算，而不是只包住检索那一步。
+    //
+    // 之前只给 memoryRecallQuery 套了预算，但读设置（dispatch）同样会阻塞 ——
+    // 只要它卡住，主机那 10 秒总预算照样被吃满，用户看到的还是
+    // 「前置插件响应超时，本次 Hook 已终止」。
+    //
+    // 预算取 4 秒：主机对整条 pre-hook 链只有 10 秒，且同一链上还有别的插件，
+    // 留足余量才能保证「到点自己退场」发生在主机掐断之前。
+    return await withBudget(
+      (async function (): Promise<string | null> {
+        const settings = await dispatch({ action: "readMemoryRecallSettings" });
+        if (!settings.enabled) return null;
+        const result = await memoryRecallQuery(
+          participant.participantId,
+          query,
+          settings.limit,
+          settings.allowRepeated ? null : participant.chatId,
+        );
+        const block = memoryBlock(result);
+        if (block === null) return null;
+        return `${processedInput.replace(/\s+$/, "")}\n\n${block}`;
+      })(),
       RECALL_BUDGET_MS,
-      "memory recall query",
+      "memory recall injection",
     );
-    const block = memoryBlock(result);
-    if (block === null) return null;
-    return `${processedInput.replace(/\s+$/, "")}\n\n${block}`;
   } catch (error) {
-    console.error("Memory recall injection failed: " + String(error));
+    console.error("Memory recall injection skipped (budget or failure): " + String(error));
     return null;
   }
 }
