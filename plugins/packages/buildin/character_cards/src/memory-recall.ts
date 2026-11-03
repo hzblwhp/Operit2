@@ -6,6 +6,18 @@ import { memoryRecallQuery } from "./public-api";
 const MEMORY_RECALL_MARKER = '<memory_context source="character-memory">';
 const MODEL_PARTICIPANT_ID = "model:chat";
 
+/** 记忆检索的自有时间预算（毫秒）。
+ *
+ * 记忆注入是「锦上添花」：命中时能补充背景，没命中对话照样能进行。
+ * 但它是挂在 before_send_to_model 上的同步步骤 —— 检索一旦变慢，
+ * 整轮请求会被主机的 pre-hook 超时兜底掐断，用户看到的是
+ * 「前置插件响应超时，本次 Hook 已终止」，随后一句话都发不出去。
+ *
+ * 所以这里给它一个远小于主机超时的自预算：到点就放弃注入，
+ * 让对话继续，而不是把整轮拖死。
+ */
+const RECALL_BUDGET_MS = 8000;
+
 /** Collapses structured whitespace so one memory stays one readable block. */
 function collapse(value: string, maxLength: number): string {
   const normalized = String(value ?? "").replace(/\s+/gu, " ").trim();
@@ -35,6 +47,32 @@ function executionParticipant(payload: ToolPkg.PromptFinalizeHookEvent["eventPay
   const participantId = String(context.participantId ?? "").trim();
   if (chatId === "" || participantId === "" || participantId === MODEL_PARTICIPANT_ID) return null;
   return { chatId, participantId };
+}
+
+/** 给一个异步操作套上时间预算，超时即抛，由调用方决定降级。 */
+function withBudget<T>(work: Promise<T>, budgetMs: number, label: string): Promise<T> {
+  return new Promise<T>(function (resolve, reject) {
+    let settled = false;
+    const timer = setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      reject(new Error(label + " exceeded " + budgetMs + "ms budget"));
+    }, budgetMs);
+    work.then(
+      function (value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      function (error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 /** Formats typed matches into the injected block; an empty result injects nothing. */
@@ -68,7 +106,16 @@ export async function onMemoryRecallPromptFinalize(event: ToolPkg.PromptFinalize
   try {
     const settings = await dispatch({ action: "readMemoryRecallSettings" });
     if (!settings.enabled) return null;
-    const result = await memoryRecallQuery(participant.participantId, query, settings.limit, settings.allowRepeated ? null : participant.chatId);
+    const result = await withBudget(
+      memoryRecallQuery(
+        participant.participantId,
+        query,
+        settings.limit,
+        settings.allowRepeated ? null : participant.chatId,
+      ),
+      RECALL_BUDGET_MS,
+      "memory recall query",
+    );
     const block = memoryBlock(result);
     if (block === null) return null;
     return `${processedInput.replace(/\s+$/, "")}\n\n${block}`;

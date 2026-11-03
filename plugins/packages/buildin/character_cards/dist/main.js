@@ -9877,6 +9877,7 @@ function registerDomainApis() {
 // src/memory-recall.ts
 var MEMORY_RECALL_MARKER = '<memory_context source="character-memory">';
 var MODEL_PARTICIPANT_ID = "model:chat";
+var RECALL_BUDGET_MS = 8e3;
 function collapse(value, maxLength) {
   const normalized = String(value ?? "").replace(/\s+/gu, " ").trim();
   if (normalized === "") return "-";
@@ -9892,6 +9893,30 @@ function executionParticipant(payload) {
   const participantId = String(context.participantId ?? "").trim();
   if (chatId === "" || participantId === "" || participantId === MODEL_PARTICIPANT_ID) return null;
   return { chatId, participantId };
+}
+function withBudget(work, budgetMs, label) {
+  return new Promise(function(resolve, reject) {
+    let settled = false;
+    const timer = setTimeout(function() {
+      if (settled) return;
+      settled = true;
+      reject(new Error(label + " exceeded " + budgetMs + "ms budget"));
+    }, budgetMs);
+    work.then(
+      function(value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      function(error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 function memoryBlock(result2) {
   if (result2.memories.length === 0) return null;
@@ -9922,7 +9947,16 @@ function onMemoryRecallPromptFinalize(event) {
     try {
       const settings2 = yield dispatch2({ action: "readMemoryRecallSettings" });
       if (!settings2.enabled) return null;
-      const result2 = yield memoryRecallQuery(participant.participantId, query, settings2.limit, settings2.allowRepeated ? null : participant.chatId);
+      const result2 = yield withBudget(
+        memoryRecallQuery(
+          participant.participantId,
+          query,
+          settings2.limit,
+          settings2.allowRepeated ? null : participant.chatId
+        ),
+        RECALL_BUDGET_MS,
+        "memory recall query"
+      );
       const block = memoryBlock(result2);
       if (block === null) return null;
       return `${processedInput.replace(/\s+$/, "")}
