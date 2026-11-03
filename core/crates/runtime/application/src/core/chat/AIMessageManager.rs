@@ -397,6 +397,55 @@ impl AIMessageManager {
             .unwrap_or(false);
         let enableStream = !disableStreamOutput;
 
+        // 诊断：打印本次发送历史的指纹，用于定位“同一会话相邻两轮前缀为何不同”。
+        // 只做只读观测，不改变任何发送内容。
+        {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            let mut shapes = String::new();
+            let mut total_chars = 0usize;
+            for turn in memoryForRequest.iter() {
+                let kind = match &turn.kind {
+                    PromptTurnKind::SYSTEM => 'S',
+                    PromptTurnKind::USER => 'U',
+                    PromptTurnKind::ASSISTANT => 'A',
+                    PromptTurnKind::TOOL_CALL => 'C',
+                    PromptTurnKind::TOOL_RESULT => 'R',
+                    PromptTurnKind::SUMMARY => 'M',
+                };
+                shapes.push(kind);
+                shapes.push_str(&turn.content.len().to_string());
+                shapes.push(',');
+                total_chars += turn.content.chars().count();
+                turn.content.hash(&mut hasher);
+            }
+            let heads = memoryForRequest
+                .iter()
+                .take(4)
+                .map(|turn| {
+                    turn.content
+                        .chars()
+                        .take(24)
+                        .collect::<String>()
+                        .replace('\n', " ")
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            ChainLogger::verbose_with_level(
+                SEND_CHAIN,
+                "send.history.fingerprint",
+                &[
+                    ("turns", memoryForRequest.len().to_string()),
+                    ("totalChars", total_chars.to_string()),
+                    ("hash", format!("{:x}", hasher.finish())),
+                    ("shapes", shapes.chars().take(400).collect::<String>()),
+                    ("heads", heads),
+                ],
+                operit_util::AppLogger::VERBOSE_LEVEL_2,
+            );
+        }
+
         let mut options = SendMessageOptions::new();
         options.cancellationToken = Some(cancellationToken);
         options.message = request.messageContent;
