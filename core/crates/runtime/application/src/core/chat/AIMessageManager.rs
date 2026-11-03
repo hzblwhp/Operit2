@@ -340,10 +340,9 @@ impl AIMessageManager {
 
         let memory = match request.promptHistoryOverride.clone() {
             Some(promptHistory) => promptHistory,
-            None => Self::getMemoryFromMessagesWithinBudget(
+            None => Self::getMemoryFromMessages(
                 request.chatHistory.clone(),
                 &request.chatConfiguration,
-                Some(Self::HISTORY_TOKEN_BUDGET),
             )?,
         };
 
@@ -609,10 +608,9 @@ impl AIMessageManager {
     pub async fn calculateStableContextWindow(
         request: StableContextWindowRequest<'_>,
     ) -> Result<i64, operit_providers::chat::llmprovider::AIService::AiServiceError> {
-        let memory = Self::getMemoryFromMessagesWithinBudget(
+        let memory = Self::getMemoryFromMessages(
             request.chatHistory,
             &request.runtime.chatConfiguration,
-            Some(Self::HISTORY_TOKEN_BUDGET),
         )?;
         request
             .enhancedAiService
@@ -661,15 +659,15 @@ impl AIMessageManager {
         // 每写一次摘要，起点就往前挪一次，provider 的 prefix cache 前缀
         // 随之整段作废。所以落盘必须足够稀疏 —— 用 90% 这个高位，
         // 让中间绝大多数轮次共享同一段前缀。
-        // 摘要水位必须衡量「未裁剪的历史总量」，而不是裁剪之后的残余。
+        // 摘要水位必须衡量真实历史总量，而不是任何残余值。
         //
-        // 裁剪和摘要是两道不同的闸门：
-        //   1. 摘要：历史超过 maxContextTokens 的 90% 时落盘，压缩起点前移；
-        //   2. 裁剪：历史超过 HISTORY_TOKEN_BUDGET 时从最老的 turn 开始丢。
-        // 如果摘要判断用的 currentTokens 取自「裁剪后的窗口」，那么只要
-        // 裁剪先发生，currentTokens 就永远低于水位，摘要一次都不会触发 ——
-        // 历史无限膨胀，每轮都全量投影 + 裁剪，旧对话永久丢失。
-        // 实测：totalChars=1,396,833（约 499K token）被裁到 336,000 字符
+        // 现在历史已不再做 token 预算裁剪，这里的总量就是最终发出去的量。
+        // 仍保留「从原始消息重算一遍」是有意的防御：将来若有人在别处重新引入
+        // 截断，水位也必须按真实体量判断，不能被残余值骗过。
+        //
+        // 历史教训：曾用裁剪后的 currentTokens 判水位，只要裁剪先发生，
+        // currentTokens 就永远低于水位，摘要一次都不会触发 —— 历史无限膨胀。
+        // 实测 totalChars=1,396,833（约 499K token）被裁到 336,000 字符
         // （约 113K token），水位 180K 永远达不到，turns 只涨不降。
         //
         // 因此这里直接从原始消息算一遍总量，与裁剪前的历史对齐。
@@ -718,16 +716,6 @@ impl AIMessageManager {
     /// 所以必须让它足够稀疏，把 90% 以下的所有轮次留给稳定命中。
     const SUMMARIZE_TOKEN_WATERMARK: f64 = 0.90;
 
-    /// 历史硬预算（tokens）。
-    ///
-    /// 取 200K 而不是各模型真实的 maxContextTokens：`ChatConfigurationResult` 里
-    /// 拿不到上下文上限，而绝大多数配置是 128K~256K。200K 留出足够余量给输出与
-    /// system prompt，同时足以容纳正常长度的会话 —— 目的是防止输入无限膨胀，
-    /// 不是把上下文压到很小。
-    // 截剪线必须高于摘要水位，否则截剪永远抢在摘要前面。
-    // 窗口 256K × 水位 0.9 = 230.4K token（摘要触发线）；此处取 240K，留 ~9.6K token 余量。
-    const HISTORY_TOKEN_BUDGET: i32 = 240_000;
-
     /// 估算 chars -> tokens 的换算比例。
     ///
     /// 实测：240,000 字符的历史被 provider 记为 84,475 input tokens，
@@ -736,28 +724,21 @@ impl AIMessageManager {
     const CHARS_PER_TOKEN_ESTIMATE: f64 = 2.8;
 
     /// Projects history using persisted participant identities and the owner's explicit history policy.
+    ///
+    /// **不做 token 预算裁剪。** 历史起点只由「最后一条 summary」决定：
+    /// 没有 summary 就从头全发，有 summary 就从它开始全发。
+    ///
+    /// 为什么不能裁：裁剪切点每轮都会随新增内容往前挪，相邻两轮保留的区间起点不同，
+    /// provider 的 prefix cache 从切点起整段失效。实测裁剪触发的轮次命中率跌到
+    /// 4.5%~11.4%，其余轮次稳定在 95%~99%。
+    ///
+    /// 上下文不会无限膨胀：摘要水位 90%（SUMMARIZE_TOKEN_WATERMARK）兜底，历史涨到
+    /// maxContextTokens 的 90% 就落盘新 summary，起点前移、体量回落。裁剪是多余的
+    /// 第二道闸门，已删除。
     #[allow(non_snake_case)]
     pub fn getMemoryFromMessages(
-        messages: Vec<ChatMessage>, configuration: &ChatConfigurationResult,
-    ) -> Result<Vec<PromptTurn>, AiServiceError> {
-        Self::getMemoryFromMessagesWithinBudget(messages, configuration, None)
-    }
-
-    /// Projects history like `getMemoryFromMessages`, then enforces a hard token budget.
-    ///
-    /// 背景：历史只按「最后一条 summary」截取，**不按 token 预算裁剪**。而摘要触发
-    /// 条件是 `currentTokens / maxContextTokens >= 0.70`，摘要又是异步生成的 ——
-    /// 于是输入可以先涨到远超上下文（实测 373k vs 256k，比例 145%），摘要每轮都判
-    /// 「该生成了」，新 summary 让起点不断后移，provider 的 prefix cache 前缀每轮全变，
-    /// 命中率稳定掉到 5%。
-    ///
-    /// 这里加一道**硬预算**：超过预算就从最老的 turn 开始丢，保留 summary 与最近的对话。
-    /// 这样即便摘要还没生成完，输入也不会无限膨胀、前缀也能在相邻轮之间保持稳定。
-    #[allow(non_snake_case)]
-    pub fn getMemoryFromMessagesWithinBudget(
         messages: Vec<ChatMessage>,
         configuration: &ChatConfigurationResult,
-        maxTokens: Option<i32>,
     ) -> Result<Vec<PromptTurn>, AiServiceError> {
         let lastSummaryIndex = messages.iter().rposition(|message| message.sender == "summary");
         let relevantMessages = match lastSummaryIndex { Some(index) => &messages[index..], None => messages.as_slice() };
@@ -801,104 +782,7 @@ impl AIMessageManager {
                 _ => {}
             }
         }
-        let turns = match maxTokens {
-            Some(budget) if budget > 0 => Self::trimTurnsToBudget(turns, budget),
-            _ => turns,
-        };
         Ok(turns)
-    }
-
-    /// Drops the oldest turns until the estimated token count fits the budget.
-    ///
-    /// 估算口径取 3 字符 ≈ 1 token（偏保守：宁可早丢，也不要超上下文）。
-    /// SUMMARY 与 SYSTEM turn 永远保留 —— 它们是压缩后的锚点，丢了就真的没历史了。
-    #[allow(non_snake_case)]
-    fn trimTurnsToBudget(turns: Vec<PromptTurn>, maxTokens: i32) -> Vec<PromptTurn> {
-        // 双水位：超过 HIGH 才裁，一次裁到 LOW。
-        //
-        // 单水位会造成「滑动窗口」—— 每轮新增一两条就把切点往前推一格，
-        // 于是相邻两轮保留的区间起点不同，provider 的 prefix cache 从切点开始整段失效。
-        // maxTokens 是 token 预算，而下面的累加是字符。
-        // 早期版本直接把 maxTokens 当字符数用（400_000 token 被当成 400_000 字符
-        // 约 141K token），于是裁剪水位反而低于摘要水位（0.90 x maxContextTokens），
-        // 每轮都是裁剪先于摘要触发，摘要永远等不到时机，历史只能被裁掉。
-        // 后果：前缀每轮滑动导致缓存失效，且被裁掉的对话对模型永久不可见。
-        let highChars =
-            ((maxTokens as f64).max(1.0) * Self::CHARS_PER_TOKEN_ESTIMATE) as usize;
-        let lowChars = highChars.saturating_mul(3) / 5;
-        let totalChars: usize = turns.iter().map(|turn| turn.content.chars().count()).sum();
-        if totalChars <= highChars {
-            return turns;
-        }
-
-        // **锚点必须无条件保留。**
-        //
-        // SYSTEM turn 承载 system prompt，是整条请求的第一个字节块；
-        // SUMMARY turn 是压缩后的历史起点。二者一旦被裁掉：
-        //   - 序列第一条会变成某条 ASSISTANT turn，而它的内容往往以
-        //     `<think>` 思考块开头 —— 思考块由模型每轮重新生成，内容不同，
-        //     于是前缀从第一个字节就变，缓存只剩 system prompt 那一点。
-        //   - 实测日志：`firstKind=ASSISTANT ... head=<think>**关键线索**`
-        //     命中率恒定卡在 6528（system prompt 的量）。
-        //
-        // 之前的实现用 `break` 跳出累加循环，更早的 turn 全部丢弃 ——
-        // 锚点在最前面，因此必被牺牲。现在改为：先单独挑出锚点，
-        // 再对非锚点做尾部累加，最后按原顺序重组。
-        let anchorIndexes: Vec<usize> = turns
-            .iter()
-            .enumerate()
-            .filter(|(_, turn)| {
-                matches!(turn.kind, PromptTurnKind::SYSTEM | PromptTurnKind::SUMMARY)
-            })
-            .map(|(index, _)| index)
-            .collect();
-        let anchorChars: usize = anchorIndexes
-            .iter()
-            .map(|index| turns[*index].content.chars().count())
-            .sum();
-        let budgetChars = lowChars.saturating_sub(anchorChars);
-
-        let mut kept: Vec<usize> = anchorIndexes.clone();
-        let mut used = 0usize;
-        for index in (0..turns.len()).rev() {
-            if anchorIndexes.contains(&index) {
-                continue;
-            }
-            let size = turns[index].content.chars().count();
-            if used + size > budgetChars {
-                break;
-            }
-            used += size;
-            kept.push(index);
-        }
-        kept.sort_unstable();
-
-        operit_util::AppLogger::AppLogger::i(
-            "HistoryBudget",
-            &format!(
-                "trimmed totalChars={} high={} low={} turns={} kept={} anchors={}",
-                totalChars,
-                highChars,
-                lowChars,
-                turns.len(),
-                kept.len(),
-                anchorIndexes.len(),
-            ),
-        );
-
-        let mut keptIter = kept.into_iter().peekable();
-        let mut index = 0usize;
-        turns
-            .into_iter()
-            .filter(|_| {
-                let keep = keptIter.peek().is_some_and(|next| *next == index);
-                if keep {
-                    keptIter.next();
-                }
-                index += 1;
-                keep
-            })
-            .collect()
     }
 
     /// Converts stored assistant parts into provider turns while preserving tool boundaries.
