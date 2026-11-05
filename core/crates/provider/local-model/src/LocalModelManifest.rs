@@ -75,6 +75,18 @@ pub enum LocalModelDriver {
         dataDir: String,
         speakerCount: i32,
     },
+    SherpaOnnxKokoro {
+        model: String,
+        voices: String,
+        tokens: String,
+        dataDir: String,
+        dictDir: String,
+        /// 逗号分隔的词典路径；Kokoro 同时加载英文与中文词典。
+        lexicon: String,
+        ruleFsts: Vec<String>,
+        ruleFars: Vec<String>,
+        speakerCount: i32,
+    },
     SherpaOnnxWebAsrBundle {
         recognizerScript: String,
         runtimeScript: String,
@@ -109,7 +121,8 @@ impl LocalModelDriver {
             Self::SherpaOnnxStreamingTransducer { .. }
             | Self::SherpaOnnxVits { .. }
             | Self::SherpaOnnxMatcha { .. }
-            | Self::SherpaOnnxKitten { .. } => matches!(
+            | Self::SherpaOnnxKitten { .. }
+            | Self::SherpaOnnxKokoro { .. } => matches!(
                 platform,
                 LocalPlatform::Windows
                     | LocalPlatform::Linux

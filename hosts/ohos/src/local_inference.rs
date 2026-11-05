@@ -573,6 +573,69 @@ fn synthesizeTts(
                 )?;
             }
         }
+        LocalModelDriver::SherpaOnnxKokoro {
+            model,
+            voices,
+            tokens,
+            dataDir,
+            dictDir,
+            lexicon,
+            ruleFsts,
+            ruleFars,
+            speakerCount,
+        } => {
+            validateTtsSpeakerId(speaker, speakerCount)?;
+            let modelPath = pathCString(&declaredModelFile(&modelDirectory, &model)?)?;
+            let voicesPath = pathCString(&declaredModelFile(&modelDirectory, &voices)?)?;
+            let tokensPath = pathCString(&declaredModelFile(&modelDirectory, &tokens)?)?;
+            let dataDirPath = pathCString(&declaredModelDirectory(&modelDirectory, &dataDir)?)?;
+            let dictDirPath = pathCString(&declaredModelDirectory(&modelDirectory, &dictDir)?)?;
+            let lexiconPaths = lexicon
+                .split(',')
+                .map(|path| path.trim().to_string())
+                .collect::<Vec<_>>();
+            let lexiconValue = joinedModelFiles(&modelDirectory, &lexiconPaths)?;
+            let ruleFstsValue = joinedModelFiles(&modelDirectory, &ruleFsts)?;
+            let ruleFarsValue = joinedModelFiles(&modelDirectory, &ruleFars)?;
+            let config = SherpaOnnxOfflineTtsConfig {
+                model: SherpaOnnxOfflineTtsModelConfig {
+                    vits: unsafe { std::mem::zeroed() },
+                    num_threads: threadCount,
+                    debug: 0,
+                    provider: provider.as_ptr(),
+                    matcha: unsafe { std::mem::zeroed() },
+                    kokoro: SherpaOnnxOfflineTtsKokoroModelConfig {
+                        model: modelPath.as_ptr(),
+                        voices: voicesPath.as_ptr(),
+                        tokens: tokensPath.as_ptr(),
+                        data_dir: dataDirPath.as_ptr(),
+                        length_scale: 1.0,
+                        dict_dir: dictDirPath.as_ptr(),
+                        lexicon: lexiconValue.as_ptr(),
+                        lang: empty.as_ptr(),
+                    },
+                    kitten: unsafe { std::mem::zeroed() },
+                    zipvoice: unsafe { std::mem::zeroed() },
+                    pocket: unsafe { std::mem::zeroed() },
+                    supertonic: unsafe { std::mem::zeroed() },
+                },
+                rule_fsts: ruleFstsValue.as_ptr(),
+                max_num_sentences: 1,
+                rule_fars: ruleFarsValue.as_ptr(),
+                silence_scale: 0.2,
+            };
+            unsafe {
+                runSynthesis(
+                    &library,
+                    &config,
+                    textValue.as_ptr(),
+                    speaker,
+                    speed,
+                    speakerCount,
+                    outputValue.as_ptr(),
+                )?;
+            }
+        }
         unsupported => {
             return Err(HostError::new(format!(
                 "OHOS local TTS driver is unsupported: {unsupported:?}"

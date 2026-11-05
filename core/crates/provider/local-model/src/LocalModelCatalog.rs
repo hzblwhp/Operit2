@@ -19,6 +19,8 @@ const SHERPA_ONNX_MATCHA_BAKER_ID: &str = "matcha-icefall-zh-baker";
 const SHERPA_ONNX_MATCHA_BAKER_REVISION: &str = "75e64a57a80fb370abb18a4e4d86bb090ed46e93";
 const SHERPA_ONNX_KITTEN_NANO_ID: &str = "kitten-nano-en-v0_8-int8";
 const SHERPA_ONNX_KITTEN_NANO_VERSION: &str = "tts-models";
+const SHERPA_ONNX_KOKORO_ID: &str = "kokoro-int8-multi-lang-v1_0";
+const SHERPA_ONNX_KOKORO_VERSION: &str = "v1.0";
 const SHERPA_ONNX_WEB_ASR_ID: &str = "sherpa-onnx-web-paraformer-small-zh-en";
 const SHERPA_ONNX_WEB_ASR_VERSION: &str = "1.13.2";
 const SHERPA_ONNX_WEB_TTS_ID: &str = "sherpa-onnx-web-vits-piper-en-us-libritts-r-medium";
@@ -78,6 +80,7 @@ LocalModelFile { relativePath: "tokenizer.txt".to_string(), sha256: "77009625db0
             Self::sherpaOnnxVitsZhLlTts(),
             Self::sherpaOnnxMatchaBakerTts(),
             Self::sherpaOnnxKittenNanoTts(),
+            Self::sherpaOnnxKokoroTts(),
             Self::sherpaOnnxWebAsr(),
             Self::sherpaOnnxWebVitsTts(),
         ]
@@ -406,6 +409,112 @@ LocalModelFile { relativePath: "tokenizer.txt".to_string(), sha256: "77009625db0
                     "vocos-22khz-univ.onnx",
                     "0574a135aa1db2de6e181050db2ec528496cacd4a4701fc5d7faf9f9804c0081",
                     53_884_024,
+                ),
+            ],
+        }
+    }
+
+    /// Returns the natural neural Chinese/English Kokoro int8 manifest.
+    pub fn sherpaOnnxKokoroTts() -> LocalModelManifest {
+        let sourceId = "github-sherpa-onnx-tts-models";
+        let modelRoot = SHERPA_ONNX_KOKORO_ID;
+        let file = |name: &str, sha256: &str, byteSize: u64| {
+            modelFile(sourceId, &format!("{modelRoot}/{name}"), sha256, byteSize)
+        };
+        LocalModelManifest {
+            id: SHERPA_ONNX_KOKORO_ID.to_string(),
+            version: SHERPA_ONNX_KOKORO_VERSION.to_string(),
+            displayName: "Kokoro 自然中文神经音色".to_string(),
+            description: "本地中英双语 Kokoro 82M 神经语音合成，54 个音色，无需联网或 API Key。".to_string(),
+            kind: LocalModelKind::TextToSpeech,
+            engine: LocalEngineKind::SherpaOnnx,
+            license: "apache-2.0".to_string(),
+            homepage: "https://huggingface.co/csukuangfj/kokoro-int8-multi-lang-v1_0".to_string(),
+            languages: vec!["zh".to_string(), "en".to_string()],
+            tags: vec![
+                "kokoro".to_string(),
+                "neural".to_string(),
+                "multi-speaker".to_string(),
+                "sherpa-onnx".to_string(),
+                "archive".to_string(),
+            ],
+            engineRequirement: Some(sherpaOnnxRequirement()),
+            driver: Some(LocalModelDriver::SherpaOnnxKokoro {
+                model: format!("{modelRoot}/model.int8.onnx"),
+                voices: format!("{modelRoot}/voices.bin"),
+                tokens: format!("{modelRoot}/tokens.txt"),
+                dataDir: format!("{modelRoot}/espeak-ng-data"),
+                dictDir: format!("{modelRoot}/dict"),
+                lexicon: format!(
+                    "{modelRoot}/lexicon-us-en.txt,{modelRoot}/lexicon-zh.txt"
+                ),
+                ruleFsts: vec![
+                    format!("{modelRoot}/phone-zh.fst"),
+                    format!("{modelRoot}/date-zh.fst"),
+                    format!("{modelRoot}/number-zh.fst"),
+                ],
+                ruleFars: Vec::new(),
+                speakerCount: 54,
+            }),
+            sources: vec![LocalModelSource {
+                id: sourceId.to_string(),
+                kind: LocalModelSourceKind::DirectHttp,
+                repository: "k2-fsa/sherpa-onnx".to_string(),
+                revision: "tts-models".to_string(),
+                baseUrl: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
+                    .to_string(),
+            }],
+            installSource: LocalModelInstallSource::Archives {
+                archives: vec![LocalModelArchive {
+                    archiveId: SHERPA_ONNX_KOKORO_ID.to_string(),
+                    relativePath: format!("{SHERPA_ONNX_KOKORO_ID}.tar.bz2"),
+                    sha256: "72c347230107ef8a31098ec4d468a605244beef5f1ed00db97efa13518800653"
+                        .to_string(),
+                    byteSize: 132_353_410,
+                    sourceId: sourceId.to_string(),
+                    archiveFormat: LocalModelArchiveFormat::TarBz2,
+                }],
+            },
+            files: vec![
+                file(
+                    "model.int8.onnx",
+                    "75635ea3b85a32d00094dcdd61a258aba87c160f7c264c304a7b3ae9d734195e",
+                    114_202_993,
+                ),
+                file(
+                    "voices.bin",
+                    "1c5a5b983d3d50d8586d437a51f3faa2da7919ce76a013c081e65671a3447c29",
+                    28_200_960,
+                ),
+                file(
+                    "tokens.txt",
+                    "6ebb6bb288f20f3ae8d004d3c2ca27697da27c037d75e81a60e2a6a663f95425",
+                    687,
+                ),
+                file(
+                    "lexicon-us-en.txt",
+                    "7daaab53a181be9885b853a8582bf1838186317e5dadacbcef9c426d6fa0da14",
+                    5_956_885,
+                ),
+                file(
+                    "lexicon-zh.txt",
+                    "902bc2d20ac7c449c5ecbbbb23c89d12119c03ed5b8ed27f114f0260c9e35229",
+                    2_365_182,
+                ),
+                file(
+                    "phone-zh.fst",
+                    "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7",
+                    88_630,
+                ),
+                file(
+                    "date-zh.fst",
+                    "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718",
+                    59_154,
+                ),
+                file(
+                    "number-zh.fst",
+                    "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd",
+                    64_482,
                 ),
             ],
         }

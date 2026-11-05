@@ -4,6 +4,7 @@ import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsMatchaModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
@@ -19,6 +20,9 @@ import org.json.JSONObject
 internal object AndroidLocalInference {
     private val loadLock = Any()
     private var loadedEngineDirectory: String? = null
+    private val ttsLock = Any()
+    private var cachedTtsKey: String? = null
+    private var cachedTts: OfflineTts? = null
 
     private data class TaggedDriver(val name: String, val payload: JSONObject)
 
@@ -93,33 +97,51 @@ internal object AndroidLocalInference {
             "LOCAL_MODEL TTS speaker must be between 0 and ${speakerCount - 1}"
         }
         val outputPath = requiredOutputFile(request.getString("outputPath"))
-        val tts = OfflineTts(
-            config = ttsConfigForDriver(taggedDriver.name, driver, modelDirectory),
-        )
-        try {
-            require(tts.numSpeakers() == speakerCount) {
-                "LOCAL_MODEL TTS speaker count does not match the installed model manifest"
+        // 模型常驻：分段朗读时每段都重新加载 Kokoro（约 100MB 权重 + 词典）
+        // 会让第一句之后的每一段都多等好几秒。键里包含引擎目录、驱动声明与模型目录，
+        // 配置一变就释放旧实例，避免把两套模型混用。
+        val ttsKey = buildString {
+            append(engineDirectory.absolutePath)
+            append('|').append(taggedDriver.name)
+            append('|').append(driver.toString())
+            append('|').append(modelDirectory.absolutePath)
+        }
+        val tts = synchronized(ttsLock) {
+            val existing = cachedTts
+            if (existing != null && cachedTtsKey == ttsKey) {
+                existing
+            } else {
+                existing?.release()
+                val created = OfflineTts(
+                    config = ttsConfigForDriver(taggedDriver.name, driver, modelDirectory),
+                )
+                require(created.numSpeakers() == speakerCount) {
+                    "LOCAL_MODEL TTS speaker count does not match the installed model manifest"
+                }
+                cachedTts = created
+                cachedTtsKey = ttsKey
+                created
             }
-            val generated = tts.generate(
+        }
+        val generated = synchronized(ttsLock) {
+            tts.generate(
                 text = request.getString("text"),
                 sid = speaker,
                 speed = speed.toFloat(),
             )
-            require(generated.samples.isNotEmpty()) { "LOCAL_MODEL TTS generated no audio samples" }
-            require(generated.sampleRate > 0) { "LOCAL_MODEL TTS generated an invalid sample rate" }
-            require(generated.save(outputPath.absolutePath)) {
-                "LOCAL_MODEL TTS failed to write ${outputPath.absolutePath}"
-            }
-            require(outputPath.isFile && outputPath.length() > 44L) {
-                "LOCAL_MODEL TTS output WAV is invalid: ${outputPath.absolutePath}"
-            }
-            return JSONObject()
-                .put("audioPath", outputPath.absolutePath)
-                .put("outputFormat", "wav")
-                .toString()
-        } finally {
-            tts.release()
         }
+        require(generated.samples.isNotEmpty()) { "LOCAL_MODEL TTS generated no audio samples" }
+        require(generated.sampleRate > 0) { "LOCAL_MODEL TTS generated an invalid sample rate" }
+        require(generated.save(outputPath.absolutePath)) {
+            "LOCAL_MODEL TTS failed to write ${outputPath.absolutePath}"
+        }
+        require(outputPath.isFile && outputPath.length() > 44L) {
+            "LOCAL_MODEL TTS output WAV is invalid: ${outputPath.absolutePath}"
+        }
+        return JSONObject()
+            .put("audioPath", outputPath.absolutePath)
+            .put("outputFormat", "wav")
+            .toString()
     }
 
     /** Builds one Sherpa ONNX TTS config from an exact driver tag. */
@@ -128,6 +150,7 @@ internal object AndroidLocalInference {
             "SherpaOnnxVits" -> vitsTtsConfig(driver, modelDirectory)
             "SherpaOnnxMatcha" -> matchaTtsConfig(driver, modelDirectory)
             "SherpaOnnxKitten" -> kittenTtsConfig(driver, modelDirectory)
+            "SherpaOnnxKokoro" -> kokoroTtsConfig(driver, modelDirectory)
             else -> throw IllegalArgumentException("LOCAL_MODEL Android TTS driver is unsupported: $driverName")
         }
     }
@@ -183,6 +206,31 @@ internal object AndroidLocalInference {
                 debug = false,
                 provider = "cpu",
             ),
+        )
+    }
+
+    /** Builds one Kokoro neural TTS config from manifest-declared files. */
+    private fun kokoroTtsConfig(driver: JSONObject, modelDirectory: File): OfflineTtsConfig {
+        // Kokoro 同时加载英文和中文词典；相对路径必须分别校验后再拼回 JNI 需要的逗号列表。
+        val lexicon = driver.getString("lexicon").split(',')
+            .map { modelFile(modelDirectory, it.trim()).absolutePath }
+            .joinToString(",")
+        return OfflineTtsConfig(
+            model = OfflineTtsModelConfig(
+                kokoro = OfflineTtsKokoroModelConfig(
+                    model = modelFile(modelDirectory, driver.getString("model")).absolutePath,
+                    voices = modelFile(modelDirectory, driver.getString("voices")).absolutePath,
+                    tokens = modelFile(modelDirectory, driver.getString("tokens")).absolutePath,
+                    dataDir = modelDirectory(modelDirectory, driver.getString("dataDir")).absolutePath,
+                    dictDir = modelDirectory(modelDirectory, driver.getString("dictDir")).absolutePath,
+                    lexicon = lexicon,
+                ),
+                numThreads = runtimeThreadCount(),
+                debug = false,
+                provider = "cpu",
+            ),
+            ruleFsts = modelFileList(modelDirectory, driver.getJSONArray("ruleFsts")),
+            ruleFars = modelFileList(modelDirectory, driver.getJSONArray("ruleFars")),
         )
     }
 

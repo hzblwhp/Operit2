@@ -120,7 +120,7 @@ impl TtsSynthesisService {
             _ => return Err(format!("Unsupported TTS output format: {extension}")),
         };
         let mut segments = Vec::new();
-        for segment in TtsSegmenter::segment(&text, 4000) {
+        for segment in TtsSegmenter::segment(&text, Self::segmentCharsFor(&config)) {
             let audio = provider.synthesize(&config, &segment)?;
             if audio.is_empty() { return Err("TTS provider returned empty audio".into()); }
             segments.push(operit_plugin_sdk::js_sdk::results::TtsAudioSegment { audio, contentType: contentType.into() });
@@ -136,7 +136,7 @@ impl TtsSynthesisService {
         cleanedText: &str,
     ) -> Result<TtsSynthesisResult, String> {
         let voiceService = self.createVoiceService(config)?;
-        let segments = TtsSegmenter::segment(&cleanedText, 4000);
+        let segments = TtsSegmenter::segment(&cleanedText, Self::segmentCharsFor(config));
         let storageHost = defaultRuntimeStorageHost();
         let mut audioPaths = Vec::new();
         let mut audioStoragePaths = Vec::new();
@@ -162,6 +162,19 @@ impl TtsSynthesisService {
             audioPaths,
             audioStoragePaths,
         })
+    }
+
+    /// Returns the synthesis segment size appropriate for one provider.
+    ///
+    /// 本地神经 TTS 的生成速度低于实时，若等整篇 4000 字合成完再播放，
+    /// 用户会长时间停在「生成中」。切到短段后第一段很快可播，
+    /// 后续段由播放队列无缝接续；Android 端模型已常驻，重段不会再重新加载权重。
+    fn segmentCharsFor(config: &TtsConfig) -> usize {
+        if TtsProviderType::normalize(&config.providerType) == TtsProviderType::LOCAL_MODEL {
+            280
+        } else {
+            4000
+        }
     }
 
     /// Creates the provider adapter selected by one normalized TTS configuration.

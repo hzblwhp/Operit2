@@ -598,6 +598,62 @@ fn appendSherpaTtsDriverArguments(
             ));
             Ok(())
         }
+        LocalModelDriver::SherpaOnnxKokoro {
+            model,
+            voices,
+            tokens,
+            dataDir,
+            dictDir,
+            lexicon,
+            ruleFsts,
+            ruleFars,
+            speakerCount,
+        } => {
+            validateSpeakerId(speakerId, *speakerCount, "Kokoro")?;
+            args.push(format!(
+                "--kokoro-model={}",
+                declaredModelFile(&runtime.model, modelDirectory, model)?.display()
+            ));
+            args.push(format!(
+                "--kokoro-voices={}",
+                declaredModelFile(&runtime.model, modelDirectory, voices)?.display()
+            ));
+            args.push(format!(
+                "--kokoro-tokens={}",
+                declaredModelFile(&runtime.model, modelDirectory, tokens)?.display()
+            ));
+            args.push(format!(
+                "--kokoro-data-dir={}",
+                declaredModelDirectory(&runtime.model, modelDirectory, dataDir)?.display()
+            ));
+            args.push(format!(
+                "--kokoro-dict-dir={}",
+                declaredModelDirectory(&runtime.model, modelDirectory, dictDir)?.display()
+            ));
+            // CLI 接受逗号分隔的多份词典，每个相对路径都必须先独立校验，不能整串当文件名。
+            let lexiconPaths = lexicon
+                .split(',')
+                .map(|path| {
+                    declaredModelFile(&runtime.model, modelDirectory, path.trim())
+                        .map(|file| file.display().to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            args.push(format!("--kokoro-lexicon={}", lexiconPaths.join(",")));
+            appendRuleFileArgument(
+                args,
+                "--tts-rule-fsts",
+                ruleFsts,
+                &runtime.model,
+                modelDirectory,
+            )?;
+            appendRuleFileArgument(
+                args,
+                "--tts-rule-fars",
+                ruleFars,
+                &runtime.model,
+                modelDirectory,
+            )
+        }
         _ => Err(LocalModelProviderError::UnsupportedDriver(format!(
             "{:?}",
             runtime.model.manifest.engine
