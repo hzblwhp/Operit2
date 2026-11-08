@@ -115,8 +115,7 @@ class OkHttpClient {
         const params = stripUndefined({
             url: modifiedRequest.url,
             method: modifiedRequest.method,
-            headers: JSON.stringify(modifiedRequest.headers || {}),
-            body: modifiedRequest.body,
+            headers: JSON.stringify(modifiedRequest.headers),
             body_type: modifiedRequest.bodyType || 'text',
             follow_redirects: this._config.followRedirects,
             connect_timeout: Math.max(1, Math.ceil((this._config.timeouts.connect || 10000) / 1000)),
@@ -124,9 +123,13 @@ class OkHttpClient {
             write_timeout: Math.max(1, Math.ceil((this._config.timeouts.write || 30000) / 1000))
         });
 
-        const hasIntermediate =
-            options && typeof options.onIntermediateResult === 'function';
-        if (hasIntermediate) {
+        // The structured tool-request walker rejects undefined values, so
+        // bodyless requests must omit the field instead of carrying undefined.
+        if (modifiedRequest.body !== undefined && modifiedRequest.body !== null) {
+            params.body = modifiedRequest.body;
+        }
+
+        if (options && typeof options.onIntermediateResult === 'function') {
             params.stream = true;
         }
 

@@ -11,8 +11,10 @@ import desktop_multi_window
 import desktop_widgets_macos
 import dynamic_color
 import file_selector_macos
+import floating_windows
 import geolocator_apple
 import image_picker_macos
+import mobile_scanner
 import operit_folder_access
 import operit_keep_alive
 import package_info_plus
@@ -29,8 +31,10 @@ func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   DesktopWidgetsMacosPlugin.register(with: registry.registrar(forPlugin: "DesktopWidgetsMacosPlugin"))
   DynamicColorPlugin.register(with: registry.registrar(forPlugin: "DynamicColorPlugin"))
   FileSelectorPlugin.register(with: registry.registrar(forPlugin: "FileSelectorPlugin"))
+  FloatingWindowsPlugin.register(with: registry.registrar(forPlugin: "FloatingWindowsPlugin"))
   GeolocatorPlugin.register(with: registry.registrar(forPlugin: "GeolocatorPlugin"))
   ImagePickerMacOSPlugin.register(with: registry.registrar(forPlugin: "ImagePickerMacOSPlugin"))
+  MobileScannerPlugin.register(with: registry.registrar(forPlugin: "MobileScannerPlugin"))
   OperitFolderAccessPlugin.register(with: registry.registrar(forPlugin: "OperitFolderAccessPlugin"))
   OperitKeepAlivePlugin.register(with: registry.registrar(forPlugin: "OperitKeepAlivePlugin"))
   FPPPackageInfoPlusPlugin.register(with: registry.registrar(forPlugin: "FPPPackageInfoPlusPlugin"))

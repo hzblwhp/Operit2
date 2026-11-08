@@ -6,6 +6,8 @@ mod commands;
 mod compose;
 #[path = "config/mod.rs"]
 mod config;
+#[path = "diff/mod.rs"]
+pub(crate) mod diff;
 #[path = "transcript/empty_state.rs"]
 mod empty_state;
 #[path = "core/focus.rs"]
@@ -319,7 +321,7 @@ async fn start_tui_listeners(
     let services = core_application.accessServices();
     let explicit = !link_args.listen.is_empty();
     let transports = if explicit {
-        let mut config = crate::cli::link::cli_listener_config(&services)?;
+        let mut config = services.localHostConfig()?.ok_or("Node listener preferences are not initialized")?;
         config.transports = link_args.listen.clone();
         config.updatedAt = operit_host_api::TimeUtils::currentTimeMillis();
         services.saveLocalHostConfig(config)?;

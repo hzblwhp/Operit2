@@ -84,13 +84,21 @@ impl ToolGetter {
         StandardSystemOperationTools::new(
             context.systemOperationHost.clone(),
             context.toastHost.clone(),
+            context.clipboardHost.clone(),
         )
     }
 
     /// Creates terminal tools from the optional terminal host.
     #[allow(non_snake_case)]
     pub fn getTerminalTools(context: &HostManager) -> StandardTerminalTools {
-        StandardTerminalTools::new(context.terminalHost.clone())
+        let tools = StandardTerminalTools::new(context.terminalHost.clone());
+        let Some(storage) = context.runtimeStorageHost.as_ref() else { return tools; };
+        let tools = tools.withStorage(storage.clone());
+        let (Some(runtimeRoot), Some(workspaceRoot)) =
+            (storage.runtimeRootDir(), storage.workspaceRootDir()) else { return tools; };
+        tools.withPathMapper(operit_tools::files::PathMapper::PathMapper::new(
+            runtimeRoot, workspaceRoot, storage.clone(),
+        ))
     }
 
     /// Creates music playback tools from the optional audio playback host.

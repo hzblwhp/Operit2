@@ -22,11 +22,15 @@ pub(crate) enum StoredDirection {
 /// Stores node-local listener binding and discovery preferences.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PeerHostConfig {
+    /// Network bind address. Port zero requests Host allocation; automatic mode
+    /// persists the selected port for subsequent reconnects and restarts.
     pub bindAddress: String,
     /// 显式暴露的传输方式；空列表不启动监听。
     #[serde(default)]
     pub transports: Vec<operit_peer_link::PeerTransport>,
     pub discoveryEnabled: bool,
+    /// Automatic reuses an assigned port or requests a new one on collision.
+    /// Fixed requires a nonzero port and never changes it after a bind failure.
     pub portMode: PeerHostPortMode,
     pub updatedAt: i64,
 }
@@ -47,6 +51,15 @@ pub(crate) struct StoredInbound {
     pub deviceInfo: LinkDeviceInfo,
     pub pairingServiceVersion: u32,
     pub sessionSecret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qrJoinConsent: Option<QrJoinConsent>,
+}
+
+/// Binds QR admission consent to the displayed Space and invitation lifetime.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct QrJoinConsent {
+    pub spaceId: String,
+    pub expiresAt: i64,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct StoredOutbound {
@@ -66,7 +79,7 @@ pub struct PeerStateStore {
 }
 impl PeerStateStore {
     const OUTBOUND_PREFERENCES_VERSION: u32 = 2;
-    const HOST_CONFIG_PREFERENCES_VERSION: u32 = 3;
+    const HOST_CONFIG_PREFERENCES_VERSION: u32 = 4;
 
     /// Creates the node-local peer preference store over the supplied storage host.
     pub fn new(storage: Arc<dyn RuntimeStorageHost>) -> Self {
@@ -118,17 +131,17 @@ impl PeerStateStore {
             0 => {
                 if preferences.entries().is_empty() {
                     let initial = PeerHostConfig {
-                        bindAddress: "0.0.0.0:37195".into(),
+                        bindAddress: "0.0.0.0:0".into(),
                         transports: vec![PeerTransport::Http, PeerTransport::WebSocket],
                         discoveryEnabled: true,
-                        portMode: PeerHostPortMode::Fixed,
+                        portMode: PeerHostPortMode::Automatic,
                         updatedAt: currentTimeMillis(),
                     };
                     for (key, value) in [
                         ("bindAddress", initial.bindAddress),
                         ("transports", serde_json::to_string(&initial.transports)?),
                         ("discoveryEnabled", initial.discoveryEnabled.to_string()),
-                        ("portMode", "fixed".to_owned()),
+                        ("portMode", "automatic".to_owned()),
                         ("updatedAt", initial.updatedAt.to_string()),
                     ] {
                         preferences.set(&stringPreferencesKey(key), value);
@@ -161,6 +174,24 @@ impl PeerStateStore {
             2 => {
                 decodeHostConfig(preferences).map_err(PreferencesDataStoreError::Message)?;
                 preferences.remove(&stringPreferencesKey("token"));
+                Ok(())
+            }
+            3 => {
+                let config = decodeHostConfig(preferences)
+                    .map_err(PreferencesDataStoreError::Message)?;
+                // Old application and ESP32 defaults were persisted as fixed.
+                // Keep custom bindings, disabled discovery and transport choices.
+                let legacyDefault = config.discoveryEnabled
+                    && config.portMode == PeerHostPortMode::Fixed
+                    && ((config.bindAddress == "0.0.0.0:37195"
+                        && config.transports == [PeerTransport::Http, PeerTransport::WebSocket])
+                        || (config.bindAddress == "0.0.0.0:8765"
+                            && (config.transports == [PeerTransport::Serial, PeerTransport::Tcp]
+                                || config.transports == [PeerTransport::Serial])));
+                if legacyDefault {
+                    preferences.set(&stringPreferencesKey("bindAddress"), "0.0.0.0:0");
+                    preferences.set(&stringPreferencesKey("portMode"), "automatic");
+                }
                 Ok(())
             }
             from => Err(PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
@@ -229,22 +260,60 @@ impl PeerStateStore {
         Ok(())
     }
 
+    /// Reads the complete preference object for schema and multi-field mutations.
     fn preferences(&self, path: &str) -> Result<Preferences, String> {
         self.store(path).data().map_err(|error| error.to_string())
     }
+    /// Deletes old approval state without decoding it; also invalidates shared snapshots.
+    pub(crate) fn clearSpaceApprovals(&self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for path in RUNTIME_SPACE_APPROVAL_STATE_PATHS {
+            if let Err(error) = self.store(path).delete() { errors.push(format!("{path}: {error}")); }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+    }
+
+    /// Reads only the requested record; another broken request has no bearing on this one.
+
+    /// Read-only enumeration isolates malformed rows. Security cleanup uses the strict reader below.
+    pub(crate) fn independentRecords<T: DeserializeOwned>(&self, path: &str) -> Result<BTreeMap<String, T>, String> {
+        let mut records = BTreeMap::new();
+        self.store(path).visitEncodedEntries(|name, encoded| {
+            match serde_json::from_str(encoded.get()) {
+                Ok(record) => { records.insert(name.to_owned(), record); },
+                Err(error) => { operit_util::AppLogger::AppLogger::w("PeerStateStore",
+                    &format!("Invalid peer state record at {path}, key {name}: {error}")); },
+            }
+            Ok(())
+        }).map_err(|error| error.to_string())?;
+        Ok(records)
+    }
+
     pub(crate) fn records<T: DeserializeOwned>(
         &self,
         path: &str,
     ) -> Result<BTreeMap<String, T>, String> {
-        self.preferences(path)?
-            .iterEntries()
-            .filter(|(name, _)| *name != PREFERENCES_SCHEMA_VERSION_KEY_NAME)
-            .map(|(name, encoded)| {
-                let record = serde_json::from_value(encoded.clone())
-                    .map_err(|_| format!("Invalid peer state record at {path}, key {name}"))?;
-                Ok((name.to_owned(), record))
-            })
-            .collect()
+        self.store(path).typedEntries::<T>()
+            .map(|entries| entries.into_iter().collect())
+            .map_err(|error| format!("Invalid peer state records at {path}: {error}"))
+    }
+
+    /// Decode a scan without the oversized tree nodes of large typed records.
+    pub(crate) fn recordValues<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, String> {
+        self.store(path).typedEntries::<T>()
+            .map(|entries| entries.into_iter().map(|(_, record)| record).collect())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Re-read one authorization from the current snapshot without decoding
+    /// unrelated credentials or cloning their JSON trees.
+    pub(crate) fn record<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        id: &str,
+    ) -> Result<Option<T>, String> {
+        self.store(path).typedEntry(id)
+            .map_err(|error| format!("Invalid peer state record at {path}, key {id}: {error}"))
     }
 
     /// Inspect only the version before decoding a record; do not build a JSON
@@ -258,22 +327,18 @@ impl PeerStateStore {
         struct Header {
             version: Option<u32>,
         }
-        let prefs = self.preferences(path)?;
-        let mut records = BTreeMap::new();
-        for (name, encoded) in prefs.iterEntries() {
-            if name == PREFERENCES_SCHEMA_VERSION_KEY_NAME {
-                continue;
+        self.store(path).withEncodedEntries(|entries| {
+            let mut records = BTreeMap::new();
+            for (name, encoded) in entries {
+                let bytes = encoded.get().as_bytes();
+                let header: Header = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+                if header.version == Some(version) {
+                    let record = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+                    records.insert(name, record);
+                }
             }
-            let header: Header =
-                serde_json::from_value(encoded.clone()).map_err(|e| e.to_string())?;
-            if header.version == Some(version) {
-                records.insert(
-                    name.to_owned(),
-                    serde_json::from_value(encoded.clone()).map_err(|e| e.to_string())?,
-                );
-            }
-        }
-        Ok(records)
+            Ok(records)
+        }).map_err(|error| error.to_string())?
     }
 
     /// Expiry cleanup and insertion are one durable transaction. Unknown or
@@ -300,7 +365,7 @@ impl PeerStateStore {
                     if name == PREFERENCES_SCHEMA_VERSION_KEY_NAME {
                         continue;
                     }
-                    if let Ok(header) = serde_json::from_value::<Header>(record.clone()) {
+                    if let Ok(header) = Header::deserialize(record) {
                         if header.version == PAIRING_SERVICE_VERSION && header.expires <= now {
                             expired.push(name.to_owned());
                             continue;
@@ -348,7 +413,7 @@ impl PeerStateStore {
                             if name == PREFERENCES_SCHEMA_VERSION_KEY_NAME {
                                 return None;
                             }
-                            let header = serde_json::from_value::<Header>(record.clone()).ok()?;
+                            let header = Header::deserialize(record).ok()?;
                             (header.version == Some(PAIRING_SERVICE_VERSION))
                                 .then(|| name.to_owned())
                         })
@@ -370,17 +435,17 @@ impl PeerStateStore {
         id: &str,
         value: &T,
     ) -> Result<(), String> {
-        let encoded = serde_json::to_value(value).map_err(|e| e.to_string())?;
         self.store(path)
-            .edit(|prefs| prefs.set(&stringPreferencesKey(id), encoded))
+            .setTypedEntry(id, value)
             .map_err(|e| e.to_string())
     }
+    /// Mutable join receipts may normalize old whitespace together, so a
+    /// partially upgraded file does not compress worse than either version.
+    pub(crate) fn putCompactRecord<T: Serialize>(&self, path: &str, id: &str, value: &T) -> Result<(), String> {
+        self.store(path).setTypedEntryCompactingJson(id, value).map_err(|e| e.to_string())
+    }
     pub(crate) fn deleteRecord(&self, path: &str, id: &str) -> Result<(), String> {
-        self.store(path)
-            .edit(|prefs| {
-                prefs.remove(&stringPreferencesKey(id));
-            })
-            .map_err(|e| e.to_string())
+        self.store(path).removeEntry(id).map_err(|e| e.to_string())
     }
 
     /// Refreshes the host-owned platform while preserving the configured name and unknown fields.
@@ -475,17 +540,20 @@ impl PeerStateStore {
 
     /// Returns the persisted local pairing generation, if one was minted.
     pub fn pairingIncarnation(&self) -> Result<Option<String>, String> {
-        let preferences = self.preferences(RUNTIME_LINK_ACCESS_IDENTITY_PATH)?;
-        let encoded = preferences
-            .get(&stringPreferencesKey("record"))
+        #[derive(Deserialize)]
+        struct DeviceInfo {
+            #[serde(default)]
+            pairingIncarnation: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Identity {
+            deviceInfo: Option<DeviceInfo>,
+        }
+        let record: Identity = self.store(RUNTIME_LINK_ACCESS_IDENTITY_PATH)
+            .typedEntry("record")
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "Node identity is missing".to_string())?;
-        let record: Value =
-            serde_json::from_value(encoded.clone()).map_err(|error| error.to_string())?;
-        Ok(record
-            .get("deviceInfo")
-            .and_then(|info| info.get("pairingIncarnation"))
-            .and_then(Value::as_str)
-            .map(str::to_owned))
+        Ok(record.deviceInfo.and_then(|info| info.pairingIncarnation))
     }
 
     /// Returns the local pairing generation, minting and persisting one on
@@ -815,6 +883,50 @@ mod tests {
             .replace(preferences)
             .unwrap();
     }
+    /// Projection reads validate their selected facts without decoding unrelated evidence.
+    #[test]
+    fn projection_scan_skips_evidence_and_rejects_malformed_selected_fields() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Projection { id: u32 }
+        #[derive(Deserialize)]
+        struct FullRecord { id: u32, payload: String }
+        let storage = Arc::new(Storage::default());
+        let store = PeerStateStore::new(storage.clone());
+        let path = RUNTIME_LINK_ACCESS_INBOUND_SESSIONS_PATH;
+        for id in 0..8 {
+            store.putRecord(path, &id.to_string(),
+                &serde_json::json!({"id": id, "payload": {"evidence": ["x".repeat(2048)]}})).unwrap();
+        }
+        let mut records = store.recordValues::<Projection>(path).unwrap();
+        records.sort_by_key(|record| record.id);
+        assert_eq!(records, (0..8).map(|id| Projection { id }).collect::<Vec<_>>());
+        assert!(store.recordValues::<FullRecord>(path).is_err());
+        store.putRecord(path, "z-broken", &serde_json::json!({"payload": "evidence"})).unwrap();
+        let before = storage.0.lock().unwrap().clone();
+        assert!(store.recordValues::<Projection>(path).is_err());
+        assert_eq!(*storage.0.lock().unwrap(), before);
+    }
+
+    #[test]
+    fn single_record_reads_current_snapshot_and_rejects_malformed_credentials() {
+        #[derive(Debug, Deserialize, Serialize, PartialEq)]
+        struct Credential { deviceId: String, sessionSecret: String }
+        let store = PeerStateStore::new(Arc::new(Storage::default()));
+        let path = RUNTIME_LINK_ACCESS_INBOUND_SESSIONS_PATH;
+        let credential = Credential { deviceId: "peer".into(), sessionSecret: "first".into() };
+        store.putRecord(path, "current", &credential).unwrap();
+        assert_eq!(store.record::<Credential>(path, "current").unwrap(), Some(credential));
+        assert!(store.record::<Credential>(path, "missing").unwrap().is_none());
+        assert!(store.record::<Credential>(path, PREFERENCES_SCHEMA_VERSION_KEY_NAME).unwrap().is_none());
+        store.putRecord(path, "current", &serde_json::json!({"invalid": true})).unwrap();
+        assert!(store.record::<Credential>(path, "current").is_err());
+        let replacement = Credential { deviceId: "peer".into(), sessionSecret: "renewed".into() };
+        store.putRecord(path, "current", &replacement).unwrap();
+        assert_eq!(store.record::<Credential>(path, "current").unwrap(), Some(replacement));
+        store.deleteRecord(path, "current").unwrap();
+        assert!(store.record::<Credential>(path, "current").unwrap().is_none());
+    }
+
     #[test]
     fn unsynchronized_boot_discards_only_inflight_pairings_and_keeps_credentials() {
         let storage = Arc::new(Storage::default());
@@ -1351,23 +1463,23 @@ mod tests {
 
     /// Verifies first reads initialize listener defaults exactly once through the schema.
     #[test]
-    fn listener_schema_initializes_http_websocket_discovery_and_fixed_binding_once() {
+    fn listener_schema_initializes_http_websocket_discovery_and_automatic_binding_once() {
         let storage = Arc::new(Storage::default());
         let store = PeerStateStore::new(storage.clone());
         let first = store.hostConfig().unwrap().unwrap();
-        assert_eq!(first.bindAddress, "0.0.0.0:37195");
+        assert_eq!(first.bindAddress, "0.0.0.0:0");
         assert_eq!(
             first.transports,
             vec![PeerTransport::Http, PeerTransport::WebSocket]
         );
         assert!(first.discoveryEnabled);
-        assert_eq!(first.portMode, PeerHostPortMode::Fixed);
+        assert_eq!(first.portMode, PeerHostPortMode::Automatic);
         assert_eq!(
             store
                 .store(RUNTIME_LINK_ACCESS_HOST_CONFIG_PATH)
                 .schemaVersion()
                 .unwrap(),
-            3
+            4
         );
         let before = storage.0.lock().unwrap().clone();
         let second = PeerStateStore::new(storage.clone())
@@ -1377,6 +1489,112 @@ mod tests {
         assert_eq!(first.bindAddress, second.bindAddress);
         assert_eq!(first.updatedAt, second.updatedAt);
         assert_eq!(before, *storage.0.lock().unwrap());
+    }
+
+    /// Upgrades known old defaults once while preserving custom fixed listeners.
+    #[test]
+    fn listener_schema_migrates_legacy_defaults_without_overwriting_custom_bindings() {
+        for (address, transports, discovery, mode, migrate) in [
+            (
+                "0.0.0.0:37195",
+                vec![PeerTransport::Http, PeerTransport::WebSocket],
+                true,
+                PeerHostPortMode::Fixed,
+                true,
+            ),
+            (
+                "0.0.0.0:8765",
+                vec![PeerTransport::Serial, PeerTransport::Tcp],
+                true,
+                PeerHostPortMode::Fixed,
+                true,
+            ),
+            (
+                "0.0.0.0:8765",
+                vec![PeerTransport::Serial],
+                true,
+                PeerHostPortMode::Fixed,
+                true,
+            ),
+            (
+                "127.0.0.1:48123",
+                vec![PeerTransport::Http, PeerTransport::WebSocket],
+                true,
+                PeerHostPortMode::Fixed,
+                false,
+            ),
+            (
+                "0.0.0.0:37195",
+                vec![PeerTransport::Tcp],
+                true,
+                PeerHostPortMode::Fixed,
+                false,
+            ),
+            (
+                "0.0.0.0:37195",
+                vec![PeerTransport::Http, PeerTransport::WebSocket],
+                false,
+                PeerHostPortMode::Fixed,
+                false,
+            ),
+            (
+                "0.0.0.0:37195",
+                vec![PeerTransport::Http, PeerTransport::WebSocket],
+                true,
+                PeerHostPortMode::Automatic,
+                false,
+            ),
+        ] {
+            let storage = Arc::new(Storage::default());
+            let store = PeerStateStore::new(storage.clone());
+            let mut preferences = emptyPreferences();
+            writeHostConfigPreferences(
+                &mut preferences,
+                &PeerHostConfig {
+                    bindAddress: address.into(),
+                    transports: transports.clone(),
+                    discoveryEnabled: discovery,
+                    portMode: mode,
+                    updatedAt: 123,
+                },
+            )
+            .unwrap();
+            preferences.set(
+                &stringPreferencesKey(PREFERENCES_SCHEMA_VERSION_KEY_NAME),
+                3,
+            );
+            preferences.set(&stringPreferencesKey("extra"), "keep");
+            CoreNodeStateStore::newWithStorage(storage.clone(), RUNTIME_LINK_ACCESS_HOST_CONFIG_PATH)
+                .replace(preferences)
+                .unwrap();
+            let config = store.hostConfig().unwrap().unwrap();
+            assert_eq!(
+                config.bindAddress,
+                if migrate { "0.0.0.0:0" } else { address }
+            );
+            assert_eq!(
+                config.portMode,
+                if migrate {
+                    PeerHostPortMode::Automatic
+                } else {
+                    mode
+                }
+            );
+            assert_eq!(config.transports, transports);
+            assert_eq!(config.discoveryEnabled, discovery);
+            assert_eq!(config.updatedAt, 123);
+            assert_eq!(
+                store
+                    .preferences(RUNTIME_LINK_ACCESS_HOST_CONFIG_PATH)
+                    .unwrap()
+                    .get(&stringPreferencesKey("extra"))
+                    .unwrap(),
+                "keep"
+            );
+            let before = storage.0.lock().unwrap().clone();
+            store.hostConfig().unwrap();
+            assert_eq!(before, *storage.0.lock().unwrap());
+        }
     }
 
     /// Verifies simultaneous first reads share one persisted listener configuration.
@@ -1447,14 +1665,14 @@ mod tests {
                 .store(RUNTIME_LINK_ACCESS_HOST_CONFIG_PATH)
                 .schemaVersion()
                 .unwrap(),
-            3
+            4
         );
     }
 
     /// Verifies missing current-schema fields and unknown future versions fail unchanged.
     #[test]
     fn listener_schema_rejects_incomplete_current_and_newer_preferences() {
-        for version in [1, 2, 3, 4] {
+        for version in [1, 2, 3, 4, 5] {
             let storage = Arc::new(Storage::default());
             let mut preferences = emptyPreferences();
             preferences.set(
@@ -1648,6 +1866,26 @@ mod tests {
                 ["other"]
             );
         }
+    }
+
+    /// One malformed request must not prevent reading an unrelated request or displaying healthy rows.
+    #[test]
+    fn reading_one_request_does_not_decode_unrelated_corrupt_rows() {
+        use crate::NodeSpaceService::space_join::INBOUND;
+        let store = PeerStateStore::new(Arc::new(Storage::default()));
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Request { value: u32 }
+        store.putRecord(INBOUND, "healthy", &serde_json::json!({"value": 7})).unwrap();
+        store.putRecord(INBOUND, "broken", &serde_json::json!({"value": "invalid"})).unwrap();
+        assert_eq!(store.record::<Request>(INBOUND, "healthy").unwrap(), Some(Request { value: 7 }));
+        assert!(store.record::<Request>(INBOUND, "broken").unwrap_err().contains("broken"));
+        assert_eq!(store.record::<Request>(INBOUND, "missing").unwrap(), None);
+        let healthy = store.independentRecords::<Request>(INBOUND).unwrap();
+        assert_eq!(healthy.len(), 1);
+        assert_eq!(healthy["healthy"], Request { value: 7 });
+        assert!(store.records::<Request>(INBOUND).is_err());
+        store.putRecord(INBOUND, "broken", &serde_json::json!({"value": 8})).unwrap();
+        assert_eq!(store.independentRecords::<Request>(INBOUND).unwrap().len(), 2);
     }
 
     /// Validates every join record before changing any existing credential.

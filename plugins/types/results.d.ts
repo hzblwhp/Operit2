@@ -5,7 +5,7 @@ import type { Chat } from "./chat";
 import type { JsonObject } from "./core";
 import type { Models } from "./models";
 import type { Net } from "./network";
-import type { StorageKeyValueEntry, StoragePreferencesEdit, StoragePreferencesSnapshot, StorageSqlExecutionResult, StorageSqlRow, StorageValueEntry } from "./storage.generated";
+import type { StorageChangePage, StorageKeyValueEntry, StoragePreferencesEdit, StoragePreferencesSnapshot, StorageSqlExecutionResult, StorageSqlRow, StorageValueEntry } from "./storage.generated";
 import type { TerminalExecEvent } from "./system";
 import type { Theme } from "./theme";
 import type { Tts } from "./tts";
@@ -141,12 +141,12 @@ export interface UIActionResultData {
 /**
  * Identifies the command interpreter backing a terminal session.
  */
-export type TerminalType = "powershell" | "bash" | "shell";
+export type TerminalType = "powershell" | "bash" | "zsh" | "shell";
 
 /**
  * Identifies the concrete terminal implementation selected by a host.
  */
-export type TerminalImplementation = "native" | "proot" | "android-system" | "adb" | "shell" | "ish" | "qemu-vroot" | "v86";
+export type TerminalImplementation = "native" | "proot" | "android-system" | "adb" | "shell" | "arm64" | "qemu-vroot" | "v86";
 
 /**
  * Reports the start or an incremental chunk of a streamed chat-message response.
@@ -510,7 +510,7 @@ export interface FileApplyResultData {
 /**
  * Returns the concrete result fields of the selected Storage tool operation.
  */
-export type StorageRequestResultData = { op: "open"; handle: string; path: string; } | { op: "preferences_data"; snapshot: StoragePreferencesSnapshot; } | { op: "preferences_begin_edit"; edit: StoragePreferencesEdit; } | { op: "preferences_finish_edit"; snapshot: StoragePreferencesSnapshot; } | { op: "preferences_cancel_edit"; } | { op: "close"; } | { op: "query"; rows: StorageSqlRow[]; } | { op: "execute"; results: StorageSqlExecutionResult[]; } | { op: "transaction"; results: StorageSqlExecutionResult[]; } | { op: "define_table"; changed: boolean; } | { op: "get"; entry: StorageValueEntry | null; } | { op: "get_many"; entries: (StorageValueEntry | null)[]; } | { op: "list"; entries: StorageKeyValueEntry[]; } | { op: "commit"; version: string; };
+export type StorageRequestResultData = { op: "open"; handle: string; path: string; } | { op: "preferences_data"; snapshot: StoragePreferencesSnapshot; } | { op: "preferences_begin_edit"; edit: StoragePreferencesEdit; } | { op: "preferences_finish_edit"; snapshot: StoragePreferencesSnapshot; } | { op: "preferences_cancel_edit"; } | { op: "close"; } | { op: "query"; rows: StorageSqlRow[]; } | { op: "execute"; results: StorageSqlExecutionResult[]; } | { op: "transaction"; results: StorageSqlExecutionResult[]; } | { op: "define_table"; changed: boolean; } | { op: "get"; entry: StorageValueEntry | null; } | { op: "get_many"; entries: (StorageValueEntry | null)[]; } | { op: "list"; entries: StorageKeyValueEntry[]; } | { op: "changes"; page: StorageChangePage; } | { op: "commit"; version: string; };
 
 /**
  * Contains an HTTP response status, headers, cookies, media type, and decoded or Base64 body.

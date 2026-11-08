@@ -12,9 +12,11 @@ use operit_host_api::RuntimeStorageHost;
 
 mod audio_playback;
 mod bluetooth;
-mod filesystem;
 mod document_filesystem;
+mod filesystem;
 mod http;
+#[cfg(target_os = "android")]
+mod jni_thread;
 #[cfg(target_os = "android")]
 mod local_inference;
 #[cfg(target_os = "android")]
@@ -26,8 +28,13 @@ mod runtime_event_scheduler;
 mod runtime_storage;
 #[cfg(target_os = "android")]
 mod secret_store;
+#[cfg(target_os = "android")]
+mod service_discovery;
 mod system_operation;
 mod terminal;
+mod terminal_privilege;
+#[cfg(target_os = "android")]
+pub use terminal::androidPrivilegedPtyOperation;
 mod tts_playback;
 mod tts_synthesis;
 mod web_visit;
@@ -37,12 +44,18 @@ pub use bluetooth::AndroidBluetoothHost;
 pub use filesystem::AndroidFileSystemHost;
 pub use http::AndroidHttpHost;
 #[cfg(target_os = "android")]
+pub use jni_thread::attachCurrentThread;
+#[cfg(target_os = "android")]
 pub use local_inference::AndroidLocalInferenceHost;
 #[cfg(target_os = "android")]
 pub use logging::installAndroidLogSink;
 pub use managed_runtime::AndroidManagedRuntimeHost;
 pub use operit_host_native_common::NativeHostJavaScriptRuntimeHost as AndroidHostJavaScriptRuntimeHost;
 pub use operit_host_native_common::NativeHostRuntimeTaskSchedulerHost as AndroidHostRuntimeTaskSchedulerHost;
+#[cfg(target_os = "android")]
+pub use plugin_sdk_ipc::{
+    acceptAndroidPluginSdkPipes, setAndroidPluginSdkBridge, AndroidPluginSdkIpcHost,
+};
 #[cfg(target_os = "android")]
 pub use runtime_event_scheduler::{
     emitAndroidHostRuntimeEventSchedule, AndroidHostRuntimeEventSchedulerHost,
@@ -56,13 +69,63 @@ pub use tts_playback::{AndroidTtsPlaybackCommand, AndroidTtsPlaybackHost};
 pub use tts_synthesis::AndroidTtsSynthesisHost;
 pub use web_visit::AndroidWebVisitHost;
 #[cfg(target_os = "android")]
-pub use plugin_sdk_ipc::{AndroidPluginSdkIpcHost, setAndroidPluginSdkBridge, acceptAndroidPluginSdkPipes};
-#[cfg(target_os = "android")]
 mod plugin_sdk_ipc;
 
 /// Creates the Android-owned runtime host manager for explicit storage roots.
 #[cfg(target_os = "android")]
 pub fn createRuntimeHostManager(
+    runtimeRoot: PathBuf,
+    workspaceRoot: PathBuf,
+    webVisitHost: Arc<dyn operit_host_api::WebVisitHost>,
+    systemOperationHost: Arc<dyn operit_host_api::SystemOperationHost>,
+) -> HostManager {
+    let secrets = Arc::new(AndroidRuntimeStorageHost::new(
+        runtimeRoot.clone(),
+        workspaceRoot.clone(),
+    ));
+    createBaseRuntimeHostManager(
+        runtimeRoot,
+        workspaceRoot,
+        webVisitHost,
+        systemOperationHost,
+    )
+    .withHostSecretStore(secrets)
+    .withLocalInferenceHost(Arc::new(AndroidLocalInferenceHost::new()))
+    .withHostRuntimeEventSchedulerHost(Arc::new(AndroidHostRuntimeEventSchedulerHost::new()))
+    .withServiceDiscoveryHost(Arc::new(
+        operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::withNetworkLease(
+            service_discovery::acquireMulticastLease,
+        ),
+    ))
+    .withPluginSdkIpcHost(Arc::new(AndroidPluginSdkIpcHost::new()))
+}
+
+/// Creates the privileged Android Host composition without application-owned JNI registrations.
+#[cfg(target_os = "android")]
+pub fn createPrivilegedRuntimeHostManager(
+    runtimeRoot: PathBuf,
+    workspaceRoot: PathBuf,
+    secretRoot: PathBuf,
+    webVisitHost: Arc<dyn operit_host_api::WebVisitHost>,
+    systemOperationHost: Arc<dyn operit_host_api::SystemOperationHost>,
+) -> HostManager {
+    createBaseRuntimeHostManager(
+        runtimeRoot,
+        workspaceRoot,
+        webVisitHost,
+        systemOperationHost,
+    )
+    .withHostSecretStore(Arc::new(operit_host_native_common::NativeFileSecretStore(
+        secretRoot,
+    )))
+    .withHostRuntimeEventSchedulerHost(Arc::new(
+        operit_host_native_common::NativeHostRuntimeEventSchedulerHost::new(),
+    ))
+}
+
+/// Assembles Android capabilities shared by application and standalone module owners.
+#[cfg(target_os = "android")]
+fn createBaseRuntimeHostManager(
     runtimeRoot: PathBuf,
     workspaceRoot: PathBuf,
     webVisitHost: Arc<dyn operit_host_api::WebVisitHost>,
@@ -76,7 +139,6 @@ pub fn createRuntimeHostManager(
         ));
     let runtimeStorageHost = Arc::new(AndroidRuntimeStorageHost::new(runtimeRoot, workspaceRoot));
     let runtimeSqliteHost = runtimeStorageHost.clone();
-    let hostSecretStore = runtimeStorageHost.clone();
     let archiveStagingHost = Arc::new(operit_host_native_common::NativeArchiveStagingHost::new(
         runtimeStorageHost
             .runtimeRootDir()
@@ -91,17 +153,12 @@ pub fn createRuntimeHostManager(
         runtimeStorageHost,
         runtimeSqliteHost,
     )
-    .withHostSecretStore(hostSecretStore)
     .withWebSocketHost(Arc::new(AndroidHttpHost::new()))
     .withHttpServerHost(Arc::new(operit_host_native_common::NativeHttpServerHost))
     .withTcpHost(Arc::new(operit_host_native_common::NativeTcpHost))
     .withSerialPortHost(Arc::new(operit_host_native_common::NativeSerialPortHost))
     .withArchiveStagingHost(archiveStagingHost)
     .withRuntimeStorageWriteHost(runtimeStorageWriteHost)
-    .withLocalInferenceHost(Arc::new(AndroidLocalInferenceHost::new()))
-    .withHostRuntimeEventSchedulerHost(Arc::new(AndroidHostRuntimeEventSchedulerHost::new()))
     .withHostJavaScriptRuntimeHost(Arc::new(AndroidHostJavaScriptRuntimeHost::new()))
-    .withServiceDiscoveryHost(Arc::new(operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::default()))
     .withHostRuntimeTaskSchedulerHost(Arc::new(AndroidHostRuntimeTaskSchedulerHost::new()))
-    .withPluginSdkIpcHost(Arc::new(AndroidPluginSdkIpcHost::new()))
 }

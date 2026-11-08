@@ -37,6 +37,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1143,12 +1144,15 @@ pub struct BrowserSessionSnapshot {
     pub resultJson: String,
 }
 
+/// Browser session hosts answer from the owner application UI, so every call can
+/// wait for a remote round trip; implementations must not block the caller.
+#[async_trait(?Send)]
 pub trait BrowserSessionHost: Send + Sync {
     /// Lists interactive browser sessions owned by the host.
-    fn listBrowserSessions(&self) -> HostResult<Vec<BrowserSessionInfo>>;
+    async fn listBrowserSessions(&self) -> HostResult<Vec<BrowserSessionInfo>>;
 
     /// Creates an interactive browser session on the host.
-    fn createBrowserSession(
+    async fn createBrowserSession(
         &self,
         initialUrl: &str,
         userAgent: Option<&str>,
@@ -1156,7 +1160,7 @@ pub trait BrowserSessionHost: Send + Sync {
     ) -> HostResult<BrowserSessionInfo>;
 
     /// Updates host-owned browser session request metadata.
-    fn updateBrowserSession(
+    async fn updateBrowserSession(
         &self,
         sessionId: &str,
         userAgent: Option<&str>,
@@ -1164,16 +1168,16 @@ pub trait BrowserSessionHost: Send + Sync {
     ) -> HostResult<BrowserSessionInfo>;
 
     /// Submits a semantic browser command to the host session.
-    fn submitBrowserCommand(
+    async fn submitBrowserCommand(
         &self,
         command: BrowserSessionCommand,
     ) -> HostResult<BrowserSessionCommandResult>;
 
     /// Reads the latest host-owned browser session snapshot.
-    fn getBrowserSessionSnapshot(&self, sessionId: &str) -> HostResult<BrowserSessionSnapshot>;
+    async fn getBrowserSessionSnapshot(&self, sessionId: &str) -> HostResult<BrowserSessionSnapshot>;
 
     /// Closes a host-owned browser session.
-    fn closeBrowserSession(&self, sessionId: &str) -> HostResult<BrowserSessionCommandResult>;
+    async fn closeBrowserSession(&self, sessionId: &str) -> HostResult<BrowserSessionCommandResult>;
 }
 
 /// Selects the single source used by a Compose DSL file-picker request.
@@ -1590,6 +1594,8 @@ pub enum ManagedRuntimeProgram {
     Python,
     Uv,
     Pnpm,
+    /// Selects a caller-specified executable through the host's command resolver.
+    Command(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1624,6 +1630,11 @@ pub trait ManagedRuntimeProcess: Send {
 }
 
 pub trait ManagedRuntimeHost: Send + Sync {
+    /// Opens a resolved native path using an explicit desktop integration action.
+    fn openPath(&self, path: &str, action: RuntimePathAction) -> HostResult<()> {
+        let _ = (path, action);
+        Err(HostError::new("This host does not expose external path launch actions"))
+    }
     fn runtimeWorkspaceDir(&self) -> HostResult<String>;
     fn resolveRuntimeExecutable(
         &self,
@@ -1636,6 +1647,15 @@ pub trait ManagedRuntimeHost: Send + Sync {
     ) -> HostResult<Box<dyn ManagedRuntimeProcess>>;
     fn runRuntimeCommand(&self, request: RuntimeProcessRequest)
         -> HostResult<RuntimeCommandOutput>;
+}
+
+/// Platform-neutral intent for an external native path action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimePathAction {
+    Reveal,
+    Terminal,
+    /// Passes arguments followed by the resolved path to the named executable.
+    Application { program: String, args: Vec<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1800,6 +1820,18 @@ pub struct RuntimeStorageEntry {
 }
 
 pub trait RuntimeStorageHost: Send + Sync {
+    /// Opens a transaction journal in this storage namespace.
+    fn openTransactionDatabase(&self, _path: &str) -> HostResult<Box<dyn RuntimeSqliteConnection>> {
+        Err(HostError::new("This storage host does not provide a SQL transaction journal"))
+    }
+
+    /// Whether parsed preferences should remain cached. Constrained hosts may
+    /// reload node-local durable bytes on reads and release idle store state.
+    /// Concurrent handles still share a transaction; returned snapshots are immutable.
+    fn retainPreferencesCache(&self) -> bool { true }
+    /// Explicit terminal Space-application retention for bounded endpoint storage.
+    /// Cache eviction alone never authorizes deleting durable application history.
+    fn nodeLocalApplicationHistoryLimit(&self) -> Option<usize> { None }
     /// Returns the physical root used for runtime storage entries.
     fn runtimeRootDir(&self) -> Option<PathBuf>;
     /// Returns the physical root used for workspace storage entries.
@@ -1815,6 +1847,14 @@ pub trait RuntimeStorageHost: Send + Sync {
     }
     /// Writes bytes to a virtual runtime storage path.
     fn writeBytes(&self, path: &str, content: &[u8]) -> HostResult<()>;
+    /// Reads a file modification time as Unix microseconds without reading its contents.
+    fn modifiedAt(&self, _path: &str) -> HostResult<i64> {
+        Err(HostError::new("Runtime storage host does not expose file modification times"))
+    }
+    /// Restores the source file modification time after copying its bytes.
+    fn setModifiedAt(&self, _path: &str, _modifiedAt: i64) -> HostResult<()> {
+        Err(HostError::new("Runtime storage host cannot restore file modification times"))
+    }
     /// Publishes a complete private catalog without exposing a partially written file.
     /// Persistent hosts must flush data before publishing; unsupported hosts fail explicitly.
     fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> HostResult<()> {
@@ -2075,8 +2115,16 @@ impl PartialEq<Value> for HostJavaScriptValue {
 pub type HostJavaScriptCallback =
     Arc<dyn Fn(Vec<HostJavaScriptValue>) -> HostResult<Value> + Send + Sync + 'static>;
 
+/// Returns one binary payload with small structured metadata, without Base64 or byte arrays in JSON.
+pub type HostJavaScriptBinaryCallback = Arc<dyn Fn(Vec<Value>) -> HostResult<(Value, Vec<u8>)> + Send + Sync + 'static>;
+
 /// Owns one concrete JavaScript runtime created by the active platform host.
 pub trait HostJavaScriptRuntime {
+    /// Installs a synchronous binary resource reader returning { metadata, bytes: Uint8Array }.
+    fn registerHostJavaScriptBinaryFunction(&mut self, _name: &str, _callback: HostJavaScriptBinaryCallback) -> HostResult<()> {
+        Err(HostError::new("JavaScript binary resource bindings are unavailable"))
+    }
+
     /// Executes shared trusted bootstrap bytecode in this runtime's independent global scope.
     fn evaluateHostJavaScriptBootstrap(&mut self, source: &'static str) -> HostResult<()>;
 
@@ -2878,6 +2926,11 @@ pub trait ToastHost: Send + Sync {
     fn toast(&self, message: &str) -> HostResult<()>;
 }
 
+pub trait ClipboardHost: Send + Sync {
+    /// Replaces the system clipboard text and returns the stored text.
+    fn setClipboardText(&self, text: &str) -> HostResult<String>;
+}
+
 impl<F> ToastHost for F
 where
     F: Fn(&str) -> HostResult<()> + Send + Sync,
@@ -2886,6 +2939,26 @@ where
     fn toast(&self, message: &str) -> HostResult<()> {
         self(message)
     }
+}
+
+impl<F> ClipboardHost for F
+where
+    F: Fn(&str) -> HostResult<String> + Send + Sync,
+{
+    /// Invokes the frontend-owned clipboard writer.
+    fn setClipboardText(&self, text: &str) -> HostResult<String> {
+        self(text)
+    }
+}
+
+/// Owns application-independent floating surfaces requested by authenticated plugins.
+pub trait FloatingWindowHost: Send + Sync {
+    fn command(&self, request: Value) -> HostResult<Value>;
+}
+
+impl<F> FloatingWindowHost for F
+where F: Fn(Value) -> HostResult<Value> + Send + Sync {
+    fn command(&self, request: Value) -> HostResult<Value> { self(request) }
 }
 
 pub trait SystemOperationHost: Send + Sync {
@@ -2927,6 +3000,14 @@ pub trait SystemOperationHost: Send + Sync {
     ) -> HostResult<String>;
 }
 
+/// Owns a sequential append handle for a file managed exclusively by its caller.
+pub trait FileAppendHandle: Send {
+    /// Returns the initial length plus completed appends; discard the handle after an append error.
+    fn byteLength(&self) -> u64;
+    /// Submits all bytes to the file system before returning, without retaining a user-space buffer.
+    fn append(&mut self, content: &[u8]) -> HostResult<()>;
+}
+
 pub trait FileSystemHost: Send + Sync {
     fn envLabel(&self) -> &str;
     fn environmentDescriptor(&self) -> HostEnvironmentDescriptor;
@@ -2935,8 +3016,29 @@ pub trait FileSystemHost: Send + Sync {
     fn readFile(&self, path: &str) -> HostResult<String>;
     fn readFileWithLimit(&self, path: &str, maxBytes: usize) -> HostResult<String>;
     fn readFileBytes(&self, path: &str) -> HostResult<Vec<u8>>;
+    /// Reads one bounded byte range without materializing the complete file.
+    /// Streaming hosts must override this; unsupported hosts fail explicitly.
+    fn readFileBytesRange(&self, path: &str, offset: u64, length: usize) -> HostResult<Vec<u8>> {
+        let _ = (path, offset, length);
+        Err(HostError::new(
+            "File system host does not expose bounded range reads",
+        ))
+    }
     fn writeFile(&self, path: &str, content: &str, append: bool) -> HostResult<()>;
     fn writeFileBytes(&self, path: &str, content: &[u8]) -> HostResult<()>;
+    /// Opens an existing file for repeated appends, creating it when absent.
+    /// Callers must drop the handle before truncating, moving or deleting the file.
+    fn openAppendFile(&self, _path: &str) -> HostResult<Box<dyn FileAppendHandle>> {
+        Err(HostError::new("File system host does not expose append handles"))
+    }
+    /// Appends bytes to a binary file, creating it when missing.
+    /// Streaming hosts must override this; unsupported hosts fail explicitly.
+    fn appendFileBytes(&self, path: &str, content: &[u8]) -> HostResult<()> {
+        let _ = (path, content);
+        Err(HostError::new(
+            "File system host does not expose binary appends",
+        ))
+    }
     fn deleteFile(&self, path: &str, recursive: bool) -> HostResult<()>;
     fn fileExists(&self, path: &str) -> HostResult<FileExistence>;
     fn moveFile(&self, source: &str, destination: &str) -> HostResult<()>;

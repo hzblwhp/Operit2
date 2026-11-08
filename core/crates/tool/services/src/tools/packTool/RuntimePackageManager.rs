@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use crate::runtime_support::{RuntimePluginAsset, ToolRuntimeSupport};
 use crate::tools::condition::ConditionEvaluator::{ConditionEvaluator, ConditionValue};
 use crate::tools::mcp::MCPManager::MCPManager;
+use crate::tools::a2a::A2ARepository::is_a2a_package;
 use crate::tools::mcp::MCPPackage::MCPPackage;
 use crate::tools::mcp::MCPServerConfig::MCPServerConfig;
 use crate::tools::mcp_runtime::MCPLocalServer::MCPLocalServer;
@@ -67,8 +68,8 @@ use operit_plugin_sdk::toolpkg::ToolPkgPackageService::{
     ToolPkgPackageHost, ToolPkgPackageService,
 };
 use operit_plugin_sdk::toolpkg::ToolPkgParser::{
-    ToolPkgArchiveParser, ToolPkgContainerRuntime, ToolPkgDependencyIssue, ToolPkgLoadResult,
-    ToolPkgManifestRequirement, ToolPkgMarketOrigin, ToolPkgResourceRuntime, ToolPkgSourceType,
+    ToolPkgArchiveParser, ToolPkgContainerRuntime, ToolPkgLoadResult,
+    ToolPkgMarketOrigin, ToolPkgResourceRuntime, ToolPkgSourceType,
     ToolPkgSubpackageRuntime,
 };
 use operit_plugin_sdk::toolpkg::ToolPkgProtection;
@@ -238,6 +239,11 @@ pub struct ToolPkgLoadIssue {
     pub code: String,
     pub message: String,
     pub packageKind: String,
+}
+
+struct FailedPackageDeletionTarget {
+    owner: Option<String>,
+    sourcePath: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -439,6 +445,29 @@ impl RuntimePackageManager {
         methodName: &str,
         payload: serde_json::Value,
     ) -> impl Future<Output = Result<serde_json::Value, String>> + 'static {
+        self.invokeToolPkgPublicApiWithDeadline(packageName, methodName, payload, None)
+    }
+
+    /// Calls a public API with an engine-enforced deadline covering synchronous and asynchronous script execution.
+    #[allow(non_snake_case)]
+    pub fn invokeToolPkgPublicApiWithTimeoutMillis(
+        &self,
+        packageName: &str,
+        methodName: &str,
+        payload: serde_json::Value,
+        timeoutMillis: u64,
+    ) -> impl Future<Output = Result<serde_json::Value, String>> + 'static {
+        self.invokeToolPkgPublicApiWithDeadline(packageName, methodName, payload, Some(timeoutMillis))
+    }
+
+    #[allow(non_snake_case)]
+    fn invokeToolPkgPublicApiWithDeadline(
+        &self,
+        packageName: &str,
+        methodName: &str,
+        payload: serde_json::Value,
+        timeoutMillis: Option<u64>,
+    ) -> impl Future<Output = Result<serde_json::Value, String>> + 'static {
         let startedAt = currentTimeMillis();
         let manager = self.toolPkgManager().clone();
         let reader = self.resourceReader();
@@ -463,8 +492,7 @@ impl RuntimePackageManager {
                 payload,
                 callerPackage: "host".to_string(),
             };
-            let serde_json::Value::Object(event) =
-                serde_json::to_value(event).map_err(|error| error.to_string())?
+            let serde_json::Value::Object(event) = serde_json::to_value(event).map_err(|error| error.to_string())?
             else {
                 return Err("ToolPkg public API event must serialize to an object".to_string());
             };
@@ -508,24 +536,45 @@ impl RuntimePackageManager {
                 );
             }
             let executeAt = currentTimeMillis();
-            let result = engine
-                .execute_script_function_async(
-                    script,
-                    declaration.function.clone(),
-                    params,
-                    BTreeMap::new(),
-                    None,
-                    true,
-                )
-                .await;
+            let result = match timeoutMillis {
+                Some(timeout) => {
+                    engine
+                        .execute_script_function_with_timeout_millis(
+                            &script,
+                            &declaration.function,
+                            &params,
+                            &BTreeMap::new(),
+                            None,
+                            true,
+                            timeout,
+                        )
+                        .await
+                }
+                None => {
+                    engine
+                        .execute_script_function_async(
+                            script,
+                            declaration.function.clone(),
+                            params,
+                            BTreeMap::new(),
+                            None,
+                            true,
+                        )
+                        .await
+                }
+            };
             let completedAt = currentTimeMillis();
             AppLogger::v_with_level(
                 "ToolPkgTiming",
                 &format!(
                     "kind=public_api package={} function={} api={} prepareMs={} executeMs={} totalMs={} success={}",
-                    runtime.packageName, declaration.function, apiName,
-                    executeAt.saturating_sub(startedAt), completedAt.saturating_sub(executeAt),
-                    completedAt.saturating_sub(startedAt), result.is_ok(),
+                    runtime.packageName,
+                    declaration.function,
+                    apiName,
+                    executeAt.saturating_sub(startedAt),
+                    completedAt.saturating_sub(executeAt),
+                    completedAt.saturating_sub(startedAt),
+                    result.is_ok(),
                 ),
                 operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
@@ -1104,6 +1153,20 @@ impl RuntimePackageManager {
                 enabledPackageNames.insert(child.packageName.clone());
             }
         }
+        if let Ok(repository) = crate::tools::a2a::A2ARepository::A2ARepository::new(self.context.as_ref().clone()) {
+            if let Ok(records) = repository.records() {
+                for record in records {
+                    let name = crate::tools::a2a::A2ARepository::package_name(&record.id);
+                    if availablePackages.get(&name).is_some_and(|package| is_a2a_package(package)) {
+                        if repository.config(&record.id).is_ok_and(|config| !config.disabled) {
+                            enabledPackageNames.insert(name);
+                        } else {
+                            enabledPackageNames.remove(&name);
+                        }
+                    }
+                }
+            }
+        }
         enabledPackageNames.into_iter().collect()
     }
 
@@ -1142,6 +1205,13 @@ impl RuntimePackageManager {
         let normalizedPackageName = self.normalizePackageName(packageName);
         if normalizedPackageName.trim().is_empty() {
             return "Package name cannot be empty".to_string();
+        }
+        if self.availablePackages().get(&normalizedPackageName).is_some_and(|package| is_a2a_package(package)) {
+            let id = normalizedPackageName.strip_prefix(crate::tools::a2a::A2ARepository::PACKAGE_PREFIX).expect("A2A package prefix");
+            return match crate::tools::a2a::A2ARepository::A2ARepository::new(self.context.as_ref().clone()).and_then(|repository| repository.set_enabled(id, true)) {
+                Ok(()) => format!("Enabled A2A package: {normalizedPackageName}"),
+                Err(error) => error,
+            };
         }
 
         if !self
@@ -1256,6 +1326,17 @@ impl RuntimePackageManager {
     #[operit_route_macros::operit_plugin_sdk_expose]
     pub fn disablePackage(&mut self, packageName: &str) -> String {
         let normalizedPackageName = self.normalizePackageName(packageName);
+        if self.availablePackages().get(&normalizedPackageName).is_some_and(|package| is_a2a_package(package)) {
+            let id = normalizedPackageName.strip_prefix(crate::tools::a2a::A2ARepository::PACKAGE_PREFIX).expect("A2A package prefix");
+            match crate::tools::a2a::A2ARepository::A2ARepository::new(self.context.as_ref().clone()).and_then(|repository| repository.set_enabled(id, false)) {
+                Ok(()) => {
+                    self.pluginPackageManager.deactivatePackage(&normalizedPackageName);
+                    self.unregisterPackageTools(&normalizedPackageName);
+                    return format!("Disabled A2A package: {normalizedPackageName}");
+                }
+                Err(error) => return error,
+            }
+        }
         let mut enabledPackageNames = BTreeSet::from_iter(self.getEnabledPackageNames());
         let mut subpackageStates = self.getToolPkgSubpackageStatesInternal();
         self.pluginPackageManager
@@ -1353,6 +1434,12 @@ impl RuntimePackageManager {
     #[allow(non_snake_case)]
     /// Removes custom code from built-in identities or deletes the selected package installation.
     pub fn deletePackage(&mut self, packageName: &str) -> bool {
+        if self.availablePackages().get(packageName).is_some_and(|package| is_a2a_package(package)) {
+            let id = packageName.strip_prefix(crate::tools::a2a::A2ARepository::PACKAGE_PREFIX).expect("A2A package prefix");
+            if crate::tools::a2a::A2ARepository::A2ARepository::new(self.context.as_ref().clone()).and_then(|repository| repository.delete(id)).is_err() { return false; }
+            self.reloadA2APackages();
+            return true;
+        }
         let name = match self
             .toolPkgManager()
             .resolveToolPkgSubpackageRuntimeInternal(packageName)
@@ -1396,6 +1483,62 @@ impl RuntimePackageManager {
         true
     }
 
+    /// Resolves installed records and files that a load failure can actually remove.
+    #[allow(non_snake_case)]
+    fn failedPackageDeletionTarget(
+        &self,
+        issue: &ToolPkgLoadIssue,
+    ) -> Result<FailedPackageDeletionTarget, String> {
+        let source = Path::new(&issue.sourcePath);
+        let installedScope = ["device", "space"].into_iter().find(|scope| {
+            let root = ExtensionStore::root("package", scope).expect("valid package scope");
+            source.parent() == Some(self.storePaths.runtime_storage_path(&root).as_path())
+        });
+        let records = ExtensionStore::default().records("package")?;
+        // Even an unreadable archive can still have a registered installation owner.
+        let owner = if issue.packageName.is_none() {
+            records
+                .iter()
+                .find(|record| {
+                    Some(record.scope.as_str()) == installedScope
+                        && source.file_name().and_then(|name| name.to_str())
+                            == Some(record.sourceName.as_str())
+                })
+                .map(|record| record.id.clone())
+        } else {
+            issue.packageName.clone()
+        };
+        let sourceOnly = issue.code == "duplicate_package"
+            && owner
+                .as_ref()
+                .is_some_and(|name| self.availablePackages().contains_key(name));
+        let owner = owner.filter(|name| {
+            !sourceOnly && records.iter().any(|record| record.id == *name)
+        });
+        // Parse failures may have no identity or installation record. Only remove a file
+        // directly inside an installation directory, never an asset or a scan directory.
+        let sourcePath = if installedScope.is_some() {
+            let info = self
+                .fileSystemHost
+                .fileExists(&issue.sourcePath)
+                .map_err(|error| error.to_string())?;
+            (info.exists && !info.isDirectory).then(|| issue.sourcePath.clone())
+        } else {
+            None
+        };
+        Ok(FailedPackageDeletionTarget { owner, sourcePath })
+    }
+
+    /// Reports deletion eligibility using the same installed targets as the delete operation.
+    #[allow(non_snake_case)]
+    pub fn canDeleteToolPkgLoadIssue(&self, issue: &ToolPkgLoadIssue) -> Result<bool, String> {
+        if issue.packageKind == "a2a" {
+            return Ok(ExtensionStore::default().records("a2a")?.iter().any(|record| Some(&record.id) == issue.packageName.as_ref()));
+        }
+        let target = self.failedPackageDeletionTarget(issue)?;
+        Ok(target.owner.is_some() || target.sourcePath.is_some())
+    }
+
     /// Deletes the persisted source of a current load failure without requiring a loaded package.
     #[allow(non_snake_case)]
     pub fn deleteToolPkgLoadIssue(&mut self, issue: ToolPkgLoadIssue) -> Result<(), String> {
@@ -1409,45 +1552,26 @@ impl RuntimePackageManager {
                     && current.packageKind == issue.packageKind
             })
             .ok_or("Package load issue is no longer present; refresh the package list")?;
-
-        let source = Path::new(&issue.sourcePath);
-        let installedScope = ["device", "space"].into_iter().find(|scope| {
-            let root = ExtensionStore::root("package", scope).expect("valid package scope");
-            source.parent() == Some(self.storePaths.runtime_storage_path(&root).as_path())
-        });
-        // Even an unreadable archive can still have a registered installation owner.
-        let owner = if issue.packageName.is_none() {
-            ExtensionStore::default()
-                .records("package")?
-                .into_iter()
-                .find(|record| {
-                    Some(record.scope.as_str()) == installedScope
-                        && source.file_name().and_then(|name| name.to_str())
-                            == Some(record.sourceName.as_str())
-                })
-                .map(|record| record.id)
-        } else {
-            issue.packageName.clone()
-        };
-        let sourceOnly = issue.code == "duplicate_package"
-            && owner
-                .as_ref()
-                .is_some_and(|name| self.availablePackages().contains_key(name));
+        if issue.packageKind == "a2a" {
+            let id = issue.packageName.as_deref().ok_or("A2A load issue has no installation identity")?;
+            crate::tools::a2a::A2ARepository::A2ARepository::new(self.context.as_ref().clone())?.delete(id)?;
+            self.reloadA2APackages();
+            return Ok(());
+        }
+        let target = self.failedPackageDeletionTarget(&issue)?;
         let mut removed = false;
-        if let Some(name) = owner.as_deref().filter(|_| !sourceOnly) {
+        if let Some(name) = target.owner.as_deref() {
             self.disablePackage(name);
             removed = ExtensionStore::default().deleteFailedPackageInstallations(name)?;
         }
-        // Parse failures may have no identity or installation record. Only remove a file
-        // directly inside an installation directory, never an asset or a scan directory.
-        if installedScope.is_some() {
+        if let Some(sourcePath) = target.sourcePath {
             let info = self
                 .fileSystemHost
-                .fileExists(&issue.sourcePath)
+                .fileExists(&sourcePath)
                 .map_err(|error| error.to_string())?;
             if info.exists && !info.isDirectory {
                 self.fileSystemHost
-                    .deleteFile(&issue.sourcePath, false)
+                    .deleteFile(&sourcePath, false)
                     .map_err(|error| error.to_string())?;
                 removed = true;
             }
@@ -1545,98 +1669,16 @@ impl RuntimePackageManager {
     }
 
     #[allow(non_snake_case)]
-    /// Returns ToolPkg container runtimes that are currently enabled.
+    /// Returns executable ToolPkg containers in prerequisite order.
     pub fn getEnabledToolPkgContainerRuntimes(&self) -> Vec<ToolPkgContainerRuntime> {
-        let runtimes = self
-            .toolPkgManager()
-            .getEnabledToolPkgContainerRuntimes(&self.getEnabledPackageNames());
-        self.orderToolPkgRuntimes(runtimes)
+        self.toolPkgManager().getEnabledToolPkgContainerRuntimes(&self.getEnabledPackageNames())
     }
 
     #[allow(non_snake_case)]
-    /// Orders Space containers before device containers, preserving user order within each scope.
-    fn orderToolPkgRuntimes(
-        &self,
-        mut runtimes: Vec<ToolPkgContainerRuntime>,
-    ) -> Vec<ToolPkgContainerRuntime> {
-        let ranks = self.decodeToolPkgContainerOrderFromPrefs().into_iter()
-            .enumerate().map(|(rank, name)| (name, rank)).collect::<BTreeMap<_, _>>();
-        runtimes.sort_by_key(|runtime| *ranks.get(&runtime.packageName)
-            .expect("Registered ToolPkg container must have an owner rank"));
-        runtimes
-    }
-
-    #[allow(non_snake_case)]
-    /// Returns all registered ToolPkg container runtimes.
+    /// Returns the dependency-ordered catalog with diagnostics for blocked containers.
     #[operit_route_macros::operit_plugin_sdk_expose]
     pub fn getToolPkgContainerRuntimes(&self) -> Vec<ToolPkgContainerRuntime> {
-        let enabledPackageNames = self.getEnabledPackageNameSetInternal();
-        let order = self
-            .getToolPkgContainerOrder()
-            .into_iter()
-            .enumerate()
-            .map(|(index, packageName)| (packageName, index))
-            .collect::<BTreeMap<_, _>>();
-        let runtimes = self.orderToolPkgRuntimes(self.toolPkgManager().getToolPkgContainerRuntimes());
-        runtimes
-            .into_iter()
-            .map(|runtime| self.withToolPkgDependencyIssues(runtime, &enabledPackageNames, &order))
-            .collect()
-    }
-
-    #[allow(non_snake_case)]
-    /// Returns the same scope and user order used for plugin execution.
-    #[operit_route_macros::operit_plugin_sdk_expose]
-    pub fn getToolPkgContainerOrder(&self) -> Vec<String> {
-        self.orderToolPkgRuntimes(self.toolPkgManager().getToolPkgContainerRuntimes())
-            .into_iter().map(|runtime| runtime.packageName).collect()
-    }
-
-    #[allow(non_snake_case)]
-    /// Persists independent user ranks for Space and device containers.
-    #[operit_route_macros::operit_plugin_sdk_expose]
-    pub fn setToolPkgContainerOrder(
-        &self,
-        packageNames: Vec<String>,
-    ) -> Result<(), PreferencesDataStoreError> {
-        let installed = self
-            .toolPkgManager()
-            .getToolPkgContainerRuntimes()
-            .into_iter()
-            .map(|runtime| runtime.packageName)
-            .collect::<BTreeSet<_>>();
-        let mut ordered = Vec::new();
-        let mut seen = BTreeSet::new();
-        for packageName in packageNames {
-            let normalized = self.normalizePackageName(&packageName);
-            if installed.contains(&normalized) && seen.insert(normalized.clone()) {
-                ordered.push(normalized);
-            }
-        }
-        for packageName in installed {
-            if seen.insert(packageName.clone()) {
-                ordered.push(packageName);
-            }
-        }
-        let result = (|| -> Result<(), PreferencesDataStoreError> {
-            let mut ranks = BTreeMap::from([("space", 0usize), ("device", 0usize)]);
-            for name in &ordered {
-                let mut record = ExtensionStore::default()
-                    .record("package", name)
-                    .map_err(PreferencesDataStoreError::Message)?;
-                let rank = ranks.get_mut(record.scope.as_str())
-                    .expect("Registered package must have a valid scope");
-                record.settings["order"] = serde_json::json!(*rank);
-                *rank += 1;
-                self.writeScopeSettings(name, record.settings)
-                    .map_err(PreferencesDataStoreError::Message)?;
-            }
-            Ok(())
-        })();
-        if result.is_ok() {
-            self.notifyToolPkgRuntimeChangeListeners();
-        }
-        result
+        self.toolPkgManager().resolveToolPkgDependencies(&self.getEnabledPackageNames())
     }
 
     #[allow(non_snake_case)]
@@ -1705,6 +1747,7 @@ impl RuntimePackageManager {
                         dialog: item.dialog.map(|dialog| {
                             operit_plugin_sdk::toolpkg::ToolPkgPackageModels::ToolPkgChatMessageMenuDialog {
                                 screen: dialog.screen,
+                                screenExport: dialog.screenExport,
                                 title: dialog.title.resolve(useEnglish),
                             }
                         }),
@@ -2568,8 +2611,43 @@ impl RuntimePackageManager {
         let assetSnapshot = self.scanBuiltInPackageAssets();
         let mergedSnapshot = self.scanExternalPackages(&assetSnapshot);
         self.applyPackageScanSnapshot(mergedSnapshot);
+        self.reloadA2APackages();
         self.notifyToolPkgRuntimeChangeListeners();
         self.packageRegistryReadiness.complete_scan();
+    }
+
+    /// Projects A2A installations into the same package catalog used by activation and tool search.
+    pub fn reloadA2APackages(&mut self) {
+        Arc::make_mut(&mut self.manualToolPkgLoadIssues).retain(|issue| issue.packageKind != "a2a");
+        let removed = self.availablePackages().values().filter(|package| is_a2a_package(package))
+            .map(|package| package.name.clone()).collect::<Vec<_>>();
+        for name in removed {
+            self.availablePackagesMut().remove(&name);
+            self.pluginPackageManager.deactivatePackage(&name);
+            self.unregisterPackageTools(&name);
+        }
+        let loaded = (|| -> Result<(), String> {
+            let repository = crate::tools::a2a::A2ARepository::A2ARepository::new(self.context.as_ref().clone())?;
+            for record in repository.records()? {
+                let config = match repository.config(&record.id) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        self.recordManualToolPkgLoadIssue(&record.id, Some(&record.id), "a2a_load_failed", &error, "a2a");
+                        continue;
+                    }
+                };
+                let package = crate::tools::a2a::A2ARepository::tool_package(&record.id, &config);
+                if self.availablePackages().contains_key(&package.name) || self.isRegisteredMCPServer(&package.name) {
+                    self.recordManualToolPkgLoadIssue(&record.id, Some(&record.id), "a2a_load_failed", "A2A package name conflicts with another installed package", "a2a");
+                    continue;
+                }
+                self.availablePackagesMut().insert(package.name.clone(), package);
+            }
+            Ok(())
+        })();
+        if let Err(error) = loaded {
+            self.recordManualToolPkgLoadIssue("a2a", None, "a2a_load_failed", &error, "a2a");
+        }
     }
 
     #[allow(non_snake_case)]
@@ -2617,6 +2695,7 @@ impl RuntimePackageManager {
 
         for (packageName, toolPackage) in self.pluginPackageManager.availablePackages() {
             if toolPackage.is_built_in
+                || is_a2a_package(&toolPackage)
                 || self.toolPkgManager().hasSubpackage(&packageName)
                 || self.toolPkgManager().isToolPkgContainer(&packageName)
             {
@@ -3361,6 +3440,12 @@ impl RuntimePackageManager {
 
     /// Moves the parent installation and all child-package state to the selected scope.
     pub fn setPackageScope(&mut self, packageName: &str, scope: &str) -> Result<(), String> {
+        if self.availablePackages().get(packageName).is_some_and(|package| is_a2a_package(package)) {
+            let id = packageName.strip_prefix(crate::tools::a2a::A2ARepository::PACKAGE_PREFIX).expect("A2A package prefix");
+            ExtensionStore::default().moveScope("a2a", id, scope)?;
+            self.reloadA2APackages();
+            return Ok(());
+        }
         let name = match self
             .toolPkgManager()
             .resolveToolPkgSubpackageRuntimeInternal(packageName)
@@ -4603,6 +4688,11 @@ impl RuntimePackageManager {
     }
 
     #[allow(non_snake_case)]
+    /// Loads a declared module while preserving enabled-container ownership checks.
+    pub fn loadToolPkgWasmModule(&self, target: &str, moduleId: &str) -> Result<operit_plugin_sdk::javascript::JsToolPkgWasmModule, String> {
+        ToolPkgPackageService::new(self).loadToolPkgWasmModule(target, moduleId, true)
+    }
+
     /// Calls one declared ToolPkg WASM export.
     pub fn callToolPkgWasm(
         &self,
@@ -5014,125 +5104,6 @@ impl RuntimePackageManager {
             names.extend(values);
         }
         self.normalizeEnabledPackageNames(&names)
-    }
-
-    #[allow(non_snake_case)]
-    /// Reads the persisted ToolPkg container order.
-    fn decodeToolPkgContainerOrderFromPrefs(&self) -> Vec<String> {
-        let mut records = self.scopeRecords();
-        records.sort_by_key(|record| {
-            (
-                record.scope != "space",
-                record.settings["order"]
-                    .as_u64()
-                    .expect("Registered package rank must be an integer"),
-                record.id.clone(),
-            )
-        });
-        records.into_iter().map(|record| record.id).collect()
-    }
-
-    #[allow(non_snake_case)]
-    /// Calculates prerequisite issues for one ToolPkg runtime from installed package state.
-    fn withToolPkgDependencyIssues(
-        &self,
-        mut runtime: ToolPkgContainerRuntime,
-        enabledPackageNames: &BTreeSet<String>,
-        order: &BTreeMap<String, usize>,
-    ) -> ToolPkgContainerRuntime {
-        runtime.dependencyIssues = runtime
-            .requires
-            .iter()
-            .filter_map(|requirement| {
-                self.toolPkgDependencyIssue(
-                    &runtime.packageName,
-                    requirement,
-                    enabledPackageNames,
-                    order,
-                )
-            })
-            .collect();
-        runtime
-    }
-
-    #[allow(non_snake_case)]
-    /// Resolves one manifest prerequisite against installed and enabled ToolPkg containers.
-    fn toolPkgDependencyIssue(
-        &self,
-        packageName: &str,
-        requirement: &ToolPkgManifestRequirement,
-        enabledPackageNames: &BTreeSet<String>,
-        order: &BTreeMap<String, usize>,
-    ) -> Option<ToolPkgDependencyIssue> {
-        let dependencyId = self.normalizePackageName(&requirement.id);
-        let dependency = self
-            .toolPkgManager()
-            .getToolPkgContainerRuntime(&dependencyId);
-        let Some(dependency) = dependency else {
-            return Some(ToolPkgDependencyIssue {
-                id: dependencyId,
-                code: "missing".to_string(),
-                requiredMinVersion: requirement.minVersion.clone(),
-                requiredMaxVersion: requirement.maxVersion.clone(),
-                installedVersion: None,
-                enabled: false,
-            });
-        };
-        let versionCompatible = requirement.minVersion.as_ref().map_or(true, |minimum| {
-            operit_util::GithubReleaseUtil::GithubReleaseUtil::compareVersions(
-                &dependency.version,
-                minimum,
-            )
-            .map(|order| order >= 0)
-            .unwrap_or(false)
-        }) && requirement.maxVersion.as_ref().map_or(true, |maximum| {
-            operit_util::GithubReleaseUtil::GithubReleaseUtil::compareVersions(
-                &dependency.version,
-                maximum,
-            )
-            .map(|order| order <= 0)
-            .unwrap_or(false)
-        });
-        let enabled = enabledPackageNames.contains(&dependencyId);
-        if !versionCompatible {
-            return Some(ToolPkgDependencyIssue {
-                id: dependencyId,
-                code: "version_incompatible".to_string(),
-                requiredMinVersion: requirement.minVersion.clone(),
-                requiredMaxVersion: requirement.maxVersion.clone(),
-                installedVersion: Some(dependency.version),
-                enabled,
-            });
-        }
-        if !enabled {
-            return Some(ToolPkgDependencyIssue {
-                id: dependencyId,
-                code: "disabled".to_string(),
-                requiredMinVersion: requirement.minVersion.clone(),
-                requiredMaxVersion: requirement.maxVersion.clone(),
-                installedVersion: Some(dependency.version),
-                enabled,
-            });
-        }
-        let packageOrder = order
-            .get(packageName)
-            .copied()
-            .expect("registered ToolPkg container must have a persisted order");
-        let dependencyOrder = order
-            .get(&dependencyId)
-            .copied()
-            .expect("registered ToolPkg prerequisite must have a persisted order");
-        if dependencyOrder > packageOrder {
-            return Some(ToolPkgDependencyIssue {
-                id: dependencyId,
-                code: "load_order".to_string(),
-                requiredMinVersion: requirement.minVersion.clone(),
-                requiredMaxVersion: requirement.maxVersion.clone(),
-                installedVersion: Some(dependency.version),
-                enabled,
-            });
-        }
-        None
     }
 
     #[allow(non_snake_case)]

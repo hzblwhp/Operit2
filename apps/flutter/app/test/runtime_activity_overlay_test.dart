@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:operit2/core/bridge/OperitRuntimeBridge.dart';
 import 'package:operit2/core/link/CoreLinkCodec.dart';
 import 'package:operit2/core/link/CoreLinkProtocol.dart';
+import 'package:operit2/core/logging/ClientLogger.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyClients.g.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart' as core;
 import 'package:operit2/data/preferences/UserPreferencesManager.dart';
@@ -16,6 +17,7 @@ class _Bridge extends OperitRuntimeBridge {
   final events = StreamController<CoreEvent>.broadcast();
   final calls = <String>[];
   final watches = <String>[];
+  int spaceFailures = 0;
 
   void emit(String property, Object? value) => events.add(
     CoreEvent.raw(
@@ -33,6 +35,14 @@ class _Bridge extends OperitRuntimeBridge {
   @override
   Stream<CoreEvent> watchStream(CoreWatchRequest request) {
     watches.add(request.propertyName);
+    if (request.propertyName == 'deviceSpaceSnapshotFlow' &&
+        spaceFailures > 0) {
+      spaceFailures--;
+      return Stream<CoreEvent>.error(
+        StateError('Device space connection record is empty'),
+        StackTrace.empty,
+      );
+    }
     return events.stream.where((e) => e.propertyName == request.propertyName);
   }
 
@@ -55,29 +65,41 @@ core.SpaceSyncProgress progress({
   core.SpaceSyncStage stage = core.SpaceSyncStage.records,
   int fileBytes = 0,
   int fileSize = 0,
+  int completedRecords = 1200,
+  int? totalRecords,
+  int pendingRecords = 0,
+  String? error,
+  String peer = 'tablet',
 }) {
   final now = DateTime.now().millisecondsSinceEpoch;
   return core.SpaceSyncProgress(
     spaceId: 'space',
-    peerNodeId: 'tablet',
+    peerNodeId: peer,
     startedAt: now - 10000,
     updatedAt: now,
     status: status,
     stage: stage,
     exchangedRecords: 1200,
+    completedRecords: completedRecords,
+    totalRecords: totalRecords,
+    pendingRecords: pendingRecords,
     transferredBytes: 2097152,
     fileBytes: fileBytes,
     fileSize: fileSize,
     retryAt: status == core.SpaceSyncStatus.waiting ? now + 2000 : null,
-    error: status == core.SpaceSyncStatus.waiting ? 'offline' : null,
+    error: error,
   );
 }
 
 void main() {
+  setUpAll(ClientLogger.initialize);
   late _Bridge bridge;
-  Future<void> mount(WidgetTester tester) async {
-    bridge = _Bridge();
-    addTearDown(bridge.events.close);
+  Future<void> mount(WidgetTester tester, {int spaceFailures = 0}) async {
+    bridge = _Bridge()..spaceFailures = spaceFailures;
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await bridge.events.close();
+    });
     tester.binding.platformDispatcher.localesTestValue = const [Locale('zh')];
     addTearDown(tester.binding.platformDispatcher.clearLocalesTestValue);
     await tester.pumpWidget(
@@ -129,6 +151,76 @@ void main() {
     await tester.pump();
   }
 
+  testWidgets(
+    'failed space watch retries without becoming an unhandled error',
+    (tester) async {
+      await mount(tester, spaceFailures: 1);
+      expect(tester.takeException(), isNull);
+      expect(
+        bridge.watches.where((name) => name == 'deviceSpaceSnapshotFlow'),
+        hasLength(1),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(
+        bridge.watches.where((name) => name == 'deviceSpaceSnapshotFlow'),
+        hasLength(2),
+      );
+      await emitSync(tester, progress());
+      bridge.emit('deviceSpaceSnapshotFlow', {
+        'space': {
+          'spaceId': 'new-space',
+          'spaceName': '新空间',
+          'spaceRevision': 1,
+          'members': ['self'],
+        },
+        'topology': {
+          'currentDeviceId': 'self',
+          'devices': [],
+          'connections': [],
+        },
+      });
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('正在同步'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'activity stream errors are logged and other progress stays usable',
+    (tester) async {
+      await mount(tester);
+      bridge.events.addError(
+        StateError('watch delivery failed'),
+        StackTrace.current,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      await emitPackages(tester);
+      expect(find.text('加载扩展'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(
+        bridge.watches.where((name) => name == 'deviceSpaceSnapshotFlow'),
+        hasLength(2),
+      );
+    },
+  );
+
+  testWidgets('disposing cancels pending space watch retries', (tester) async {
+    await mount(tester, spaceFailures: 1);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 30));
+    expect(
+      bridge.watches.where((name) => name == 'deviceSpaceSnapshotFlow'),
+      hasLength(1),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('idle and small sync snapshots stay silent', (tester) async {
     await mount(tester);
     bridge.emit('spaceSyncProgressFlow', []);
@@ -142,6 +234,75 @@ void main() {
     });
     expect(find.text('任意页面'), findsOneWidget);
   });
+
+  testWidgets('records show their overall total and a determinate percentage', (
+    tester,
+  ) async {
+    await mount(tester);
+    await emitSync(
+      tester,
+      progress(completedRecords: 500, totalRecords: 10000),
+    );
+    expect(find.text('500 / 10000 条 · 5%'), findsOneWidget);
+    expect(
+      tester
+          .widget<LinearProgressIndicator>(find.byType(LinearProgressIndicator))
+          .value,
+      0.05,
+    );
+  });
+
+  testWidgets(
+    'compact progress aggregates every peer instead of using only the first',
+    (tester) async {
+      await mount(tester);
+      bridge.emit('spaceSyncProgressFlow', [
+        progress(completedRecords: 500, totalRecords: 1000).toJson(),
+        progress(
+          peer: 'desktop',
+          completedRecords: 100,
+          totalRecords: 3000,
+        ).toJson(),
+      ]);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('600 / 4000 条 · 15%'), findsOneWidget);
+      expect(
+        tester
+            .widget<LinearProgressIndicator>(
+              find.byType(LinearProgressIndicator),
+            )
+            .value,
+        0.15,
+      );
+    },
+  );
+
+  testWidgets(
+    'failed records keep their real pending count and expose the error without hovering',
+    (tester) async {
+      await mount(tester);
+      await emitSync(
+        tester,
+        progress(
+          status: core.SpaceSyncStatus.waiting,
+          completedRecords: 9999,
+          totalRecords: 10000,
+          pendingRecords: 1,
+          error: 'plugin_storage: Invalid or duplicate remote key',
+        ),
+      );
+      expect(find.text('后台任务'), findsOneWidget);
+      expect(find.text('9999 / 10000 条 · 99% · 待应用 1 条'), findsOneWidget);
+      expect(
+        find.text('plugin_storage: Invalid or duplicate remote key'),
+        findsOneWidget,
+      );
+      expect(find.text('同步完成'), findsNothing);
+      await tester.pump(const Duration(seconds: 3));
+      expect(find.text('后台任务'), findsNothing);
+    },
+  );
 
   testWidgets('file bytes drive progress; record exchange is indeterminate', (
     tester,
@@ -173,14 +334,17 @@ void main() {
   });
 
   testWidgets(
-    'waiting pauses animation and completion dismisses after three seconds',
+    'waiting and completion dismiss after three seconds without active work expiring',
     (tester) async {
       await mount(tester);
       await emitSync(tester, progress(status: core.SpaceSyncStatus.waiting));
       expect(find.text('等待重试'), findsOneWidget);
       expect(find.byType(LinearProgressIndicator), findsNothing);
+      await tester.pump(const Duration(seconds: 3));
+      expect(find.text('等待重试'), findsNothing);
+      await emitSync(tester, progress());
       await tester.pump(const Duration(seconds: 30));
-      expect(find.text('等待重试'), findsOneWidget);
+      expect(find.text('正在同步'), findsOneWidget);
       await emitSync(tester, progress(status: core.SpaceSyncStatus.completed));
       expect(find.text('同步完成'), findsOneWidget);
       await tester.pump(const Duration(seconds: 3));

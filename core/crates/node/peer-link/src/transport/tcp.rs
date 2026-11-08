@@ -26,6 +26,7 @@ struct TcpPeerListener {
 }
 #[async_trait]
 impl PeerListener for TcpPeerListener {
+    fn localAddress(&self) -> Option<String> { Some(self.source.address.clone()) }
     async fn accept(&self) -> Result<Option<Arc<dyn PeerConnection>>, String> {
         let connection = self.listener.accept().await.map_err(|e| e.to_string())?;
         Ok(Some(FramedPeerConnection::new(
@@ -51,8 +52,11 @@ pub(super) async fn connect(
     maxMessageBytes: usize,
 ) -> Result<Arc<dyn PeerConnection>, String> {
     let provider = host.tcpHost.as_ref().ok_or("TCP Host is not installed")?;
+    // Public connection codes and operator endpoints use a transport URI;
+    // the Host's socket API receives only the authority.
+    let address = target.address.strip_prefix("tcp://").unwrap_or(&target.address);
     let connection = provider
-        .connect(&target.address)
+        .connect(address)
         .await
         .map_err(|e| e.to_string())?;
     Ok(FramedPeerConnection::new(
@@ -64,14 +68,30 @@ pub(super) async fn connect(
     ))
 }
 pub(super) async fn listen(
+    registry: &super::network::ServerRegistry,
     host: &HostManager,
-    source: PeerEndpoint,
+    mut source: PeerEndpoint,
     maxMessageBytes: usize,
 ) -> Result<Arc<dyn PeerListener>, String> {
+    if super::network::canShare(host) {
+        let address = source.address.clone();
+        let (sender, incoming) = tokio::sync::mpsc::channel(32);
+        return super::network::serve(registry, host, &address, PeerTransport::Tcp, incoming, move |bound| {
+            source.address = bound.to_owned();
+            super::network::Handler::Tcp(Arc::new(move |connection| {
+                let peer = FramedPeerConnection::new(
+                    source.clone(), PeerEndpoint { nodeId: String::new(), address: String::new() },
+                    PeerTransport::Tcp, Arc::new(TcpBytes(connection)), maxMessageBytes,
+                );
+                sender.try_send(peer).map_err(|_| "TCP accept queue is full or closed".to_string())
+            }))
+        }).await;
+    }
     let provider = host.tcpHost.as_ref().ok_or("TCP Host is not installed")?;
     let listener = provider
         .bind(&source.address)
         .await
         .map_err(|e| e.to_string())?;
+    source.address = listener.local_address().map_err(|error| error.to_string())?;
     Ok(Arc::new(TcpPeerListener { listener, source, maxMessageBytes }))
 }

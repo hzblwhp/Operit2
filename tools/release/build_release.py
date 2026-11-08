@@ -33,6 +33,7 @@ RUNTIME_MANIFEST = REPO_ROOT / "core" / "crates" / "runtime" / "application" / "
 BUILD_SCRIPTS_DIR = REPO_ROOT / "tools" / "build_scripts"
 sys.path.insert(0, str(BUILD_SCRIPTS_DIR))
 from common import prepare_plugin_assets, verify_cli_plugin_assets
+from cargo_build import cargo_build_environment
 from release_artifacts import release_asset_name, validate_release_assets
 DEFAULT_GITHUB_ENV = SECRETS_DIR / "github.env"
 DEFAULT_RELEASE_REPO = "AAswordman/Operit2"
@@ -142,6 +143,8 @@ CLI_ALL_TARGETS = tuple(
 
 def run(command, cwd=REPO_ROOT, env=None):
     print(">> " + " ".join(str(part) for part in command), flush=True)
+    if Path(command[0]).name.lower() in ("cargo", "cargo.exe"):
+        env = cargo_build_environment(command, os.environ if env is None else env, cwd=cwd)
     subprocess.run([str(part) for part in command], cwd=cwd, env=env, check=True)
 
 
@@ -885,7 +888,7 @@ set -e
 cd {repo}
 {dependency_check}
 rustup target add {triple}
-cargo build --release --target {triple} --manifest-path apps/cli/Cargo.toml
+python3 tools/build_scripts/cargo_build.py cargo build --release --target {triple} --manifest-path apps/cli/Cargo.toml
 rm -rf {work}
 mkdir -p {work} {dist}
 cp apps/cli/target/{triple}/release/{binary_name} {work}/{binary_name}
@@ -963,6 +966,23 @@ def build_android_app(build_name, build_number):
     )
 
 
+# Builds the module application directory and versioned KernelSU installer archive.
+def build_android_module(build_name, build_number):
+    run(
+        [
+            sys.executable,
+            BUILD_SCRIPTS_DIR / "build_android_module_release.py",
+            "--build-name",
+            build_name,
+            "--build-number",
+            build_number,
+            "--enforce-lockfile",
+            "--dist-dir",
+            DIST_DIR,
+        ],
+    )
+
+
 # Builds the OpenHarmony Flutter application package.
 def build_ohos_app(build_name, build_number):
     run(
@@ -1017,19 +1037,19 @@ def build_host_app(build_name, build_number):
         return
 
     if current_platform == HostPlatform.MACOS:
-        run(
-            [
-                sys.executable,
-                BUILD_SCRIPTS_DIR / "build_flutter_macos.py",
-                "--build-name",
-                build_name,
-                "--build-number",
-                build_number,
-                "--enforce-lockfile",
-                "--archive-path",
-                DIST_DIR / release_asset_name("app", "macos", "universal", "zip"),
-            ]
-        )
+        for build_type in ("sandbox", "unsandbox"):
+            run(
+                [
+                    sys.executable,
+                    BUILD_SCRIPTS_DIR / "build_flutter_macos.py",
+                    "--type", build_type,
+                    "--build-name", build_name,
+                    "--build-number", build_number,
+                    "--enforce-lockfile",
+                    "--archive-path",
+                    DIST_DIR / release_asset_name("app", "macos", "universal", "zip", build_type),
+                ]
+            )
         return
 
     raise RuntimeError(f"Unsupported host app platform: {current_platform}")
@@ -1312,6 +1332,7 @@ def main():
 
     if ReleaseProduct.APP in products:
         build_android_app(platform_version.build_name, platform_version.build_number)
+        build_android_module(platform_version.build_name, platform_version.build_number)
         build_ohos_app(platform_version.build_name, platform_version.build_number)
         build_host_app(platform_version.build_name, platform_version.build_number)
 

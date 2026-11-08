@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use http::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +11,7 @@ use super::OpenAIResponsesProvider::{
     RESPONSES_OUTPUT_ITEM_META_PROVIDER, RESPONSES_REASONING_META_PROVIDER,
 };
 use super::StructuredToolCallBridge::StructuredToolCallBridge;
-use super::ThinkingConfiguration::ThinkingConfigurationApplier;
+use super::ThinkingDialect::ThinkingDialect;
 use crate::chat::llmprovider::AIService::{
     response_stream_from_chunks, AIService, AiServiceError, SendMessageRequest, TokenCounts,
 };
@@ -412,7 +412,7 @@ impl DeepseekProvider {
         request: &SendMessageRequest,
     ) -> Result<Value, AiServiceError> {
         if self.uses_responses_protocol()? {
-            let protocol_history = if request.enable_thinking {
+            let protocol_history = if request.thinking.is_on() {
                 request.chat_history.clone()
             } else {
                 request
@@ -428,16 +428,7 @@ impl DeepseekProvider {
                 .create_request_body_without_thinking_for_history(request, &protocol_history)?;
             let mut responses_request =
                 DeepseekResponsesPayloadAdapter::to_responses_request(request_object);
-            ThinkingConfigurationApplier::apply(
-                &mut responses_request,
-                &self.provider_type,
-                &self.model_name,
-                &self.api_endpoint,
-                request.enable_thinking,
-                request.thinking_quality_level,
-                &request.thinking_configurations,
-                &request.thinking_option_id,
-            )?;
+            ThinkingDialect::DeepSeekResponses.apply(&mut responses_request, &request.thinking)?;
             if self.web_search_enabled() {
                 append_web_search_tool(&mut responses_request);
             }
@@ -459,16 +450,7 @@ impl DeepseekProvider {
         );
         json_object.insert("stream".to_string(), json!(request.stream));
         let mut request_object = Value::Object(json_object);
-        ThinkingConfigurationApplier::apply(
-            &mut request_object,
-            &self.provider_type,
-            &self.model_name,
-            &self.api_endpoint,
-            request.enable_thinking,
-            request.thinking_quality_level,
-            &request.thinking_configurations,
-            &request.thinking_option_id,
-        )?;
+        ThinkingDialect::ChatThinkingType.apply(&mut request_object, &request.thinking)?;
         let json_object = request_object
             .as_object_mut()
             .expect("thinking request remains an object");
@@ -553,19 +535,6 @@ impl DeepseekProvider {
         self.open_ai_parent(false)
             .rewrite_message_media_content(&mut messages);
         Ok(messages)
-    }
-
-    pub fn resolve_deepseek_thinking_effort(&self) -> Result<Option<&'static str>, AiServiceError> {
-        let qualityLevel = self
-            .runtime_context
-            .support()
-            .thinkingQualityLevel()
-            .map_err(AiServiceError::RequestFailed)?;
-        Ok(match qualityLevel.clamp(1, 4) {
-            1 | 2 => Some("high"),
-            3 | 4 => Some("max"),
-            _ => None,
-        })
     }
 
     fn calculate_and_store_input_tokens(
@@ -703,7 +672,7 @@ impl DeepseekProvider {
 }
 
 /// Resolves whether one DeepSeek endpoint selects the Responses protocol.
-fn deepseek_uses_responses_protocol(endpoint: &str) -> Result<bool, AiServiceError> {
+pub(crate) fn deepseek_uses_responses_protocol(endpoint: &str) -> Result<bool, AiServiceError> {
     let endpoint = url::Url::parse(endpoint)
         .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?;
     let segment = endpoint
@@ -848,21 +817,17 @@ impl AIService for DeepseekProvider {
             )));
         }
 
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&self.api_endpoint)
+        let response = super::ProviderHttp::post(&self.api_endpoint)
             .headers(self.headers()?)
             .json(&request_body)
             .send()
-            .await
-            .map_err(|error| AiServiceError::ConnectionFailed(error.to_string()))?;
+            .await?;
 
         let status = response.status();
         if !status.is_success() {
             let message = response
                 .text()
-                .await
-                .map_err(|error| AiServiceError::ConnectionFailed(error.to_string()))?;
+                .await?;
             return Err(AiServiceError::RequestFailed(format!(
                 "{status}: {message}"
             )));
@@ -870,8 +835,7 @@ impl AIService for DeepseekProvider {
 
         let json_response: Value = response
             .json()
-            .await
-            .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?;
+            .await?;
         if self.uses_responses_protocol()? {
             let parsed =
                 DeepseekResponsesPayloadAdapter::parse_non_streaming_response(&json_response);
@@ -929,7 +893,6 @@ impl AIService for DeepseekProvider {
     }
 
     async fn test_connection(&self) -> Result<String, AiServiceError> {
-        let client = reqwest::Client::new();
         let request_body = if self.uses_responses_protocol()? {
             json!({
                 "model": self.model_name,
@@ -947,21 +910,18 @@ impl AIService for DeepseekProvider {
                 "thinking": {"type": "disabled"}
             })
         };
-        let response = client
-            .post(&self.api_endpoint)
+        let response = super::ProviderHttp::post(&self.api_endpoint)
             .headers(self.headers()?)
             .json(&request_body)
             .send()
-            .await
-            .map_err(|error| AiServiceError::ConnectionFailed(error.to_string()))?;
+            .await?;
         if response.status().is_success() {
             Ok("Connection successful".to_string())
         } else {
             let status = response.status();
             let body = response
                 .text()
-                .await
-                .map_err(|error| AiServiceError::ConnectionFailed(error.to_string()))?;
+                .await?;
             Err(AiServiceError::ConnectionFailed(format!(
                 "{status}: {body}"
             )))

@@ -20,12 +20,29 @@ impl AndroidFileSystemHost {
 }
 
 impl FileSystemHost for AndroidFileSystemHost {
+    /// Opens an app-owned log file through the native file host.
+    fn openAppendFile(&self, path: &str) -> HostResult<Box<dyn operit_host_api::FileAppendHandle>> {
+        self.inner.openAppendFile(path)
+    }
     fn envLabel(&self) -> &str {
         "android"
     }
 
+    /// Reports actual Core privileges and removes redundant Root authorization actions.
     fn environmentDescriptor(&self) -> HostEnvironmentDescriptor {
-        HostEnvironmentDescriptor::android()
+        let mut descriptor = HostEnvironmentDescriptor::android();
+        #[cfg(target_os = "android")]
+        if unsafe { libc::geteuid() } == 0 {
+            descriptor.privilege = operit_host_api::HostPrivilege::AndroidRoot;
+            descriptor.isolation = operit_host_api::HostIsolation::None;
+            for requirement in &mut descriptor.onboardingRequirements {
+                if matches!(requirement.id.as_str(), "android.fileManagement" | "android.root" | "android.shizuku" | "android.batteryOptimization") {
+                    requirement.status = operit_host_api::HostRequirementStatus::Satisfied;
+                    requirement.action = operit_host_api::HostRequirementAction::None;
+                }
+            }
+        }
+        descriptor
     }
 
     fn validatePath(&self, path: &str, paramName: &str) -> HostResult<()> {
@@ -76,6 +93,14 @@ impl FileSystemHost for AndroidFileSystemHost {
         self.inner.readFileBytes(path)
     }
 
+    fn readFileBytesRange(&self, path: &str, offset: u64, length: usize) -> HostResult<Vec<u8>> {
+        if isResource(path)? {
+            let value = crate::document_filesystem::call(json!({"operation": "readFileBytesRange", "path": path, "offset": offset, "length": length}))?;
+            return decodeBytes(value);
+        }
+        self.inner.readFileBytesRange(path, offset, length)
+    }
+
     fn writeFile(&self, path: &str, content: &str, append: bool) -> HostResult<()> {
         if isResource(path)? {
             let value = crate::document_filesystem::call(json!({"operation": "writeFile", "path": path, "content": base64::engine::general_purpose::STANDARD.encode(content.as_bytes()), "append": append}))?;
@@ -90,6 +115,10 @@ impl FileSystemHost for AndroidFileSystemHost {
             return if value.is_null() { Ok(()) } else { Err(HostError::new("Invalid document operation response")) };
         }
         self.inner.writeFileBytes(path, content)
+    }
+
+    fn appendFileBytes(&self, path: &str, content: &[u8]) -> HostResult<()> {
+        self.inner.appendFileBytes(path, content)
     }
 
     fn deleteFile(&self, path: &str, recursive: bool) -> HostResult<()> {

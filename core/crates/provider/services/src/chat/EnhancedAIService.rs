@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -21,6 +21,7 @@ use crate::chat::enhance::ConversationService::{
 };
 use crate::chat::enhance::MultiServiceManager::{MultiServiceManager, SharedAIServiceHandle};
 use crate::chat::hooks::PromptHookRegistry::{PromptHookContext, PromptHookRegistry};
+use crate::chat::llmprovider::ThinkingDialect::RequestThinking;
 use crate::chat::llmprovider::AIService::{
     ensure_response_completed, response_stream_from_chunks, AiServiceError, SendMessageRequest, SharedAiResponseStream,
     TokenCounts,
@@ -153,6 +154,7 @@ impl EnhancedAISharedState {
             MutableSharedStreamMirror::new(usize::MAX),
         );
         context.cancellationToken = options.cancellationToken.clone();
+        context.guidanceInbox = options.guidanceInbox.clone();
         self.active_execution_contexts
             .insert(context.executionId, context.clone());
         Ok(context)
@@ -213,8 +215,99 @@ impl MessageCancellationToken {
     }
 }
 
+/// Shares user guidance between the owning chat turn and its provider worker.
+///
+/// The provider only peeks at pending entries. The outer chat turn is the sole
+/// consumer and commits each entry before starting the continuation that reads it.
+#[derive(Clone, Debug, Default)]
+pub struct ChatGuidanceInbox {
+    state: Arc<Mutex<ChatGuidanceInboxState>>,
+}
+
+#[derive(Debug)]
+struct ChatGuidanceInboxState {
+    pending: VecDeque<String>,
+    accepting: bool,
+}
+
+impl Default for ChatGuidanceInboxState {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            accepting: true,
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+impl ChatGuidanceInbox {
+    /// Accepts one nonempty guidance message while the logical turn remains open.
+    pub fn enqueue(&self, message: String) -> Result<(), String> {
+        let message = message.trim().to_string();
+        if message.is_empty() {
+            return Err("Guidance message cannot be empty".to_string());
+        }
+        let mut state = self.state.lock().expect("chat guidance inbox mutex poisoned");
+        if !state.accepting {
+            return Err("The current chat turn is no longer accepting guidance".to_string());
+        }
+        state.pending.push_back(message);
+        Ok(())
+    }
+
+    /// Reports whether a model-round boundary should suspend for guidance.
+    pub fn hasPending(&self) -> bool {
+        !self
+            .state
+            .lock()
+            .expect("chat guidance inbox mutex poisoned")
+            .pending
+            .is_empty()
+    }
+
+    /// Drains a completed segment, or atomically closes an idle turn.
+    ///
+    /// An empty return therefore means no continuation is needed and later
+    /// enqueue calls are rejected. A nonempty return leaves the inbox open so
+    /// guidance can also be accepted between physical response segments.
+    pub fn drainOrClose(&self) -> Vec<String> {
+        let mut state = self.state.lock().expect("chat guidance inbox mutex poisoned");
+        if state.pending.is_empty() {
+            state.accepting = false;
+            return Vec::new();
+        }
+        state.pending.drain(..).collect()
+    }
+
+    /// Drains entries that arrived while a guidance batch was being committed.
+    pub fn drainPending(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("chat guidance inbox mutex poisoned")
+            .pending
+            .drain(..)
+            .collect()
+    }
+
+    /// Rejects later entries and discards guidance not yet committed by the turn.
+    pub fn closeAndClear(&self) {
+        let mut state = self.state.lock().expect("chat guidance inbox mutex poisoned");
+        state.accepting = false;
+        state.pending.clear();
+    }
+
+    /// Reports whether this inbox can still be inherited by a continuation.
+    pub fn isAccepting(&self) -> bool {
+        self.state
+            .lock()
+            .expect("chat guidance inbox mutex poisoned")
+            .accepting
+    }
+}
+
 pub struct SendMessageOptions {
     pub cancellationToken: Option<MessageCancellationToken>,
+    pub guidanceInbox: Option<ChatGuidanceInbox>,
     pub message: String,
     pub maxTokens: i32,
     pub tokenUsageThreshold: f64,
@@ -224,6 +317,7 @@ pub struct SendMessageOptions {
     pub workspaceFolders: Vec<String>,
     pub functionType: FunctionType,
     pub promptFunctionType: PromptFunctionType,
+    /// Lets the model think at the level set on it; `false` asks it not to think.
     pub enableThinking: bool,
     pub onNonFatalError: Option<fn(String)>,
     pub onTokenLimitExceeded: Option<fn()>,
@@ -255,6 +349,7 @@ impl SendMessageOptions {
     pub fn new() -> Self {
         Self {
             cancellationToken: None,
+            guidanceInbox: None,
             message: String::new(),
             maxTokens: 0,
             tokenUsageThreshold: 0.0,
@@ -289,6 +384,7 @@ impl SendMessageOptions {
 pub struct MessageExecutionContext {
     pub executionId: i32,
     pub cancellationToken: Option<MessageCancellationToken>,
+    pub guidanceInbox: Option<ChatGuidanceInbox>,
     pub streamBuffer: String,
     pub roundManager: ConversationRoundManagerMirror,
     pub isConversationActive: bool,
@@ -313,6 +409,7 @@ impl MessageExecutionContext {
         Self {
             executionId,
             cancellationToken: None,
+            guidanceInbox: None,
             streamBuffer: String::new(),
             roundManager: ConversationRoundManagerMirror::new(),
             isConversationActive: true,
@@ -673,24 +770,24 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
             // Use the same host-owned roots as file tools, not a guessed storage location.
             // Resolve afresh for every request so workspace switches cannot retain stale paths.
             let context = self.tool_handler.getContext();
-            let workspace_path_mappings = context
-                .runtimeStorageHost
-                .as_ref()
-                .and_then(|storage| {
-                    Some(PathMapper::new(
-                        storage.runtimeRootDir()?,
-                        storage.workspaceRootDir()?,
-                        storage.clone(),
-                    ))
-                })
-                .map(|mapper| {
-                    resolve_workspace_path_mappings(
-                        &mapper,
-                        request.workspace_path.as_deref(),
-                        &request.workspace_folders,
-                    )
-                })
-                .unwrap_or_default();
+            let output_path = if request.workspace_path.as_deref().filter(|p| !p.trim().is_empty()).is_none() {
+                match (context.runtimeStorageHost.as_ref(), request.chat_id.as_deref()) {
+                    (Some(storage), Some(chat)) => operit_store::ChatOutputStore::ChatOutputStore::new(storage.clone()).prepare(chat)?,
+                    _ => None,
+                }
+            } else { None };
+            let mapper = context.runtimeStorageHost.as_ref().and_then(|storage| {
+                Some(PathMapper::new(
+                    storage.runtimeRootDir()?, storage.workspaceRootDir()?, storage.clone(),
+                ))
+            });
+            let primary_directory = request.workspace_path.as_deref().or(output_path.as_deref());
+            let workspace_path_mappings = mapper.as_ref().map(|mapper| {
+                resolve_workspace_path_mappings(mapper, primary_directory, &request.workspace_folders)
+            }).unwrap_or_default();
+            let terminal_path_mappings = resolve_terminal_path_mappings(
+                context.terminalHost.as_deref(), mapper.as_ref(), primary_directory, &request.workspace_folders,
+            );
             let package_manager = self.tool_handler.getOrCreatePackageManager();
             let (enabled_packages, mcp_servers) = {
                 let package_manager_guard = package_manager
@@ -772,8 +869,10 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                 base: SystemPromptOptions {
                     chat_id: request.chat_id.clone(),
                     workspace_path: request.workspace_path.clone(),
+                    output_path,
                     workspace_folders: request.workspace_folders.clone(),
                     workspace_path_mappings,
+                    terminal_path_mappings,
                     use_english,
                     custom_system_prompt_template,
                     enable_tools: true,
@@ -1018,7 +1117,12 @@ impl EnhancedAIService {
             &runtime.chatConfiguration, chatId.clone(), workspacePath.clone(),
             workspaceFolders.clone(), &runtime.toolExposureMode,
         )?;
-        ToolExecutionManager::scopeToolRuntimeContext(toolContext, self.conversation_service
+        let hostContext = self.tool_handler.getContext();
+        let fileDirectory = match hostContext.runtimeStorageHost {
+            Some(storage) => toolContext.fileDirectory(storage).map_err(AiServiceError::RequestFailed)?,
+            None => workspacePath.clone(),
+        };
+        let mut history = ToolExecutionManager::scopeToolRuntimeContext(toolContext, self.conversation_service
             .prepare_conversation_history(
                 PrepareConversationHistoryRequest {
                     chat_history: chatHistory,
@@ -1048,7 +1152,11 @@ impl EnhancedAIService {
                 &history_hooks,
                 &system_prompt_composer,
                 runtime.useEnglish,
-            )).await.map_err(AiServiceError::RequestFailed)
+            )).await.map_err(AiServiceError::RequestFailed)?;
+        if let Some(base) = fileDirectory {
+            ConversationService::use_relative_attachment_paths(&mut history, &base);
+        }
+        Ok(history)
     }
 
     pub async fn generateSummary(
@@ -1060,6 +1168,22 @@ impl EnhancedAIService {
         self.conversation_service
             .generateSummary(messages, previousSummary, &mut multiServiceManager)
             .await
+    }
+
+    /// Runs chat summaries under the already-selected native participant, including all plugin hooks.
+    pub async fn generateSummaryForConfiguration(
+        &mut self,
+        messages: Vec<(String, String)>,
+        previousSummary: Option<String>,
+        chatId: String,
+        configuration: &ChatConfigurationResult,
+    ) -> Result<String, AiServiceError> {
+        let context = toolRuntimeContextForConfiguration(
+            configuration, Some(chatId), None, Vec::new(), &ToolExposureMode::Full,
+        )?;
+        ToolExecutionManager::scopeToolRuntimeContext(
+            context, self.generateSummary(messages, previousSummary),
+        ).await
     }
 
     pub async fn generateSummaryFromPromptTurns(
@@ -1913,14 +2037,11 @@ impl EnhancedAIService {
                 .send_message(SendMessageRequest {
                     chat_history: requestHistory.clone(),
                     model_parameters: modelParameters.clone(),
-                    enable_thinking: enableThinking,
-                    thinking_quality_level: self
-                        .provider_runtime_context
-                        .support()
-                        .thinkingQualityLevel()
-                        .map_err(AiServiceError::RequestFailed)?,
-                    thinking_configurations: runtime.modelConfig.thinkingConfigurations.clone(),
-                    thinking_option_id: runtime.modelConfig.thinkingOptionId.clone(),
+                    thinking: RequestThinking::for_model(
+                        &runtime.modelConfig.thinking,
+                        runtime.modelConfig.thinkingLevel,
+                        enableThinking,
+                    ),
                     stream,
                     available_tools: availableTools.clone(),
                     preserve_think_in_history: false,
@@ -2293,7 +2414,7 @@ impl EnhancedAIService {
         toolResultMessage: String,
         callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
         runtime: &mut SendMessageRuntime,
-    ) -> Result<(), AiServiceError> {
+    ) -> Result<bool, AiServiceError> {
         let toolNames = results
             .iter()
             .map(|result| result.toolName.clone())
@@ -2328,7 +2449,7 @@ impl EnhancedAIService {
         );
 
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return Ok(false);
         }
 
         if !isSubTask {
@@ -2338,7 +2459,7 @@ impl EnhancedAIService {
         }
 
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return Ok(false);
         }
 
         context.conversationHistory.push(PromptTurn {
@@ -2370,6 +2491,20 @@ impl EnhancedAIService {
             ),
             operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
+        if context
+            .guidanceInbox
+            .as_ref()
+            .is_some_and(ChatGuidanceInbox::hasPending)
+        {
+            AppLogger::i(
+                TAG,
+                &format!(
+                    "chat.guidance.pause_before_model_request executionId={} round={}",
+                    context.executionId, context.roundManager.roundIndex
+                ),
+            );
+            return Ok(false);
+        }
         self.startAssistantResponseRound(context);
         AppLogger::v_with_level(
             TAG,
@@ -2418,7 +2553,7 @@ impl EnhancedAIService {
             )
             .await?;
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return Ok(false);
         }
 
         if maxTokens > 0 {
@@ -2457,7 +2592,7 @@ impl EnhancedAIService {
                 if !isSubTask {
                     self.stopAiService(participantName, avatarUri);
                 }
-                return Ok(());
+                return Ok(false);
             }
         }
 
@@ -2494,14 +2629,11 @@ impl EnhancedAIService {
                 .send_message(SendMessageRequest {
                     chat_history: currentChatHistory,
                     model_parameters: modelParameters,
-                    enable_thinking: enableThinking,
-                    thinking_quality_level: self
-                        .provider_runtime_context
-                        .support()
-                        .thinkingQualityLevel()
-                        .map_err(AiServiceError::RequestFailed)?,
-                    thinking_configurations: runtime.modelConfig.thinkingConfigurations.clone(),
-                    thinking_option_id: runtime.modelConfig.thinkingOptionId.clone(),
+                    thinking: RequestThinking::for_model(
+                        &runtime.modelConfig.thinking,
+                        runtime.modelConfig.thinkingLevel,
+                        enableThinking,
+                    ),
                     stream,
                     available_tools: availableTools.clone(),
                     preserve_think_in_history: false,
@@ -2518,7 +2650,7 @@ impl EnhancedAIService {
         });
 
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return Ok(false);
         }
 
         if !isSubTask {
@@ -2528,7 +2660,7 @@ impl EnhancedAIService {
         }
 
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return Ok(false);
         }
 
         let activeExecutionState = self.shared_state.clone();
@@ -2578,7 +2710,7 @@ impl EnhancedAIService {
             })
             .await;
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return Ok(false);
         }
         ensure_response_completed(response.as_ref())?;
         AppLogger::v_with_level(
@@ -2653,7 +2785,7 @@ impl EnhancedAIService {
             operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
-        Ok(())
+        Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2723,7 +2855,7 @@ impl EnhancedAIService {
             };
 
             // Finish this request before inspecting and dispatching the next response round.
-            self.processToolResults(
+            let shouldContinue = self.processToolResults(
                 collector,
                 continuation.results,
                 context,
@@ -2748,6 +2880,9 @@ impl EnhancedAIService {
                 runtime,
             )
             .await?;
+            if !shouldContinue {
+                return Ok(());
+            }
         }
     }
 
@@ -3001,6 +3136,7 @@ impl EnhancedAIService {
         let ToolExecutionBatch {
             results: allToolResults,
             message: toolResultMessage,
+            displayMessage,
             routeChangeIntent,
         } =
             ToolExecutionManager::executeInvocations(
@@ -3041,7 +3177,7 @@ impl EnhancedAIService {
             return Ok(None);
         }
 
-        let content = format!("\n{toolResultMessage}\n");
+        let content = format!("\n{displayMessage}\n");
         context.streamBuffer.push_str(&content);
         context.roundManager.appendContent(&content);
         collector.emit_chunk(content);
@@ -3662,6 +3798,46 @@ fn value_to_btree_map(source: HashMap<String, Value>) -> BTreeMap<String, String
 }
 
 /// Resolves the primary root and every mounted folder without searching for directories.
+/// Uses the exact same Host resolver as terminal execution. Prompt composition
+/// has no platform policy and never turns a physical root into a guest path.
+fn resolve_terminal_path_mappings(
+    host: Option<&dyn operit_host_api::TerminalHost>,
+    mapper: Option<&PathMapper>,
+    primary: Option<&str>,
+    folders: &[String],
+) -> Vec<crate::chat::config::SystemPromptConfig::TerminalPathMapping> {
+    use crate::chat::config::SystemPromptConfig::TerminalPathMapping;
+    let Some(host) = host else { return Vec::new(); };
+    let info = match host.terminalInfo() {
+        Ok(info) => info,
+        Err(error) => return primary.into_iter().map(|path| TerminalPathMapping {
+            terminal: "Host".into(), terminal_type: String::new(), vfs_path: path.into(), path: Err(error.to_string()),
+        }).collect(),
+    };
+    let mut directories = BTreeSet::new();
+    let directories = primary.into_iter().chain(folders.iter().map(String::as_str))
+        .filter(|path| !path.trim().is_empty() && directories.insert(path.to_string()))
+        .collect::<Vec<_>>();
+    let resolve_host = |path: &str| {
+        mapper.ok_or_else(|| operit_host_api::HostError::new("File path mapping is unavailable"))?
+            .resolve(path).and_then(|mapping| mapping.nativePath())
+            .map_err(operit_host_api::HostError::new)
+    };
+    let mut kinds = info.types.into_iter().filter(|kind| kind.available).collect::<Vec<_>>();
+    if !kinds.iter().any(|kind| kind.terminal == info.terminal && kind.terminalType == info.terminalType) {
+        kinds.insert(0, operit_host_api::TerminalTypeInfo {
+            terminal: info.terminal, terminalType: info.terminalType, available: true, description: String::new(),
+        });
+    }
+    kinds.into_iter().flat_map(|kind| directories.iter().map(|path| {
+        TerminalPathMapping {
+            terminal: kind.terminal.clone(), terminal_type: kind.terminalType.clone(), vfs_path: (*path).into(),
+            path: host.resolveWorkingDirectory(&kind.terminal, &kind.terminalType, path, &resolve_host)
+                .map_err(|error| error.to_string()),
+        }
+    }).collect::<Vec<_>>()).collect()
+}
+
 fn resolve_workspace_path_mappings(
     mapper: &PathMapper,
     workspace_path: Option<&str>,
@@ -3751,16 +3927,16 @@ mod workspace_path_tests {
         let mapper = PathMapper::builtinOnly(root.join("runtime"), workspace_root.clone());
         let mappings = resolve_workspace_path_mappings(
             &mapper,
-            Some("/app/workspaces/main"),
+            Some("/operitapp/workspaces/main"),
             &[
-                "/app/workspaces/main/".into(),
-                "/app/workspaces/other".into(),
+                "/operitapp/workspaces/main/".into(),
+                "/operitapp/workspaces/other".into(),
                 "".into(),
                 "/unknown/project".into(),
             ],
         );
         assert_eq!(mappings.len(), 2);
-        assert_eq!(mappings[0].vfsPath, "/app/workspaces/main");
+        assert_eq!(mappings[0].vfsPath, "/operitapp/workspaces/main");
         assert_eq!(
             mappings[0].physicalPath,
             workspace_root
@@ -3781,8 +3957,8 @@ mod workspace_path_tests {
     fn workspace_switch_resolves_new_path() {
         let root = std::env::temp_dir().join("Operit workspace switch");
         let mapper = PathMapper::builtinOnly(root.join("runtime"), root.join("workspaces"));
-        let first = resolve_workspace_path_mappings(&mapper, Some("/app/workspaces/first"), &[]);
-        let second = resolve_workspace_path_mappings(&mapper, Some("/app/workspaces/second"), &[]);
+        let first = resolve_workspace_path_mappings(&mapper, Some("/operitapp/workspaces/first"), &[]);
+        let second = resolve_workspace_path_mappings(&mapper, Some("/operitapp/workspaces/second"), &[]);
         assert_eq!(
             first[0].physicalPath,
             root.join("workspaces/first")
@@ -3803,8 +3979,8 @@ mod workspace_path_tests {
         let mapper = PathMapper::builtinOnly("/runtime".into(), "/workspaces".into());
         let mappings = resolve_workspace_path_mappings(
             &mapper,
-            Some("/app/workspaces/main"),
-            &["/mnt/macos/Users/test/External Project".into()],
+            Some("/operitapp/workspaces/main"),
+            &["/virtual/macos/Users/test/External Project".into()],
         );
         assert_eq!(mappings.len(), 2);
         assert_eq!(mappings[1].physicalPath, "/Users/test/External Project");
@@ -3814,7 +3990,7 @@ mod workspace_path_tests {
     fn browser_storage_keys_are_not_advertised_as_terminal_paths() {
         let mapper = PathMapper::builtinOnly("runtime".into(), "workspaces".into());
         assert!(
-            resolve_workspace_path_mappings(&mapper, Some("/app/workspaces/main"), &[]).is_empty()
+            resolve_workspace_path_mappings(&mapper, Some("/operitapp/workspaces/main"), &[]).is_empty()
         );
     }
 }
@@ -3846,8 +4022,8 @@ mod model_identity_tests {
             builtinTools: Vec::new(),
             request: Default::default(),
             parameters: Vec::new(),
-            thinkingConfigurations: "[]".into(),
-            thinkingOptionId: String::new(),
+            thinking: Default::default(),
+            thinkingLevel: None,
             summary: Default::default(),
             localRuntime: Default::default(),
         }
@@ -4023,5 +4199,83 @@ mod cancellation_tests {
         assert!(!EnhancedAIService::isExecutionContextActiveInSharedState(
             &state, &context
         ));
+    }
+}
+
+#[cfg(test)]
+mod guidance_tests {
+    use super::{ChatGuidanceInbox, EnhancedAISharedState, SendMessageOptions};
+
+    #[test]
+    fn inbox_clones_share_fifo_guidance_with_the_provider_worker() {
+        let inbox = ChatGuidanceInbox::default();
+        let worker = inbox.clone();
+        inbox.enqueue("first".to_string()).unwrap();
+        worker.enqueue("second".to_string()).unwrap();
+
+        assert!(worker.hasPending());
+        assert_eq!(
+            worker.drainOrClose(),
+            vec!["first".to_string(), "second".to_string()]
+        );
+        assert!(inbox.isAccepting());
+        assert!(!inbox.hasPending());
+    }
+
+    #[test]
+    fn empty_final_segment_atomically_closes_the_inbox() {
+        let inbox = ChatGuidanceInbox::default();
+
+        assert!(inbox.drainOrClose().is_empty());
+        assert!(!inbox.isAccepting());
+        assert!(inbox.enqueue("too late".to_string()).is_err());
+    }
+
+    #[test]
+    fn cancellation_discards_only_uncommitted_guidance() {
+        let inbox = ChatGuidanceInbox::default();
+        inbox.enqueue("pending".to_string()).unwrap();
+
+        inbox.closeAndClear();
+        assert!(!inbox.hasPending());
+        assert!(inbox.enqueue("after cancellation".to_string()).is_err());
+    }
+
+    #[test]
+    fn execution_context_clones_share_the_same_guidance_inbox() {
+        let inbox = ChatGuidanceInbox::default();
+        let options = SendMessageOptions {
+            guidanceInbox: Some(inbox),
+            ..SendMessageOptions::new()
+        };
+        let mut state = EnhancedAISharedState::default();
+        let worker = state
+            .createExecutionContext(state.execution_generation, &options)
+            .unwrap();
+        let registered = state.active_execution_contexts[&worker.executionId].clone();
+
+        worker
+            .guidanceInbox
+            .as_ref()
+            .unwrap()
+            .enqueue("guide the next request".to_string())
+            .unwrap();
+        assert!(registered.guidanceInbox.as_ref().unwrap().hasPending());
+    }
+}
+
+#[cfg(test)]
+mod package_proxy_json_tests {
+    use super::buildPackageProxyToolPrompt;
+
+    #[test]
+    fn package_proxy_advertises_json_objects_in_both_schema_representations() {
+        let prompt = buildPackageProxyToolPrompt();
+        let schema: serde_json::Value = serde_json::from_str(&prompt.parameters).unwrap();
+        assert_eq!(schema["properties"]["params"]["type"], "object");
+        let parameter = prompt.parametersStructured.unwrap().into_iter().find(|p| p.name == "params").unwrap();
+        assert_eq!(parameter.r#type, "object");
+        assert!(parameter.description.contains("JSON"));
+        assert!(!parameter.description.contains("YAML"));
     }
 }

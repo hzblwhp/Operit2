@@ -11,6 +11,7 @@ add_executable(${BINARY_NAME}
   "main.cc"
   "my_application.cc"
   "operit_runtime_channel.cc"
+  "window_chrome.cc"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
 )
 
@@ -38,7 +39,8 @@ add_custom_target(sync_operit_plugins ALL
 
 set(OPERIT_FLUTTER_BRIDGE_CRATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../native/operit-flutter-bridge")
 add_custom_target(operit_flutter_bridge ALL
-  COMMAND cargo build --manifest-path "${OPERIT_FLUTTER_BRIDGE_CRATE}/Cargo.toml" $<$<NOT:$<CONFIG:Debug>>:--release>
+  COMMAND "${OPERIT_PLUGIN_SYNC_PYTHON}" "${OPERIT_REPO_ROOT}/tools/build_scripts/cargo_build.py"
+    cargo build --manifest-path "${OPERIT_FLUTTER_BRIDGE_CRATE}/Cargo.toml" $<$<NOT:$<CONFIG:Debug>>:--release>
   WORKING_DIRECTORY "${OPERIT_FLUTTER_BRIDGE_CRATE}"
 )
 add_dependencies(operit_flutter_bridge sync_operit_plugins)

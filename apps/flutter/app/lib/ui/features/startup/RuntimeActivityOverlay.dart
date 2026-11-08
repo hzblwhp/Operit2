@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../../core/bridge/ProxyCoreRuntimeBridge.dart';
+import '../../../core/logging/ClientLogger.dart';
 import '../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../core/proxy/generated/CoreProxyModels.g.dart' as core;
 import '../../../l10n/generated/app_localizations.dart';
@@ -33,6 +34,9 @@ class _RuntimeActivityOverlayState extends State<RuntimeActivityOverlay> {
   core.RuntimeDeviceSpaceSnapshot? _space;
   List<core.SpaceSyncProgress> _sync = const [];
   Timer? _completionTimer;
+  Timer? _spaceRetryTimer;
+  int _spaceRetryAttempt = 0;
+  int _subscriptionGeneration = 0;
   int _now = DateTime.now().millisecondsSinceEpoch;
   Offset _dockTopRight = const Offset(16, 16);
   bool _expanded = false;
@@ -43,7 +47,7 @@ class _RuntimeActivityOverlayState extends State<RuntimeActivityOverlay> {
       .where(
         (item) =>
             (_space == null || item.spaceId == _space!.space.spaceId) &&
-            (item.status != core.SpaceSyncStatus.completed ||
+            (item.status == core.SpaceSyncStatus.syncing ||
                 _now < item.updatedAt + 3000),
       )
       .toList();
@@ -69,6 +73,10 @@ class _RuntimeActivityOverlayState extends State<RuntimeActivityOverlay> {
   }
 
   void _cancel() {
+    _subscriptionGeneration++;
+    _spaceRetryTimer?.cancel();
+    _spaceRetryTimer = null;
+    _spaceRetryAttempt = 0;
     unawaited(_packageSubscription?.cancel());
     unawaited(_syncSubscription?.cancel());
     unawaited(_spaceSubscription?.cancel());
@@ -84,36 +92,87 @@ class _RuntimeActivityOverlayState extends State<RuntimeActivityOverlay> {
     super.dispose();
   }
 
+  bool _isCurrentSubscription(int generation) =>
+      mounted && widget.enabled && generation == _subscriptionGeneration;
+
+  void _reportSubscriptionError(Object error, StackTrace stackTrace) {
+    ClientLogger.e(
+      'Runtime activity subscription failed',
+      tag: 'RuntimeActivity',
+      error: error,
+      stackTrace: stackTrace,
+    );
+  }
+
   void _subscribe() {
+    final generation = _subscriptionGeneration;
     _packageSubscription = widget.clients.application
         .pluginLoadingProgressFlow()
         .listen((progress) {
-          if (!mounted) return;
+          if (!_isCurrentSubscription(generation)) return;
           setState(() {
             _packages = progress;
             if (_loadingPackages && progress.forceExpanded) _expanded = true;
             if (!_loadingPackages && _visibleSync.isEmpty) _expanded = false;
           });
-        });
+        }, onError: _reportSubscriptionError);
     final service = widget.clients.server.runtimeRemoteLinkService;
     _syncSubscription = service.spaceSyncProgressFlow().listen((progress) {
-      if (!mounted) return;
+      if (!_isCurrentSubscription(generation)) return;
       setState(() {
+        if (progress.any((item) => item.error != null) &&
+            !_sync.any((item) => item.error != null)) {
+          _expanded = true;
+        }
         _sync = progress;
         _scheduleCompletion();
       });
-    });
-    _spaceSubscription = service.deviceSpaceSnapshotFlow().listen((space) {
-      if (mounted) setState(() => _space = space);
+    }, onError: _reportSubscriptionError);
+    _subscribeSpace(generation);
+  }
+
+  /// A failed watch opening closes its stream; reopen it after a bounded delay.
+  void _subscribeSpace(int generation) {
+    if (!_isCurrentSubscription(generation)) return;
+    try {
+      _spaceSubscription = widget.clients.server.runtimeRemoteLinkService
+          .deviceSpaceSnapshotFlow()
+          .listen(
+            (space) {
+              if (!_isCurrentSubscription(generation)) return;
+              _spaceRetryAttempt = 0;
+              setState(() => _space = space);
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              if (!_isCurrentSubscription(generation)) return;
+              _reportSubscriptionError(error, stackTrace);
+              _retrySpaceSubscription(generation);
+            },
+            onDone: () => _retrySpaceSubscription(generation),
+            cancelOnError: true,
+          );
+    } catch (error, stackTrace) {
+      _reportSubscriptionError(error, stackTrace);
+      _retrySpaceSubscription(generation);
+    }
+  }
+
+  void _retrySpaceSubscription(int generation) {
+    if (!_isCurrentSubscription(generation) || _spaceRetryTimer != null) return;
+    final seconds = math.min(30, 1 << math.min(_spaceRetryAttempt, 5));
+    _spaceRetryAttempt++;
+    _spaceRetryTimer = Timer(Duration(seconds: seconds), () {
+      _spaceRetryTimer = null;
+      _subscribeSpace(generation);
     });
   }
 
-  /// Only completion dismissal needs a timer. Small syncs never reach this UI.
+  /// Dismiss inactive notices without stopping retries or hiding active work.
   void _scheduleCompletion({int? now}) {
     _completionTimer?.cancel();
     _now = now ?? DateTime.now().millisecondsSinceEpoch;
     final deadlines = _visibleSync
-        .where((item) => item.status == core.SpaceSyncStatus.completed)
+        .where((item) => item.status != core.SpaceSyncStatus.syncing)
         .map((item) => item.updatedAt + 3000);
     if (deadlines.isEmpty) {
       if (!_loadingPackages && _visibleSync.isEmpty) _expanded = false;
@@ -148,24 +207,85 @@ class _RuntimeActivityOverlayState extends State<RuntimeActivityOverlay> {
           : waiting
           ? l10n.runtimeActivityWaiting
           : l10n.runtimeActivitySyncing,
-      compactDetail: file && !completed
+      compactDetail: item.totalRecords == null && file && !completed
           ? '${_bytes(item.fileBytes)} / ${_bytes(item.fileSize)}'
-          : null,
-      detail: file && !completed
-          ? l10n.deviceSpaceSyncCurrentFile(
-              _bytes(item.fileBytes),
-              _bytes(item.fileSize),
-            )
-          : l10n.deviceSpaceSyncTransferred(
-              item.exchangedRecords,
-              _bytes(item.transferredBytes),
+          : _recordProgress(
+              item.completedRecords,
+              item.totalRecords,
+              item.pendingRecords,
+              l10n,
             ),
+      detail: _recordProgress(
+        item.completedRecords,
+        item.totalRecords,
+        item.pendingRecords,
+        l10n,
+      ),
       value: completed
           ? 1
+          : item.totalRecords != null && item.totalRecords! > 0
+          ? (item.completedRecords / item.totalRecords!).clamp(0.0, 1.0)
           : file && !waiting
           ? (item.fileBytes / item.fileSize).clamp(0.0, 1.0)
           : null,
       paused: waiting || completed,
+    );
+  }
+
+  /// Shows confirmed unique records against the real inventory, never against a page size.
+  String _recordProgress(
+    int completed,
+    int? total,
+    int pending,
+    AppLocalizations l10n,
+  ) {
+    final records = total == null
+        ? l10n.deviceSpaceSyncCounting(completed)
+        : l10n.deviceSpaceSyncRecordProgress(
+            completed,
+            total,
+            total == 0 ? 0 : (100 * completed / total).floor().clamp(0, 100),
+          );
+    return pending > 0
+        ? '$records · ${l10n.deviceSpaceSyncPendingCount(pending)}'
+        : records;
+  }
+
+  /// Aggregates all peers instead of presenting the first peer as the whole synchronization.
+  _Activity _syncSummary(
+    List<core.SpaceSyncProgress> items,
+    AppLocalizations l10n,
+  ) {
+    if (items.length == 1) return _syncActivity(items.single, l10n);
+    final completed = items.every(
+      (item) => item.status == core.SpaceSyncStatus.completed,
+    );
+    final waiting =
+        items.every((item) => item.status != core.SpaceSyncStatus.syncing) &&
+        !completed;
+    final processed = items.fold(0, (sum, item) => sum + item.completedRecords);
+    final total = items.every((item) => item.totalRecords != null)
+        ? items.fold(0, (sum, item) => sum + item.totalRecords!)
+        : null;
+    final pending = items.fold(0, (sum, item) => sum + item.pendingRecords);
+    return _Activity(
+      icon: completed
+          ? Icons.check_rounded
+          : waiting
+          ? Icons.pause_rounded
+          : Icons.sync_rounded,
+      title: completed
+          ? l10n.runtimeActivitySyncCompleted
+          : waiting
+          ? l10n.runtimeActivityWaiting
+          : l10n.runtimeActivitySyncing,
+      detail: _recordProgress(processed, total, pending, l10n),
+      value: completed
+          ? 1
+          : total != null && total > 0
+          ? (processed / total).clamp(0.0, 1.0)
+          : null,
+      paused: completed || waiting,
     );
   }
 
@@ -200,7 +320,7 @@ class _RuntimeActivityOverlayState extends State<RuntimeActivityOverlay> {
             value: packages.progress.clamp(0.0, 1.0),
           );
     final primary = sync.isNotEmpty
-        ? _syncActivity(sync.first, l10n)
+        ? _syncSummary(sync, l10n)
         : packageActivity!;
     final count = sync.length + (packages == null ? 0 : 1);
     return Positioned.fill(
@@ -288,33 +408,33 @@ class _RuntimeActivityOverlayState extends State<RuntimeActivityOverlay> {
                                                 l10n,
                                               ),
                                               title:
-                                                  item.status ==
-                                                      core
-                                                          .SpaceSyncStatus
-                                                          .completed
-                                                  ? l10n.deviceSpaceSyncCompleted(
-                                                      _peerName(item, l10n),
-                                                    )
-                                                  : l10n.deviceSpaceSyncActive(
-                                                      _peerName(item, l10n),
-                                                    ),
+                                                  '${_peerName(item, l10n)} · ${_syncActivity(item, l10n).title}',
                                             ),
                                             if (item.status !=
                                                 core.SpaceSyncStatus.completed)
-                                              Tooltip(
-                                                message: item.error ?? '',
-                                                child: Text(
-                                                  _stage(item, l10n),
-                                                  style: Theme.of(
-                                                    context,
-                                                  ).textTheme.bodySmall,
-                                                ),
+                                              Text(
+                                                _stage(item, l10n),
+                                                style: Theme.of(
+                                                  context,
+                                                ).textTheme.bodySmall,
+                                              ),
+                                            if (item.error != null)
+                                              SelectableText(
+                                                item.error!,
+                                                style: Theme.of(context)
+                                                    .textTheme
+                                                    .bodySmall
+                                                    ?.copyWith(
+                                                      color: Theme.of(
+                                                        context,
+                                                      ).colorScheme.error,
+                                                    ),
                                               ),
                                             if (item.fileSize > 0)
                                               Text(
-                                                l10n.deviceSpaceSyncTransferred(
-                                                  item.exchangedRecords,
-                                                  _bytes(item.transferredBytes),
+                                                l10n.deviceSpaceSyncCurrentFile(
+                                                  _bytes(item.fileBytes),
+                                                  _bytes(item.fileSize),
                                                 ),
                                                 style: Theme.of(
                                                   context,

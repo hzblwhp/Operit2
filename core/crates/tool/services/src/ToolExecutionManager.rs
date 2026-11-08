@@ -52,6 +52,17 @@ pub struct ToolRuntimeContext {
 }
 
 impl ToolRuntimeContext {
+    /// A real workspace takes precedence over the chat's persistent output area.
+    pub fn fileDirectory(&self, storage: Arc<dyn operit_host_api::RuntimeStorageHost>) -> Result<Option<String>, String> {
+        if let Some(path) = self.workspacePath.as_ref().filter(|path| !path.trim().is_empty()) {
+            return Ok(Some(path.clone()));
+        }
+        match self.callerChatId.as_deref() {
+            Some(id) => operit_store::ChatOutputStore::ChatOutputStore::new(storage).prepare(id),
+            None => Ok(None),
+        }
+    }
+
     /// Rejects unauthenticated or malformed turn identities before entering any policy dispatch.
     pub fn validateExecutionContext(&self) -> Result<(), String> {
         if self.extensionOwner.trim().is_empty()
@@ -101,25 +112,9 @@ impl ToolCall {
         if self.name == CLI_PROXY_TOOL_NAME && context.turnSnapshot().map(|turn| &turn.toolExposureMode) != Some(&ToolExposureMode::CLI) {
             return Err(CliToolModeSupport::buildCliModeUnavailableMessage(false));
         }
-        // 模型经常把目标工具的参数直接放到顶层（`command`、`background`、`city` …），
-        // 而不是塞进 `params`。过去这里直接报 `Unexpected proxy parameter: <key>` 拒绝，
-        // 实测同一位调用方连续踩了 10 次（每次都要重发一遍正确形状），
-        // 属于对调用方极端不友好的形状校验。
-        //
-        // 现在改为**自动折叠**：顶层出现的不属于 proxy 信封本身的键，
-        // 一律并入 `params`（`params` 里已有的同名键优先，不覆盖调用方显式写的值）。
-        let mut foldedTopLevel: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        for (key, value) in &self.parameters {
-            if !matches!(
-                key.as_str(),
-                "tool_name"
-                    | "params"
-                    | PACKAGE_CALLER_NAME_PARAM
-                    | PACKAGE_CHAT_ID_PARAM
-                    | PACKAGE_CALLER_PARTICIPANT_ID_PARAM
-                    | PACKAGE_CALLER_OWNER_PARAM
-            ) {
-                foldedTopLevel.insert(key.clone(), value.clone());
+        for key in self.parameters.keys() {
+            if !matches!(key.as_str(), "tool_name" | "params" | PACKAGE_CALLER_NAME_PARAM | PACKAGE_CHAT_ID_PARAM | PACKAGE_CALLER_PARTICIPANT_ID_PARAM | PACKAGE_CALLER_OWNER_PARAM) {
+                return Err(format!("Unexpected proxy parameter: {key}. Put target tool parameters inside params as a JSON object."));
             }
         }
         // `tool_name` 可能缺失，也可能被写进 `params` 里 —— 两者都实测出现过。
@@ -320,10 +315,11 @@ pub struct RouteChangeIntent {
     pub targetNodeId: String,
 }
 
-/// Owns finalized results and the exact markup shared by display and model history.
+/// Owns finalized results and separate display and provider projections.
 pub struct ToolExecutionBatch {
     pub results: Vec<ToolResult>,
     pub message: String,
+    pub displayMessage: String,
     pub routeChangeIntent: Option<RouteChangeIntent>,
 }
 
@@ -331,7 +327,10 @@ impl ToolExecutionBatch {
     /// Formats each invocation result once without imposing a batch-wide output limit.
     pub fn new(results: Vec<ToolResult>, routeChangeIntent: Option<RouteChangeIntent>) -> Self {
         let message = ConversationMarkupManager::buildToolResultMessage(&results);
-        Self { results, message, routeChangeIntent }
+        let displayMessage = results.iter()
+            .map(|result| ConversationMarkupManager::formatToolResultForDisplay(result, None))
+            .collect::<Vec<_>>().join("\n");
+        Self { results, message, displayMessage, routeChangeIntent }
     }
 }
 
@@ -483,6 +482,7 @@ impl ToolExecutionManager {
         runtimeContext.validateExecutionContext()?;
         Self::scopeToolRuntimeContext(runtimeContext, async move {
         let mut results = Vec::new();
+        let mut displays = Vec::new();
         let mut routeChangeIntent = None;
         let requestedToolNames = invocations
             .iter()
@@ -570,7 +570,11 @@ impl ToolExecutionManager {
                 let finalResult = ToolResult {
                     toolName: displayToolName.clone(),
                     success: last.success,
-                    result: stringResultData(combinedResultString),
+                    result: if collected.len() == 1 {
+                        last.result.clone()
+                    } else {
+                        stringResultData(combinedResultString)
+                    },
                     error: last.error.clone(),
                 };
                 if let Some(intent) = Self::routeChangeIntentForResult(&invocation.tool, last) {
@@ -587,11 +591,15 @@ impl ToolExecutionManager {
                     ),
                     operit_util::AppLogger::VERBOSE_LEVEL_3,
                 );
+                displays.push(toolHandler.toolDisplayDeclaration(&displayToolName));
                 results.push(finalResult);
             }
         }
 
-        let batch = ToolExecutionBatch::new(results, routeChangeIntent);
+        let mut batch = ToolExecutionBatch::new(results, routeChangeIntent);
+        batch.displayMessage = batch.results.iter().zip(&displays)
+            .map(|(result, display)| ConversationMarkupManager::formatToolResultForDisplay(result, display.as_ref()))
+            .collect::<Vec<_>>().join("\n");
         AppLogger::v_with_level(
             TAG,
             &format!(

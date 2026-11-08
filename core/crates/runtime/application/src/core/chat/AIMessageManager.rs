@@ -17,11 +17,10 @@ use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
 use operit_providers::chat::enhance::InputProcessor::{InputProcessor, ProcessUserInputRequest};
 use operit_providers::chat::llmprovider::AIService::{AiServiceError, SharedAiResponseStream};
-use operit_providers::chat::llmprovider::MediaLinkBuilder::MediaLinkBuilder;
 use operit_providers::chat::llmprovider::MediaLinkParser::MediaLinkParser;
 use operit_providers::chat::EnhancedAIService::{
-    EnhancedAIService, MessageCancellationToken, ResumeRequest, SendMessageCallbacks,
-    SendMessageOptions, SendMessageRuntime,
+    ChatGuidanceInbox, EnhancedAIService, MessageCancellationToken, ResumeRequest,
+    SendMessageCallbacks, SendMessageOptions, SendMessageRuntime,
 };
 use operit_providers::runtime_support::ChatConfigurationResult;
 use operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore;
@@ -31,6 +30,7 @@ use operit_util::stream::Stream::Stream;
 use operit_util::AppLogger::AppLogger;
 use operit_util::ChainLogger::{self, PLUGIN_CHAIN, RECEIVE_CHAIN, SEND_CHAIN};
 use operit_util::ImagePoolManager::ImagePoolManager;
+use operit_util::MediaLinkBuilder::MediaLinkBuilder;
 use operit_util::MediaPoolManager::MediaPoolManager;
 
 const DEFAULT_CHAT_KEY: &str = "__DEFAULT_CHAT__";
@@ -61,6 +61,7 @@ pub struct BuildUserMessageContentRequest {
 pub struct SendMessageRequest<'a> {
     pub chatConfiguration: ChatConfigurationResult,
     pub enhancedAiService: &'a mut EnhancedAIService,
+    pub guidanceInbox: Option<ChatGuidanceInbox>,
     pub chatId: Option<String>,
     pub messageContent: String,
     pub chatHistory: Vec<ChatMessage>,
@@ -183,15 +184,20 @@ pub fn logMessageTiming(stage: &str, startTimeMs: MessageTiming, details: Option
 }
 
 impl AIMessageManager {
-    /// Records display identity and the actual author, without persisting execution configuration.
+    /// Records execution ownership and the assistant's display identity separately.
     pub fn applyConfigurationIdentity(message: &mut ChatMessage, configuration: &ChatConfigurationResult) {
-        message.pluginExtensions.insert(
-            "host.chat.identity".into(),
-            serde_json::json!({
-                "title": configuration.profile.name,
-                "avatarUri": configuration.profile.avatarUri,
-            }),
-        );
+        if message.sender == "ai" {
+            message.pluginExtensions.insert(
+                "host.chat.identity".into(),
+                serde_json::json!({
+                    "title": configuration.profile.name,
+                    "avatarUri": configuration.profile.avatarUri,
+                }),
+            );
+        } else {
+            // The configured participant receives user input; it did not author it.
+            message.pluginExtensions.remove("host.chat.identity");
+        }
         message.pluginExtensions.insert(
             configuration.extensionOwner.clone(),
             serde_json::json!({ "participantId": configuration.profile.id }),
@@ -448,6 +454,7 @@ impl AIMessageManager {
 
         let mut options = SendMessageOptions::new();
         options.cancellationToken = Some(cancellationToken);
+        options.guidanceInbox = request.guidanceInbox;
         options.message = request.messageContent;
         options.chatId = request.chatId;
         options.chatHistory = memoryForRequest;
@@ -567,7 +574,10 @@ impl AIMessageManager {
     pub async fn summarizeMemory(
         enhancedAiService: &mut EnhancedAIService,
         messages: Vec<ChatMessage>,
-        autoContinue: bool) -> Result<Option<ChatMessage>, operit_providers::chat::llmprovider::AIService::AiServiceError>
+        autoContinue: bool,
+        chatId: String,
+        configuration: &ChatConfigurationResult,
+    ) -> Result<Option<ChatMessage>, operit_providers::chat::llmprovider::AIService::AiServiceError>
     {
         let lastSummaryIndex = messages
             .iter()
@@ -611,9 +621,11 @@ impl AIMessageManager {
             (role, format!("#{}: {cleanedContent}", index + 1))
         }).collect::<Vec<_>>();
 
+        let startTime = ChatMessageTimestampAllocator::currentTimeMillis();
         let summary = enhancedAiService
-            .generateSummary(conversationToSummarize, previousSummary)
+            .generateSummaryForConfiguration(conversationToSummarize, previousSummary, chatId, configuration)
             .await?;
+        let endTime = ChatMessageTimestampAllocator::currentTimeMillis();
         if summary.trim().is_empty() {
             return Ok(None);
         }
@@ -639,6 +651,9 @@ impl AIMessageManager {
             summaryWithQuotes.trim_end().to_string()
         };
 
+        let estimatedInputTokens = (summaryWithQuotes.len() * 3 / 2).max(1) as i64;
+        let estimatedOutputTokens = (finalSummary.len() / 2).max(1) as i64;
+
         Ok(Some(ChatMessage {
             sender: "summary".to_string(),
             parts: vec![operit_model::MessagePart::MessagePart::markdown(
@@ -648,6 +663,11 @@ impl AIMessageManager {
             )],
             timestamp: ChatMessageTimestampAllocator::next(),
             roleName: "system".to_string(),
+            inputTokens: estimatedInputTokens,
+            outputTokens: estimatedOutputTokens,
+            waitDurationMs: (endTime - startTime).max(1),
+            sentAt: startTime,
+            completedAt: endTime,
             ..ChatMessage::new("summary".to_string())
         }))
     }
@@ -936,8 +956,22 @@ impl AIMessageManager {
         enableDirectAudioProcessing: bool,
         enableDirectVideoProcessing: bool,
     ) -> Result<String, String> {
+        // A synchronized attachment has a device-independent VFS locator. Resolve
+        // that exact shared path locally before considering its original host path.
+        let replica = fileSystemHost.and_then(|host| {
+            let path = attachment.fileToolPath();
+            if !["/operitapp/outputs/", "/operitapp/workspaces/", "/operitapp/data/data/chat_attachments/", "/app/workspaces/", "/app/outputs/", "/app/data/data/chat_attachments/"].iter().any(|root| path.starts_with(root)) { return None; }
+            let storage = operit_store::RuntimeStorageHost::defaultRuntimeStorageHostOption()?;
+            let mapper = operit_tools::files::PathMapper::PathMapper::new(storage.runtimeRootDir()?, storage.workspaceRootDir()?, storage);
+            let physical = mapper.resolve(&path).ok()?.nativePath().ok()?;
+            let found = host.fileExists(&physical).ok()?;
+            if !found.exists || found.isDirectory || found.size != attachment.fileSize { return None; }
+            let mut local = attachment.clone(); local.filePath = physical;
+            Some(local)
+        });
+        let attachment = replica.as_ref().unwrap_or(attachment);
         let currentNodeId = CoreNodeIdentityStore::localNodeId();
-        if !attachment.isLocalToNode(currentNodeId.as_deref()) {
+        if replica.is_none() && !attachment.isLocalToNode(currentNodeId.as_deref()) {
             // File hosts and media pools are node-local. Preserve the source locator instead
             // of attempting to open a remote path (especially fatal for audio/video).
             return Ok(format!(
@@ -1108,7 +1142,7 @@ impl AIMessageManager {
         {
             attributes.push_str(&format!(" node_id=\"{}\"", escape(nodeId)));
         }
-        if toolPath.starts_with("/app/data/temp/clean_on_exit/") {
+        if ["/app/", "/operitapp/", "/mnt/", "/virtual/"].iter().any(|root| toolPath.starts_with(root)) {
             attributes.push_str(&format!(" path=\"{}\"", escape(&toolPath)));
         }
         if attachment.fileSize > 0 {
@@ -1370,10 +1404,10 @@ fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
             }
             MessagePartKind::Thinking => None,
             MessagePartKind::ToolCall => {
-                let tool_name = part
-                    .toolName
-                    .as_deref()
-                    .expect("tool-call parts require a tool name");
+                let tool_label = match &part.toolName {
+                    Some(name) => format!("工具: {name}"),
+                    None => "工具".to_string(),
+                };
                 let params = part
                     .attributes
                     .iter()
@@ -1391,13 +1425,13 @@ fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
                 } else {
                     format!(" {}", params.join("; "))
                 };
-                Some(format!("[工具: {tool_name}]{params_text}"))
+                Some(format!("[{tool_label}]{params_text}"))
             }
             MessagePartKind::ToolResult => {
-                let tool_name = part
-                    .toolName
-                    .as_deref()
-                    .expect("tool-result parts require a tool name");
+                let tool_label = match &part.toolName {
+                    Some(name) => format!("结果: {name}"),
+                    None => "结果".to_string(),
+                };
                 let status = part
                     .attributes
                     .get("status")
@@ -1418,7 +1452,7 @@ fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
                 } else {
                     format!(" {result}")
                 };
-                Some(format!("[结果: {tool_name}{status_text}]{result_text}"))
+                Some(format!("[{tool_label}{status_text}]{result_text}"))
             }
         };
         if let Some(segment) = segment {
@@ -1630,29 +1664,39 @@ mod tests {
             "executionData":{"profile":profile,"private":"Runtime only"}
         })).unwrap();
         configuration.extensionOwner = "configuration-owner".into();
-        let mut message = ChatMessage::new("ai".into());
-        AIMessageManager::applyConfigurationIdentity(&mut message,&configuration);
-        assert_eq!(serde_json::to_value(&message.pluginExtensions).unwrap(),serde_json::json!({
-            "configuration-owner":{"participantId":"author-id"},
-            "host.chat.identity":{"title":"Display name","avatarUri":null}
-        }));
+        for sender in ["ai", "user"] {
+            let mut message = ChatMessage::new(sender.into());
+            message.pluginExtensions.insert("host.chat.identity".into(),
+                serde_json::json!({"title":"Operit","avatarUri":null}));
+            AIMessageManager::applyConfigurationIdentity(&mut message, &configuration);
+            let mut expected = serde_json::json!({
+                "configuration-owner":{"participantId":"author-id"}
+            });
+            if sender == "ai" {
+                expected["host.chat.identity"] = serde_json::json!({
+                    "title":"Display name","avatarUri":null
+                });
+            }
+            assert_eq!(serde_json::to_value(&message.pluginExtensions).unwrap(), expected);
+        }
     }
 
     #[test]
     fn attachment_markup_keeps_the_source_node_and_portable_tool_path() {
         let mut attachment = AttachmentInfo::new(
-            "/device-b/runtime/temp/clean_on_exit/report.pdf".into(),
+            "/device-b/runtime/data/chat_attachments/chat-a/attachment-a/report.pdf".into(),
             "报价单\".pdf".into(),
             "application/pdf".into(),
             3,
         );
         attachment.nodeId = Some("core-b".into());
+        attachment.vfsPath = Some("/operitapp/outputs/family/.operit/attachments/id/report.pdf".into());
         let tag =
             AIMessageManager::buildAttachmentTag(&attachment, None, false, false, false).unwrap();
         assert!(tag.contains("node_id=\"core-b\""));
-        assert!(tag.contains("path=\"/app/data/temp/clean_on_exit/report.pdf\""));
+        assert!(tag.contains("path=\"/operitapp/outputs/family/.operit/attachments/id/report.pdf\""));
         assert!(tag.contains("filename=\"报价单&quot;.pdf\""));
-        assert!(tag.contains("id=\"/app/data/temp/clean_on_exit/report.pdf\""));
+        assert!(tag.contains("id=\"/operitapp/outputs/family/.operit/attachments/id/report.pdf\""));
         assert!(!tag.contains("/device-b/"));
     }
 
@@ -1660,7 +1704,7 @@ mod tests {
     fn remote_media_never_reads_the_current_file_host() {
         for mimeType in ["image/png", "audio/mpeg", "video/mp4"] {
             let mut attachment = AttachmentInfo::new(
-                "/device-b/runtime/temp/clean_on_exit/media".into(),
+                "/device-b/runtime/data/chat_attachments/chat-a/attachment-a/media".into(),
                 "media".into(),
                 mimeType.into(),
                 3,
@@ -1794,7 +1838,7 @@ mod tests {
 
 #[cfg(test)]
 mod cancellation_tests {
-    use super::{ChatOperationRegistry, MessageCancellationToken};
+    use super::{AIMessageManager, AttachmentInfo, ChatOperationRegistry, MessageCancellationToken};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -1872,4 +1916,15 @@ mod cancellation_tests {
         assert_eq!(registry.take("second"), Some((secondId, "second-service")));
         assert!(registry.snapshot().is_empty());
     }
+    #[test]
+    fn output_attachment_uses_its_saved_vfs_locator_in_ai_metadata() {
+        let mut attachment = AttachmentInfo::new("/device-a/output/report.md".into(), "report.md".into(), "text/markdown".into(), 12);
+        attachment.vfsPath = Some("/operitapp/outputs/family/.operit/attachments/id/report.md".into());
+        attachment.nodeId = Some("source-node".into());
+        let tag = AIMessageManager::buildAttachmentTag(&attachment, None, false, false, false).unwrap();
+        assert!(tag.contains("path=\"/operitapp/outputs/family/.operit/attachments/id/report.md\""));
+        assert!(tag.contains("node_id=\"source-node\""));
+        assert!(!tag.contains("/device-a/"));
+    }
+
 }
