@@ -22,6 +22,7 @@ class AgentModelSelectorPopup extends StatefulWidget {
   const AgentModelSelectorPopup({
     super.key,
     required this.viewModel,
+    this.chatId,
     required this.onDismiss,
     required this.onModelChanged,
     this.onThinkingChanged,
@@ -56,6 +57,12 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
 
   /// The chat model's thinking as last set here, shown over the loaded data.
   core_proxy.ModelThinkingSettings? _thinking;
+
+  /// 当前会话已保存的会话级模型绑定。
+  ChatScopedModelBinding? _scopedBinding;
+
+  /// 本次选择的模型是否只写入当前会话。
+  bool _applyToCurrentChatOnly = false;
 
   GeneratedCoreProxyClients get _clients => widget.viewModel.clients;
 
@@ -293,6 +300,12 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
 
   /// The chat model's thinking as last set here, shown over the loaded data.
   core_proxy.ModelThinkingSettings? _thinking;
+
+  /// 当前会话已保存的会话级模型绑定。
+  ChatScopedModelBinding? _scopedBinding;
+
+  /// 本次选择的模型是否只写入当前会话。
+  bool _applyToCurrentChatOnly = false;
 
   GeneratedCoreProxyClients get _clients => widget.viewModel.clients;
 

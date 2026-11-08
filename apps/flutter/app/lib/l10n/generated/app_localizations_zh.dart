@@ -4511,7 +4511,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get peerQrShowHint => '让另一台设备扫描此码，连接到这台设备。';
 
   @override
-  String get peerQrScanHint => '扫描另一台设备的 Operit 连接码。';
+  String get peerQrScanHint => '扫描另一台设备的 PengSong 连接码。';
 
   @override
   String get peerQrTrustHint =>

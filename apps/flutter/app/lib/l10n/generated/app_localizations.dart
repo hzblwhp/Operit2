@@ -8321,7 +8321,7 @@ abstract class AppLocalizations {
   /// No description provided for @peerQrScanHint.
   ///
   /// In en, this message translates to:
-  /// **'Scan the Operit connection code on the other device.'**
+  /// **'Scan the PengSong connection code on the other device.'**
   String get peerQrScanHint;
 
   /// No description provided for @peerQrTrustHint.

@@ -184,6 +184,23 @@ impl ToolCall {
             serde_json::Value::Object(object) => object.clone(),
             _ => return Err("Proxy params must be a JSON object or its legacy text encoding".into()),
         };
+        // 模型经常把目标工具的参数直接放到顶层（command、background、city…），
+        // 而不是塞进 params。合并 preview.28 时上游重写了这一段，定义被丢掉但使用还在；
+        // 这里恢复「顶层未知键自动折叠进 params」的行为，params 里显式值优先。
+        let mut foldedTopLevel: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        for (key, value) in &self.parameters {
+            if !matches!(
+                key.as_str(),
+                "tool_name"
+                    | "params"
+                    | PACKAGE_CALLER_NAME_PARAM
+                    | PACKAGE_CHAT_ID_PARAM
+                    | PACKAGE_CALLER_PARTICIPANT_ID_PARAM
+                    | PACKAGE_CALLER_OWNER_PARAM
+            ) {
+                foldedTopLevel.insert(key.clone(), value.clone());
+            }
+        }
         let mut parameters = object.into_iter().collect::<BTreeMap<_, _>>();
         // 折叠的顶层参数只补缺失键，不覆盖调用方在 params 里显式写的值。
         for (key, value) in foldedTopLevel {

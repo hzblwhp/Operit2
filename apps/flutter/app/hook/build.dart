@@ -100,12 +100,18 @@ void main(List<String> args) async {
     );
     output.dependencies.add(cargoBuildScript.uri);
 
+    // PengSong 构建链在 WSL 里先跑 sync_plugin_packages.py（Linux/node 工具链完整），
+    // Windows 的 native-assets hook 只消费已同步的 toolpkg，避免复用 Linux 版
+    // esbuild 时缺 @esbuild/win32-x64 而中断 assemble。
     await _run(_pythonExecutable(repoRoot), [
       syncScript.path,
       '--source',
       'runtime',
       '--no-hot-reload',
-    ], workingDirectory: repoRoot.path);
+    ], workingDirectory: repoRoot.path, environment: <String, String>{
+      ...Platform.environment,
+      'OPERIT_SKIP_TOOLPKG_PACK': '1',
+    });
 
     if (shouldBuildWebAssets) {
       final fontScript = File.fromUri(

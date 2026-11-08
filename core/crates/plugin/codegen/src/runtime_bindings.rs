@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use syn::{Expr, FnArg, Item, Lit, Pat, TraitItem};
-use tree_sitter::Parser;
+use tree_sitter::{Node, Parser};
 
 const HOST_TRAITS: &[(&str, &str, &str)] = &[
     ("js_sdk/files.rs", "FilesHost", "Files"),
@@ -508,8 +508,9 @@ var __operitCanonicalTools = __operitCopyToolsNamespaces(Tools);
         output.push('\n');
         output.push_str(&fs::read_to_string(sdk_src.join(relative_path))?);
     }
+    // 先落盘再校验：生成失败时保留产物，才能定位到具体脚本和行列。
+    fs::write(&output_path, &output)?;
     validate_javascript_syntax(&output)?;
-    fs::write(output_path, output)?;
     Ok(())
 }
 
@@ -677,10 +678,35 @@ fn validate_javascript_syntax(source: &str) -> Result<(), Box<dyn Error>> {
         .parse(source, None)
         .ok_or("JavaScript parser did not produce a syntax tree")?;
     if tree.root_node().has_error() {
-        Err("generated JavaScript Tools runtime contains a syntax error".into())
+        let error = first_error_node(tree.root_node()).unwrap_or(tree.root_node());
+        let position = error.start_position();
+        let snippet = &source[error.start_byte()..error.end_byte().min(source.len())];
+        Err(format!(
+            "generated JavaScript Tools runtime contains a syntax error at {}:{}: {}",
+            position.row + 1,
+            position.column + 1,
+            snippet.chars().take(160).collect::<String>()
+        )
+        .into())
     } else {
         Ok(())
     }
+}
+
+/// Returns the first concrete parser error or missing node in a syntax tree.
+fn first_error_node(node: Node<'_>) -> Option<Node<'_>> {
+    if node.is_error() || node.is_missing() {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.has_error() {
+            if let Some(error) = first_error_node(child) {
+                return Some(error);
+            }
+        }
+    }
+    None
 }
 
 /// Reads owned argument identifiers from one host method signature.

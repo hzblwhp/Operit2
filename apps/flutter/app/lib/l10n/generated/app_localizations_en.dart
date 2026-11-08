@@ -4699,7 +4699,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get peerQrScanHint =>
-      'Scan the Operit connection code on the other device.';
+      'Scan the PengSong connection code on the other device.';
 
   @override
   String get peerQrTrustHint =>

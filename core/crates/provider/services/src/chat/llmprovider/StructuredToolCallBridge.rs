@@ -975,6 +975,61 @@ impl StructuredToolCallBridge {
         }))
     }
 
+    /// 兼容某些模型自己发明的 tool_call 写法。
+    ///
+    /// 标准格式是 `<tool name="X"><param name="k">v</param></tool>`；
+    /// 但本地模型常写成 `<tool_call> <function=content_file> <parameter=new> ...`
+    /// —— 真实工具名在 `<function=…>` 里，参数用 `<parameter=…>` 平铺。
+    /// 合并 preview.28 时上游重写了调用方，这个定义被丢掉但调用还在，导致编译失败。
+    fn parseLooseToolCallBody(body: &str) -> Option<(String, Map<String, Value>)> {
+        const FUNCTION_OPEN: &str = "<function=";
+        const PARAMETER_OPEN: &str = "<parameter=";
+        const PARAM_OPEN: &str = "<param=";
+
+        let fnPos = body.find(FUNCTION_OPEN)?;
+        let afterFn = &body[fnPos + FUNCTION_OPEN.len()..];
+        let nameEnd = afterFn.find('>')?;
+        let toolName = afterFn[..nameEnd].trim().trim_matches('"').trim().to_string();
+        if toolName.is_empty() {
+            return None;
+        }
+        let tail = &afterFn[nameEnd + 1..];
+
+        let mut opens: Vec<(usize, usize)> = Vec::new();
+        for marker in [PARAMETER_OPEN, PARAM_OPEN] {
+            let mut from = 0usize;
+            while let Some(rel) = tail[from..].find(marker) {
+                let abs = from + rel;
+                opens.push((abs, marker.len()));
+                from = abs + marker.len();
+            }
+        }
+        opens.sort_by_key(|(pos, _)| *pos);
+
+        let mut params = Map::new();
+        for (index, (start, markerLen)) in opens.iter().enumerate() {
+            let after = &tail[start + markerLen..];
+            let Some(keyEnd) = after.find('>') else { continue };
+            let key = after[..keyEnd].trim().trim_matches('"').trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+            let valueStart = start + markerLen + keyEnd + 1;
+            let valueEnd = opens
+                .get(index + 1)
+                .map(|(pos, _)| *pos)
+                .unwrap_or(tail.len());
+            if valueStart > valueEnd {
+                continue;
+            }
+            let value = Self::xmlUnescape(&tail[valueStart..valueEnd])
+                .trim()
+                .to_string();
+            params.insert(key, json!(value));
+        }
+        Some((toolName, params))
+    }
+
     pub(crate) fn parseXmlToolCalls(content: &str) -> (String, Option<Vec<Value>>) {
         let matches = ChatMarkupRegex::tool_call_matches(content);
         if matches.is_empty() {

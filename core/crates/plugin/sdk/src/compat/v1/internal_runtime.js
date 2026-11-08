@@ -266,7 +266,7 @@ async function v1FileRequest(operation, args) {
         + " " + v1ShellQuote(v1Utf8Hex(request));
     const result = await v1Program(command, 60000);
     const output = String(result.output || "").trim();
-    const lastLine = output.split("\n").filter(function(line: string) { return line.trim() !== ""; }).pop() || "";
+    const lastLine = output.split("\n").filter(function(line) { return line.trim() !== ""; }).pop() || "";
     try {
         return JSON.parse(lastLine);
     } catch (error) {

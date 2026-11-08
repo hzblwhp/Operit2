@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use crate::core::chat::AIMessageManager::{AIMessageManager, StableContextWindowRequest};
+use crate::data::preferences::PreferenceStorageManager::PreferenceStorageManager;
 use crate::services::core::ChatHistoryDelegate::ChatHistoryDelegate;
 use crate::services::core::MessageProcessingDelegate::ChatTurnSubmission;
 use crate::services::core::MessageProcessingDelegate::{
@@ -925,7 +926,11 @@ impl MessageCoordinationDelegate {
                 "SummaryGate",
                 &format!(
                     "judge messages={} window={} maxTokens={} threshold={:.3} => {}",
-                    gateMessages, gateWindow, maxTokens, threshold, gateShould,
+                    gateMessages,
+                    gateWindow,
+                    maxTokens,
+                    policy.tokenUsageThreshold,
+                    gateShould,
                 ),
             );
             if gateShould {

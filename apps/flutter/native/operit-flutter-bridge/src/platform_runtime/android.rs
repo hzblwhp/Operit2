@@ -13,10 +13,10 @@ use operit_link::LinkDeviceInfo;
 use super::{install_owner_media, BridgeStartup, StartupMetadata};
 use crate::FlutterHostAdapters::FlutterWebVisitBridge;
 use crate::FlutterOwnerCapabilities::{
-    ownerBluetooth, ownerDeviceInfo, ownerGetSystemSetting, ownerLocation,
-    ownerModifySystemSetting, ownerNotifications, ownerRecognizeText, ownerScreenshot,
-    ownerSendNotification, FlutterSystemBindings, FlutterSystemOperationBridge,
-    FlutterTtsSynthesisHost,
+    ownerAppUsageTime, ownerBluetooth, ownerDeviceInfo, ownerGetSystemSetting,
+    ownerListInstalledApps, ownerLocation, ownerModifySystemSetting, ownerNotifications,
+    ownerRecognizeText, ownerScreenshot, ownerSendNotification, ownerStartApp, ownerStopApp,
+    FlutterSystemBindings, FlutterSystemOperationBridge, FlutterTtsSynthesisHost,
 };
 
 /// Creates Android hosts and binds operations owned by the Flutter application.
