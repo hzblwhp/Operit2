@@ -72,6 +72,7 @@ class ThemeTopBarChrome extends StatelessWidget {
     required this.contentColor,
     required this.contentForeground,
     this.topPadding = 0,
+    this.height,
     this.flipNavigationIcon = false,
     this.actions = const <Widget>[],
   });
@@ -86,6 +87,8 @@ class ThemeTopBarChrome extends StatelessWidget {
   final Color contentColor;
   final Color contentForeground;
   final double topPadding;
+  /// Optional compact height for a single screen (for example chat).
+  final double? height;
   final bool flipNavigationIcon;
   final List<Widget> actions;
 
@@ -95,10 +98,12 @@ class ThemeTopBarChrome extends StatelessWidget {
     final navigationIconWidget = navIcon != null
         ? Icon(navIcon, color: contentForeground)
         : null;
+    final effectiveHeight = height ?? toolbarHeight;
+    final iconExtent = effectiveHeight < 48 ? effectiveHeight : 48.0;
     return ColoredBox(
       color: contentColor,
       child: SizedBox(
-        height: topPadding + toolbarHeight,
+        height: topPadding + effectiveHeight,
         child: Padding(
           padding: EdgeInsets.only(top: topPadding),
           child: Row(
@@ -106,9 +111,15 @@ class ThemeTopBarChrome extends StatelessWidget {
               if (navIcon != null && navigationIconWidget != null) ...<Widget>[
                 const SizedBox(width: 4),
                 SizedBox(
-                  width: 48,
-                  height: 48,
+                  width: iconExtent,
+                  height: iconExtent,
                   child: IconButton(
+                    padding: EdgeInsets.zero,
+                    constraints: BoxConstraints.tightFor(
+                      width: iconExtent,
+                      height: iconExtent,
+                    ),
+                    iconSize: iconExtent < 48 ? iconExtent * 0.62 : 24,
                     onPressed: onNavigationPressed,
                     icon: flipNavigationIcon
                         ? Transform(
@@ -123,7 +134,18 @@ class ThemeTopBarChrome extends StatelessWidget {
                 ),
               ] else ...<Widget>[const SizedBox(width: 16)],
               Expanded(child: title),
-              ...actions,
+              for (final action in actions)
+                if (iconExtent < 48)
+                  SizedBox(
+                    height: iconExtent,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerRight,
+                      child: action,
+                    ),
+                  )
+                else
+                  action,
             ],
           ),
         ),

@@ -290,6 +290,10 @@ class _AppContentState extends State<AppContent> {
                   contentColor: contentColor,
                   contentForeground: appBarContentColor,
                   topPadding: topPadding,
+                  // 聊天页把顶部栏压到 28dp，给会话内容多腾出约 1cm 纵向空间。
+                  height: widget.currentScreen.routeTypeName == 'AiChat'
+                      ? 28
+                      : null,
                   flipNavigationIcon: shouldFlipNavigationIcon,
                   actions: <Widget>[
                     if (actions != null) ...actions(context),
