@@ -404,7 +404,9 @@ async function __operitPreferencesOpen(options) {
     }
     /** Makes the portable contract available to native replay even after this JS handle closes. */
     async function declareSchema() {
-        if (schema !== null && !schemaReady) {
+        // 旧插件用 withSchema(version, callback) 在 JS 侧迁移，没有声明式 steps；
+        // 这类 schema 不能发给原生，迁移在 edit() 里执行。
+        if (schema !== null && !schemaReady && !schema.migrate) {
             await request("preferences_schema",{schema:schema});
             schemaReady=true;
         }
@@ -416,6 +418,13 @@ async function __operitPreferencesOpen(options) {
         var draft=__operitPreferencesView(edit.snapshot.values,true), version=edit.snapshot.schemaVersion;
         try {
             checkVersion(version);
+            // 兼容旧版 withSchema callback：按版本号逐级迁移后再执行调用方的 edit。
+            if (schema !== null && schema.migrate) {
+                while (version < schema.version) {
+                    await schema.migrate(version,draft.view);
+                    version+=1;
+                }
+            }
             if (transform !== null) await transform(draft.view);
             __operitStorageValidate(draft.values,[]);
             draft.seal();submitted=true;
@@ -434,13 +443,22 @@ async function __operitPreferencesOpen(options) {
         await declareSchema();
         var snapshot=await request("preferences_data",{});
         checkVersion(snapshot.schemaVersion);
-        if (schema !== null && snapshot.schemaVersion < schema.version) throw new Error("Native preference migration did not reach the declared version");
+        if (schema !== null && snapshot.schemaVersion < schema.version) {
+            if (schema.migrate) return edit(null);
+            throw new Error("Native preference migration did not reach the declared version");
+        }
         return snapshot;
     }
     var facade={path:opened.path,
         /** Declares the supported version before this handle performs any operation. */
         withSchema(currentVersion,steps) {
             if (started || closed || schema !== null) throw new Error("withSchema must be declared once before using a DataStore handle");
+            if (typeof steps === "function") {
+                // 旧 SDK 契约：withSchema(version, (fromVersion, preferences) => {...})
+                if (!Number.isInteger(currentVersion) || currentVersion < 0 || currentVersion > 4294967295) throw new Error("withSchema requires a uint32 version and migration callback");
+                schema={version:currentVersion,migrate:steps};
+                return facade;
+            }
             if (!Number.isInteger(currentVersion) || currentVersion < 0 || currentVersion > 4294967295 || !Array.isArray(steps) || steps.length !== currentVersion) throw new Error("withSchema requires a uint32 version and one rule array per version");
             __operitStorageValidate(steps,[]);
             if (steps.some(function(step){return !Array.isArray(step);})) throw new Error("Each migration step requires an array of rules");

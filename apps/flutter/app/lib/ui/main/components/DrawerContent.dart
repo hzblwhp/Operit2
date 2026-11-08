@@ -921,7 +921,7 @@ class _DrawerContentState extends State<DrawerContent> {
         children: <Widget>[
           Expanded(
             child: SidebarInfoCard(
-              brandName: 'Operit',
+              brandName: 'PengSong',
               appearance: widget.appearance,
               trailing: tabs,
             ),
