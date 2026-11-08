@@ -18,7 +18,9 @@ class CursorMessageLayout extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: EdgeInsets.symmetric(horizontal: 16, vertical: verticalPadding),
+      // 聊天内容贴边显示：外层不再保留左右 16dp 内边距，
+      // 气泡/编辑器自己的内部留白仍在，但整列文字能吃满屏幕宽度。
+      padding: EdgeInsets.symmetric(horizontal: 0, vertical: verticalPadding),
       child: child,
     );
   }
