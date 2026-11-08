@@ -158,6 +158,18 @@ pub(crate) fn schema() -> PreferenceMergeSchema {
             PreferenceMergeStore::values(
             operit_util::RuntimeStorageLayout::WORKSPACES_PREFERENCES_PATH, false,
             operit_store::repository::WorkspacePreferenceStore::WorkspacePreferenceStore::openStore),
+            // PengSong: 每个会话独立模型绑定的自定义 preference 文件。
+            // preview.28 把 open() 收紧为“只允许已声明 owner”，这个文件必须显式注册，
+            // 否则 ChatScopedModelBinding 读取时会报 Undeclared preference owner。
+            PreferenceMergeStore::values(
+                "runtime/config/preferences/chat_scoped_model_binding",
+                false,
+                |storage, path| {
+                    operit_store::PreferencesDataStore::PreferencesDataStore::newWithStorage(
+                        storage, path,
+                    )
+                },
+            ),
         ],
     }
 }
