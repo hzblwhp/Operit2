@@ -62,7 +62,8 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
   ChatScopedModelBinding? _scopedBinding;
 
   /// 本次选择的模型是否只写入当前会话。
-  bool _applyToCurrentChatOnly = false;
+  // 会话内选模型一律只写当前会话，不再提供全局/本会话二选一。
+  bool _applyToCurrentChatOnly = true;
 
   GeneratedCoreProxyClients get _clients => widget.viewModel.clients;
 
@@ -109,7 +110,7 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
 
   /// Loads model, context, and thinking settings for the popup.
   Future<_AgentModelSelectorData> _loadSettings() {
-    return _loadAgentModelSelectorData(_clients);
+    return _loadAgentModelSelectorData(_clients, chatId: widget.chatId);
   }
 
   /// Applies a provider model as the chat model.
@@ -305,7 +306,8 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
   ChatScopedModelBinding? _scopedBinding;
 
   /// 本次选择的模型是否只写入当前会话。
-  bool _applyToCurrentChatOnly = false;
+  // 会话内选模型一律只写当前会话，不再提供全局/本会话二选一。
+  bool _applyToCurrentChatOnly = true;
 
   GeneratedCoreProxyClients get _clients => widget.viewModel.clients;
 
@@ -352,7 +354,7 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
 
   /// Loads model selector state for the embedded input menu section.
   Future<_AgentModelSelectorData> _loadSettings() {
-    return _loadAgentModelSelectorData(_clients);
+    return _loadAgentModelSelectorData(_clients, chatId: widget.chatId);
   }
 
   /// Selects one configured model for chat from the embedded menu.
@@ -483,17 +485,6 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
-                        _ChatModelScopeRow(
-                          chatId: widget.chatId,
-                          checked: _applyToCurrentChatOnly,
-                          scopedBinding: _scopedBinding,
-                          onToggle: (value) {
-                            setState(() {
-                              _applyToCurrentChatOnly = value;
-                            });
-                          },
-                          onClear: _clearScopedBinding,
-                        ),
                         _ModelSelectorItem(
                           popupContainerColor: embeddedPanelColor,
                           headerIcon: Icons.tune_outlined,
@@ -1760,10 +1751,24 @@ class _InfoIconButton extends StatelessWidget {
 }
 
 Future<_AgentModelSelectorData> _loadAgentModelSelectorData(
-  GeneratedCoreProxyClients clients,
-) async {
-  final binding = await clients.preferencesFunctionalConfigManager
+  GeneratedCoreProxyClients clients, {
+  String? chatId,
+}) async {
+  // 会话有独立绑定时用它；没有绑定时才回落到全局对话模型。
+  // 选择器高亮的模型必须和当前会话实际发送时使用的模型一致。
+  final scopedChatId = (chatId ?? '').trim();
+  final scoped = scopedChatId.isEmpty
+      ? null
+      : await ChatScopedModelBinding.read(clients, scopedChatId);
+  final global = await clients.preferencesFunctionalConfigManager
       .getModelBindingForFunction(functionType: core_proxy.FunctionType.chat);
+  final binding = scoped == null
+      ? global
+      : core_proxy.FunctionModelBinding(
+          providerId: scoped.providerId,
+          modelId: scoped.modelId,
+          followsChat: false,
+        );
   final thinkingSettings = await clients.preferencesModelConfigManager
       .getThinkingSettingsForModel(
         providerId: binding.providerId,
