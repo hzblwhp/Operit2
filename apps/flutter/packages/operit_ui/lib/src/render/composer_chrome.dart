@@ -88,7 +88,8 @@ class ThemeClassicComposerTextEditor extends StatelessWidget {
           key: const ValueKey<String>('chat.input'),
           controller: controller,
           focusNode: focusNode,
-          minLines: inputExpanded ? 10 : 1,
+          // 经典输入框同样默认多留两行（≈1cm），展开态保持 10 行。
+          minLines: inputExpanded ? 10 : 3,
           maxLines: inputExpanded ? 16 : 5,
           readOnly: readOnly,
           textInputAction: TextInputAction.newline,
