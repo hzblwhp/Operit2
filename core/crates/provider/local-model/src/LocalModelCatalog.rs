@@ -20,6 +20,8 @@ const SHERPA_ONNX_MATCHA_BAKER_REVISION: &str = "75e64a57a80fb370abb18a4e4d86bb0
 const SHERPA_ONNX_KITTEN_NANO_ID: &str = "kitten-nano-en-v0_8-int8";
 const SHERPA_ONNX_KITTEN_NANO_VERSION: &str = "tts-models";
 const SHERPA_ONNX_KOKORO_ID: &str = "kokoro-int8-multi-lang-v1_0";
+const SHERPA_ONNX_ZIPVOICE_ID: &str = "sherpa-onnx-zipvoice-distill-int8-zh-en-emilia";
+const SHERPA_ONNX_VOCOS_24KHZ_ID: &str = "vocos_24khz.onnx";
 const SHERPA_ONNX_KOKORO_VERSION: &str = "v1.0";
 const SHERPA_ONNX_WEB_ASR_ID: &str = "sherpa-onnx-web-paraformer-small-zh-en";
 const SHERPA_ONNX_WEB_ASR_VERSION: &str = "1.13.2";
@@ -81,10 +83,126 @@ LocalModelFile { relativePath: "tokenizer.txt".to_string(), sha256: "77009625db0
             Self::sherpaOnnxMatchaBakerTts(),
             Self::sherpaOnnxKittenNanoTts(),
             Self::sherpaOnnxKokoroTts(),
+            Self::sherpaOnnxZipVoiceTts(),
             Self::sherpaOnnxWebAsr(),
             Self::sherpaOnnxWebVitsTts(),
         ]);
         manifests
+    }
+
+    /// Returns the zero-shot voice-cloning ZipVoice manifest.
+    ///
+    /// 参考音频与参考文本决定克隆音色，刻意不写进 manifest：
+    /// 用户可以直接替换安装目录下的 reference.wav / reference.txt 换声音。
+    pub fn sherpaOnnxZipVoiceTts() -> LocalModelManifest {
+        let sourceId = "github-sherpa-onnx-tts-models";
+        let vocoderSourceId = "github-sherpa-onnx-vocoder-models";
+        let modelRoot = SHERPA_ONNX_ZIPVOICE_ID;
+        let file = |name: &str, sha256: &str, byteSize: u64| {
+            modelFile(sourceId, &format!("{modelRoot}/{name}"), sha256, byteSize)
+        };
+        LocalModelManifest {
+            id: SHERPA_ONNX_ZIPVOICE_ID.to_string(),
+            version: "1.13.2".to_string(),
+            displayName: "Sherpa ONNX ZipVoice 零样本克隆".to_string(),
+            description: "Local Chinese/English zero-shot voice cloning speech synthesis."
+                .to_string(),
+            kind: LocalModelKind::TextToSpeech,
+            engine: LocalEngineKind::SherpaOnnx,
+            license: "apache-2.0".to_string(),
+            homepage: "https://github.com/k2-fsa/sherpa-onnx".to_string(),
+            languages: vec!["zh".to_string(), "en".to_string()],
+            tags: vec![
+                "zipvoice".to_string(),
+                "voice-cloning".to_string(),
+                "neural".to_string(),
+                "sherpa-onnx".to_string(),
+                "archive".to_string(),
+            ],
+            engineRequirement: Some(sherpaOnnxRequirement()),
+            driver: Some(LocalModelDriver::SherpaOnnxZipVoice {
+                encoder: format!("{modelRoot}/encoder.int8.onnx"),
+                decoder: format!("{modelRoot}/decoder.int8.onnx"),
+                vocoder: SHERPA_ONNX_VOCOS_24KHZ_ID.to_string(),
+                tokens: format!("{modelRoot}/tokens.txt"),
+                dataDir: format!("{modelRoot}/espeak-ng-data"),
+                lexicon: format!("{modelRoot}/lexicon.txt"),
+                numSteps: 4,
+                speakerCount: 1,
+            }),
+            sources: vec![
+                LocalModelSource {
+                    id: sourceId.to_string(),
+                    kind: LocalModelSourceKind::DirectHttp,
+                    repository: "k2-fsa/sherpa-onnx".to_string(),
+                    revision: "tts-models".to_string(),
+                    baseUrl:
+                        "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
+                            .to_string(),
+                },
+                LocalModelSource {
+                    id: vocoderSourceId.to_string(),
+                    kind: LocalModelSourceKind::DirectHttp,
+                    repository: "k2-fsa/sherpa-onnx".to_string(),
+                    revision: "vocoder-models".to_string(),
+                    baseUrl:
+                        "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models"
+                            .to_string(),
+                },
+            ],
+            installSource: LocalModelInstallSource::Archives {
+                archives: vec![
+                    LocalModelArchive {
+                        archiveId: SHERPA_ONNX_ZIPVOICE_ID.to_string(),
+                        relativePath: format!("{SHERPA_ONNX_ZIPVOICE_ID}.tar.bz2"),
+                        sha256:
+                            "77219c8b40f4ee8d73a7f902305ff6c1128ef9b54461c41b4ca6ed890b6c2803"
+                                .to_string(),
+                        byteSize: 109_162_785,
+                        sourceId: sourceId.to_string(),
+                        archiveFormat: LocalModelArchiveFormat::TarBz2,
+                    },
+                    LocalModelArchive {
+                        archiveId: SHERPA_ONNX_VOCOS_24KHZ_ID.to_string(),
+                        relativePath: SHERPA_ONNX_VOCOS_24KHZ_ID.to_string(),
+                        sha256:
+                            "bcb3b970e384161c4d634f0bb9e999ff1c471b34c9bc0b1049a5014065ed3cc0"
+                                .to_string(),
+                        byteSize: 54_157_409,
+                        sourceId: vocoderSourceId.to_string(),
+                        archiveFormat: LocalModelArchiveFormat::Raw,
+                    },
+                ],
+            },
+            files: vec![
+                file(
+                    "encoder.int8.onnx",
+                    "f2de9a761a85e5ddd125dee6e05bad1c7ee92c11b83b4d775dab216a6aa41379",
+                    5_570_211,
+                ),
+                file(
+                    "decoder.int8.onnx",
+                    "3cc2e08a96610d7ea1b227398e97cdbbe0414499741d3aec0b8113db2a2ab251",
+                    124_657_100,
+                ),
+                file(
+                    "tokens.txt",
+                    "ce98c1afc5f7a20c2484dffdd68a1fff0a4a2cc707328833750c4476c37cdbda",
+                    2_570,
+                ),
+                file(
+                    "lexicon.txt",
+                    "c94b049d970e971acdc2a7e5e7b23ca594222a9d640e417c711f2ad1e7bb7d46",
+                    1_727_147,
+                ),
+                modelFile(
+                    vocoderSourceId,
+                    SHERPA_ONNX_VOCOS_24KHZ_ID,
+                    "bcb3b970e384161c4d634f0bb9e999ff1c471b34c9bc0b1049a5014065ed3cc0",
+                    54_157_409,
+                ),
+            ],
+        }
     }
 
     /// Returns the cross-platform bilingual Sherpa ONNX streaming STT manifest.

@@ -359,29 +359,79 @@ class TtsPlaybackController extends ChangeNotifier {
           }
           continue;
         }
-        final audioSources = await _synthesize(request, voice);
-        if (request.generation != _generation) {
-          continue;
-        }
-        if (audioSources.isEmpty) {
+        final segments = _segmentForStreaming(request.text);
+        if (segments.isEmpty) {
           throw StateError('tts synthesis returned no audio sources');
         }
-        for (var index = 0; index < audioSources.length; index += 1) {
+        debugPrint(
+          '[TTS] request chars=${request.text.length} '
+          'segments=${segments.length}',
+        );
+        var failedSegments = 0;
+        Object? firstSegmentError;
+        Future<List<_TtsPlaybackAudioSource>>? pendingSynthesis = _synthesize(
+          request,
+          voice,
+          segments.first,
+        );
+        for (var index = 0; index < segments.length; index += 1) {
+          final pending = pendingSynthesis;
+          if (pending == null) {
+            break;
+          }
+          if (index + 1 < segments.length) {
+            final prefetched = _synthesize(request, voice, segments[index + 1]);
+            // 取消时预取结果可能无人等待，标记忽略以免抛未处理异常。
+            prefetched.ignore();
+            pendingSynthesis = prefetched;
+          } else {
+            pendingSynthesis = null;
+          }
+          final synthesizeStartedAt = DateTime.now();
+          final List<_TtsPlaybackAudioSource> audioSources;
+          try {
+            audioSources = await pending;
+          } catch (error) {
+            // 单段失败不能带走整篇：只有所有段都失败时才让整条请求失败。
+            failedSegments += 1;
+            firstSegmentError ??= error;
+            debugPrint(
+              '[TTS] segment ${index + 1}/${segments.length} '
+              'chars=${segments[index].length} synthesis failed: $error',
+            );
+            if (failedSegments == segments.length) {
+              throw firstSegmentError;
+            }
+            continue;
+          }
           if (request.generation != _generation) {
             break;
           }
-          final audioSource = audioSources[index];
-          _publish(
-            _state.copyWith(
-              phase: TtsPlaybackPhase.preparing,
-              currentAudioPath: audioSource.path,
-              queueLength: _queue.length,
-              audioIndex: index + 1,
-              audioCount: audioSources.length,
-              clearError: true,
-            ),
+          if (audioSources.isEmpty) {
+            throw StateError('tts synthesis returned no audio sources');
+          }
+          debugPrint(
+            '[TTS] segment ${index + 1}/${segments.length} '
+            'chars=${segments[index].length} '
+            'synthMs=${DateTime.now().difference(synthesizeStartedAt).inMilliseconds} '
+            'audios=${audioSources.length}',
           );
-          await _playAudioSource(request, audioSource);
+          for (var sourceIndex = 0;
+              sourceIndex < audioSources.length;
+              sourceIndex += 1) {
+            final audioSource = audioSources[sourceIndex];
+            _publish(
+              _state.copyWith(
+                phase: TtsPlaybackPhase.preparing,
+                currentAudioPath: audioSource.path,
+                queueLength: _queue.length,
+                audioIndex: index + 1,
+                audioCount: segments.length,
+                clearError: true,
+              ),
+            );
+            await _playAudioSource(request, audioSource);
+          }
         }
         _currentRequest = null;
         activeRequest = null;
@@ -456,15 +506,16 @@ class TtsPlaybackController extends ChangeNotifier {
     return true;
   }
 
-  /// Synthesizes generated audio sources for one request.
+  /// Synthesizes generated audio sources for one text segment of a request.
   Future<List<_TtsPlaybackAudioSource>> _synthesize(
     _TtsPlaybackRequest request,
     _ResolvedTtsVoice voice,
+    String text,
   ) async {
     final result = await request.clients.servicesTtsSynthesisService
         .synthesizeWithConfig(
           ttsConfigId: voice.ttsConfigId,
-          text: request.text,
+          text: text,
         );
     final json = result.toJson();
     final audioPaths = _jsonStringList(json, 'audioPaths');
@@ -479,6 +530,72 @@ class TtsPlaybackController extends ChangeNotifier {
           storagePath: audioStoragePaths[index],
         ),
     ];
+  }
+
+  /// Splits text into playback-sized segments so the first audio starts fast.
+  ///
+  /// 本地神经 TTS 的 RTF 接近甚至超过 1，整篇一次合成会让用户在「生成中」
+  /// 停留数分钟。首段刻意取短以保证尽快出声，后续段在播放当前段期间并行合成。
+  List<String> _segmentForStreaming(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) {
+      return const <String>[];
+    }
+    const int firstSegmentChars = 40;
+    // 零样本克隆模型（ZipVoice）的时长预测器在长输入下会明显少生成：
+    // 220 字一段实测只覆盖约一半文本，听感就是「漏读」。
+    // 按句切到 60 字后每段都能完整覆盖，后续段仍由播放队列连续接续。
+    const int followingSegmentChars = 60;
+    final segments = <String>[];
+    var remaining = trimmed;
+    while (remaining.isNotEmpty) {
+      final limit = segments.isEmpty
+          ? firstSegmentChars
+          : followingSegmentChars;
+      if (remaining.length <= limit) {
+        segments.add(remaining);
+        break;
+      }
+      final end = _segmentBoundary(remaining, limit);
+      segments.add(remaining.substring(0, end).trim());
+      remaining = remaining.substring(end).trim();
+    }
+    return segments.where((segment) => segment.isNotEmpty).toList();
+  }
+
+  /// Finds a natural split point at or before the limit.
+  ///
+  /// 优先句末标点，其次逗号与空白，最后才硬切；硬切点避开代理对，
+  /// 避免把 emoji 之类的字符劈成两半。
+  int _segmentBoundary(String text, int limit) {
+    const sentencePunctuation = '。！？；!?;\n';
+    final earliest = limit ~/ 2;
+    for (var index = limit - 1; index >= earliest; index -= 1) {
+      if (sentencePunctuation.contains(text[index])) {
+        return _safeCut(text, index + 1, limit);
+      }
+    }
+    for (var index = limit - 1; index >= earliest; index -= 1) {
+      final character = text[index];
+      if (character == ' ' || character == '，' || character == ',') {
+        return _safeCut(text, index + 1, limit);
+      }
+    }
+    return _safeCut(text, limit, limit);
+  }
+
+  /// Pulls a cut point back when it would split a surrogate pair.
+  int _safeCut(String text, int cut, int limit) {
+    if (cut <= 0 || cut > text.length) {
+      return limit;
+    }
+    if (cut < text.length) {
+      final next = text.codeUnitAt(cut);
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        return cut - 1 <= 0 ? limit : cut - 1;
+      }
+    }
+    return cut;
   }
 
   /// Starts host system speech and returns its authoritative state.
@@ -560,10 +677,15 @@ class TtsPlaybackController extends ChangeNotifier {
       }
       request.completeStart();
       _publish(_state.copyWith(phase: TtsPlaybackPhase.playing));
+      final playStartedAt = DateTime.now();
       final status = await _readHostStatus(
         request.clients.servicesTtsPlaybackService.speechState(),
       );
       await _waitHostPlayback(request, status);
+      debugPrint(
+        '[TTS] played ${audioSource.path} '
+        'playMs=${DateTime.now().difference(playStartedAt).inMilliseconds}',
+      );
     } finally {
       if (identical(_hostSpeechBridge, request.bridge)) {
         _hostSpeechBridge = null;

@@ -105,9 +105,18 @@ impl LocalModelRegistrySnapshot {
     pub fn getInstalledModel(&self, modelId: &str, version: &str) -> Option<&InstalledLocalModel> {
         let modelId = modelId.trim();
         let version = version.trim();
-        self.installedModels
+        if let Some(model) = self
+            .installedModels
             .iter()
             .find(|model| model.manifest.id == modelId && model.manifest.version == version)
+        {
+            return Some(model);
+        }
+        // Fallback: tolerate ASCII case differences coming from free-form user input.
+        self.installedModels.iter().find(|model| {
+            model.manifest.id.eq_ignore_ascii_case(modelId)
+                && model.manifest.version.eq_ignore_ascii_case(version)
+        })
     }
 
     /// Returns installed models matching the supplied local model kind.

@@ -45,7 +45,7 @@ pub fn decode(code: &str, localNodeId: &str) -> Result<ConnectionInvitation, Cor
     let payload = code.strip_prefix(PREFIX).ok_or_else(|| {
         if code.starts_with("operit://connect/") {
             CoreLinkError::new("CONNECTION_CODE_VERSION", "This connection code requires a different app version")
-        } else { invalid("This is not an Operit device connection code") }
+        } else { invalid("This is not a PengSong device connection code") }
     })?;
     let bytes = URL_SAFE_NO_PAD.decode(payload).map_err(|_| invalid("Connection code is damaged"))?;
     let invitation = serde_json::from_slice(&bytes).map_err(|_| invalid("Connection code has an invalid format"))?;

@@ -1578,7 +1578,7 @@ fn validateDeviceProfileField(fieldName: &str, value: &str) -> Result<(), String
 /// Returns the initial display name assigned to a newly created Space.
 #[allow(non_snake_case)]
 fn defaultSpaceName() -> String {
-    "Operit".to_string()
+    "PengSong".to_string()
 }
 
 /// Creates a new identity for a device space created after leaving another space.

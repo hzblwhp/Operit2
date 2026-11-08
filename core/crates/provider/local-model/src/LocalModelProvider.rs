@@ -654,6 +654,57 @@ fn appendSherpaTtsDriverArguments(
                 modelDirectory,
             )
         }
+        LocalModelDriver::SherpaOnnxZipVoice {
+            encoder,
+            decoder,
+            vocoder,
+            tokens,
+            dataDir,
+            lexicon,
+            numSteps,
+            speakerCount,
+        } => {
+            validateSpeakerId(speakerId, *speakerCount, "ZipVoice")?;
+            args.push(format!(
+                "--zipvoice-encoder={}",
+                declaredModelFile(&runtime.model, modelDirectory, encoder)?.display()
+            ));
+            args.push(format!(
+                "--zipvoice-decoder={}",
+                declaredModelFile(&runtime.model, modelDirectory, decoder)?.display()
+            ));
+            args.push(format!(
+                "--zipvoice-vocoder={}",
+                declaredModelFile(&runtime.model, modelDirectory, vocoder)?.display()
+            ));
+            args.push(format!(
+                "--zipvoice-tokens={}",
+                declaredModelFile(&runtime.model, modelDirectory, tokens)?.display()
+            ));
+            args.push(format!(
+                "--zipvoice-data-dir={}",
+                declaredModelDirectory(&runtime.model, modelDirectory, dataDir)?.display()
+            ));
+            args.push(format!(
+                "--zipvoice-lexicon={}",
+                declaredModelFile(&runtime.model, modelDirectory, lexicon)?.display()
+            ));
+            args.push(format!("--num-steps={numSteps}"));
+            // 参考音频与参考文本决定音色，刻意不写进 manifest，
+            // 用户可以随时替换这两个文件来换声音而不必重装模型。
+            let referenceAudio = modelDirectory.join("reference.wav");
+            if !referenceAudio.is_file() {
+                return Err(LocalModelProviderError::RuntimeFileMissing(
+                    "reference.wav".to_string(),
+                ));
+            }
+            args.push(format!("--reference-audio={}", referenceAudio.display()));
+            let referenceText = modelDirectory.join("reference.txt");
+            let referenceTextValue = std::fs::read_to_string(&referenceText)
+                .map_err(|_| LocalModelProviderError::RuntimeFileMissing("reference.txt".to_string()))?;
+            args.push(format!("--reference-text={}", referenceTextValue.trim()));
+            Ok(())
+        }
         _ => Err(LocalModelProviderError::UnsupportedDriver(format!(
             "{:?}",
             runtime.model.manifest.engine

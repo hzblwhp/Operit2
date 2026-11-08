@@ -5,6 +5,8 @@ import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsZipVoiceModelConfig
+import com.k2fsa.sherpa.onnx.GenerationConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsMatchaModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
@@ -91,8 +93,11 @@ internal object AndroidLocalInference {
         val driver = taggedDriver.payload
         val speed = request.getDouble("speed")
         require(speed.isFinite() && speed > 0.0) { "LOCAL_MODEL TTS speed must be finite and positive" }
-        val speaker = request.getString("voice").toInt()
+        val requestedSpeaker = request.getString("voice").toInt()
         val speakerCount = driver.getInt("speakerCount")
+        // ZipVoice 是单音色克隆模型，音色完全由参考音频决定，
+        // 因此忽略配置里可能残留的多音色编号，统一用 0。
+        val speaker = if (taggedDriver.name == "SherpaOnnxZipVoice") 0 else requestedSpeaker
         require(speaker in 0 until speakerCount) {
             "LOCAL_MODEL TTS speaker must be between 0 and ${speakerCount - 1}"
         }
@@ -124,11 +129,35 @@ internal object AndroidLocalInference {
             }
         }
         val generated = synchronized(ttsLock) {
-            tts.generate(
-                text = request.getString("text"),
-                sid = speaker,
-                speed = speed.toFloat(),
-            )
+            if (taggedDriver.name == "SherpaOnnxZipVoice") {
+                // 零样本克隆：参考音频与参考文本共同决定音色，两者必须成对提供。
+                val referenceAudio = modelFile(modelDirectory, "reference.wav")
+                val referenceText = modelFile(modelDirectory, "reference.txt").readText().trim()
+                val referenceWave = WaveReader.readWaveFromFile(referenceAudio.absolutePath)
+                require(referenceWave.sampleRate > 0) {
+                    "LOCAL_MODEL ZipVoice reference audio sample rate is invalid"
+                }
+                require(referenceWave.samples.isNotEmpty()) {
+                    "LOCAL_MODEL ZipVoice reference audio contains no samples"
+                }
+                tts.generateWithConfig(
+                    text = request.getString("text"),
+                    config = GenerationConfig(
+                        speed = speed.toFloat(),
+                        sid = speaker,
+                        numSteps = driver.optInt("numSteps", 4),
+                        referenceAudio = referenceWave.samples,
+                        referenceSampleRate = referenceWave.sampleRate,
+                        referenceText = referenceText,
+                    ),
+                )
+            } else {
+                tts.generate(
+                    text = request.getString("text"),
+                    sid = speaker,
+                    speed = speed.toFloat(),
+                )
+            }
         }
         require(generated.samples.isNotEmpty()) { "LOCAL_MODEL TTS generated no audio samples" }
         require(generated.sampleRate > 0) { "LOCAL_MODEL TTS generated an invalid sample rate" }
@@ -151,6 +180,7 @@ internal object AndroidLocalInference {
             "SherpaOnnxMatcha" -> matchaTtsConfig(driver, modelDirectory)
             "SherpaOnnxKitten" -> kittenTtsConfig(driver, modelDirectory)
             "SherpaOnnxKokoro" -> kokoroTtsConfig(driver, modelDirectory)
+            "SherpaOnnxZipVoice" -> zipvoiceTtsConfig(driver, modelDirectory)
             else -> throw IllegalArgumentException("LOCAL_MODEL Android TTS driver is unsupported: $driverName")
         }
     }
@@ -231,6 +261,25 @@ internal object AndroidLocalInference {
             ),
             ruleFsts = modelFileList(modelDirectory, driver.getJSONArray("ruleFsts")),
             ruleFars = modelFileList(modelDirectory, driver.getJSONArray("ruleFars")),
+        )
+    }
+
+    /** Builds one ZipVoice zero-shot cloning TTS config from manifest-declared files. */
+    private fun zipvoiceTtsConfig(driver: JSONObject, modelDirectory: File): OfflineTtsConfig {
+        return OfflineTtsConfig(
+            model = OfflineTtsModelConfig(
+                zipvoice = OfflineTtsZipVoiceModelConfig(
+                    encoder = modelFile(modelDirectory, driver.getString("encoder")).absolutePath,
+                    decoder = modelFile(modelDirectory, driver.getString("decoder")).absolutePath,
+                    vocoder = modelFile(modelDirectory, driver.getString("vocoder")).absolutePath,
+                    tokens = modelFile(modelDirectory, driver.getString("tokens")).absolutePath,
+                    dataDir = modelDirectory(modelDirectory, driver.getString("dataDir")).absolutePath,
+                    lexicon = modelFile(modelDirectory, driver.getString("lexicon")).absolutePath,
+                ),
+                numThreads = runtimeThreadCount(),
+                debug = false,
+                provider = "cpu",
+            ),
         )
     }
 

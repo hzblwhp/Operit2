@@ -810,6 +810,7 @@ fn localTtsSpeakerCount(driver: &LocalModelDriver) -> Option<i32> {
         LocalModelDriver::SherpaOnnxMatcha { speakerCount, .. } => Some(*speakerCount),
         LocalModelDriver::SherpaOnnxKitten { speakerCount, .. } => Some(*speakerCount),
         LocalModelDriver::SherpaOnnxKokoro { speakerCount, .. } => Some(*speakerCount),
+        LocalModelDriver::SherpaOnnxZipVoice { speakerCount, .. } => Some(*speakerCount),
         _ => None,
     }
 }

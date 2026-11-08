@@ -2492,7 +2492,7 @@
   "peerQrScan": "Scan code",
   "peerQrShow": "My code",
   "peerQrShowHint": "Scan this code on another device to connect to this device.",
-  "peerQrScanHint": "Scan the Operit connection code on the other device.",
+  "peerQrScanHint": "Scan the PengSong connection code on the other device.",
   "peerQrTrustHint": "This QR code is valid for 5 minutes. Share it only with trusted devices. Confirming joins directly; this device automatically approves when it has administrator approval permissions.",
   "peerQrConfirmJoin": "Confirm join",
   "peerQrConfirmJoinHint": "Join this device’s space? Confirm to connect and submit the join request without entering a pairing code.",

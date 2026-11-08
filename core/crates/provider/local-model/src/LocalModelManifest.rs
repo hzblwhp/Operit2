@@ -87,6 +87,16 @@ pub enum LocalModelDriver {
         ruleFars: Vec<String>,
         speakerCount: i32,
     },
+    SherpaOnnxZipVoice {
+        encoder: String,
+        decoder: String,
+        vocoder: String,
+        tokens: String,
+        dataDir: String,
+        lexicon: String,
+        numSteps: i32,
+        speakerCount: i32,
+    },
     SherpaOnnxWebAsrBundle {
         recognizerScript: String,
         runtimeScript: String,
@@ -122,7 +132,8 @@ impl LocalModelDriver {
             | Self::SherpaOnnxVits { .. }
             | Self::SherpaOnnxMatcha { .. }
             | Self::SherpaOnnxKitten { .. }
-            | Self::SherpaOnnxKokoro { .. } => matches!(
+            | Self::SherpaOnnxKokoro { .. }
+            | Self::SherpaOnnxZipVoice { .. } => matches!(
                 platform,
                 LocalPlatform::Windows
                     | LocalPlatform::Linux
@@ -221,6 +232,8 @@ impl LocalModelFile {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LocalModelArchiveFormat {
     TarBz2,
+    /// 单文件直下：不解压，按 archiveId 原名落到安装目录下。
+    Raw,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -380,7 +380,12 @@ impl LocalModelInstaller {
         self.createDirectory(&stagingDir)?;
         for (archive, archivePath) in &archiveTargets {
             if let Err(error) =
-                self.extractModelArchive(archivePath, &stagingDir, &archive.archiveFormat)
+                self.extractModelArchive(
+                    archivePath,
+                    &stagingDir,
+                    &archive.archiveFormat,
+                    &archive.archiveId,
+                )
             {
                 self.removeArchiveTargets(&archiveTargets)?;
                 self.removePath(&stagingDir)?;
@@ -605,6 +610,7 @@ impl LocalModelInstaller {
         archivePath: &Path,
         stagingDir: &Path,
         archiveFormat: &LocalModelArchiveFormat,
+        archiveId: &str,
     ) -> Result<(), LocalModelDownloadError> {
         let storagePath = self.runtimeStoragePathString(archivePath)?;
         let storageHost = self
@@ -618,6 +624,19 @@ impl LocalModelInstaller {
                 stagingDir,
                 storageHost,
             ),
+            LocalModelArchiveFormat::Raw => {
+                // storagePath 在构造 storageHost 的错误闭包时已被移走，这里重新解析一次。
+                let rawStoragePath = self.runtimeStoragePathString(archivePath)?;
+                self.createDirectory(stagingDir)?;
+                let content = storageHost
+                    .readBytes(&rawStoragePath)
+                    .map_err(|error| LocalModelDownloadError::Storage(error.to_string()))?;
+                let targetPath = stagingDir.join(validatedStorageSegment("archiveId", archiveId)?);
+                let targetStoragePath = self.runtimeStoragePathString(&targetPath)?;
+                storageHost
+                    .writeBytes(&targetStoragePath, &content)
+                    .map_err(|error| LocalModelDownloadError::Storage(error.to_string()))
+            }
         }
     }
 

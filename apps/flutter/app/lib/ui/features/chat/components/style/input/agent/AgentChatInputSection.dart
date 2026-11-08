@@ -6,6 +6,7 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:operit_ui/operit_ui.dart';
 
+import '../../../../../../../core/chat/ChatScopedModelBinding.dart';
 import '../../../../../../../core/logging/ClientLogger.dart';
 import '../../../../../../../core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
@@ -137,6 +138,8 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
   StreamSubscription<List<core_proxy.ProviderProfile>>?
   _modelProfilesSubscription;
   core_proxy.FunctionModelBinding? _currentModelBinding;
+  ChatScopedModelBinding? _scopedModelBinding;
+  StreamSubscription<ChatScopedModelBinding?>? _scopedModelSubscription;
   List<core_proxy.ProviderProfile> _modelProfiles = const [];
   bool _draggingFiles = false;
   bool _inputExpanded = false;
@@ -164,6 +167,8 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
         oldWidget.viewModel != widget.viewModel) {
       _inputMenuContextGeneration++;
       _dismissInputMenuPopup();
+      // 换会话后必须重新订阅新的 chatId，否则标签还停在旧会话的模型上
+      _watchCurrentModelLabel();
     }
     if (oldWidget.controller != widget.controller) {
       oldWidget.controller.removeListener(_handleInputChanged);
@@ -475,6 +480,17 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
             _modelProfiles = profiles;
             _refreshCurrentModelLabel();
           }, onError: _logModelLabelError);
+      // 本会话单独配了模型时，标签要显示那个模型而不是全局默认
+      _scopedModelSubscription?.cancel();
+      final chatId = widget.currentChatId?.trim() ?? '';
+      _scopedModelBinding = null;
+      if (chatId.isNotEmpty) {
+        _scopedModelSubscription = ChatScopedModelBinding.watch(clients, chatId)
+            .listen((binding) {
+              _scopedModelBinding = binding;
+              _refreshCurrentModelLabel();
+            }, onError: _logModelLabelError);
+      }
     } catch (error, stackTrace) {
       _logModelLabelError(error, stackTrace);
     }
@@ -495,7 +511,15 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     if (!mounted) {
       return;
     }
-    final binding = _currentModelBinding;
+    // 会话级绑定优先，保证标签显示的就是这个会话实际会用的模型
+    final scoped = _scopedModelBinding;
+    final binding = scoped == null
+        ? _currentModelBinding
+        : core_proxy.FunctionModelBinding(
+            providerId: scoped.providerId,
+            modelId: scoped.modelId,
+            followsChat: false,
+          );
     core_proxy.ProviderProfile? boundProvider;
     if (binding != null) {
       for (final provider in _modelProfiles) {
@@ -634,6 +658,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     widget.controller.removeListener(_handleInputChanged);
     _modelBindingSubscription?.cancel();
     _modelProfilesSubscription?.cancel();
+    _scopedModelSubscription?.cancel();
     _dismissModelSettingsPopup();
     _dismissInputMenuPopup();
     _dismissMentionSuggestionPopup();
