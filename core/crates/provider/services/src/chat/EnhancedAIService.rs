@@ -751,7 +751,7 @@ fn logSystemPromptFingerprint(
 fn computeSystemPromptCacheKey(
     request: &PrepareConversationHistoryRequest,
     use_english: bool,
-    workspace_path_mappings: &[operit_tools::files::PathMapper::ResolvedVfsPath],
+    workspace_path_mappings: &[crate::chat::config::SystemPromptConfig::WorkspacePathMapping],
     enabled_packages: &[PackageInfo],
     mcp_servers: &[PackageInfo],
     skill_packages: &[PackageInfo],
@@ -779,7 +779,9 @@ fn computeSystemPromptCacheKey(
     request.chat_model_has_direct_video.hash(&mut hasher);
     request.use_tool_call_api.hash(&mut hasher);
     format!("{:?}", request.tool_exposure_mode).hash(&mut hasher);
-    format!("{:?}", workspace_path_mappings).hash(&mut hasher);
+    for mapping in workspace_path_mappings {
+        mapping.vfsPath.hash(&mut hasher);
+    }
     host_environment.hash(&mut hasher);
     executionContext.to_string().hash(&mut hasher);
     for (key, value) in &request.prompt_metadata {

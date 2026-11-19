@@ -181,6 +181,7 @@ pub(crate) fn ownerStartApp(packageName: &str) -> HostResult<AppOperationData> {
         },
         success: response.success,
         details: response.details,
+        installState: None,
     })
 }
 
@@ -199,6 +200,7 @@ pub(crate) fn ownerStopApp(packageName: &str) -> HostResult<AppOperationData> {
         },
         success: response.success,
         details: response.details,
+        installState: None,
     })
 }
 

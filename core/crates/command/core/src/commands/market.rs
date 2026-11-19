@@ -1049,6 +1049,8 @@ fn download_asset_to_temp_file(
     core: &mut MarketCommand,
     asset: &MarketEntryAsset,
 ) -> Result<PathBuf, String> {
+    let bytes = core.api().download_asset(&asset.id)?;
+    verify_market_asset_sha256(&bytes, &asset.sha256)?;
     let tmp = market_asset_temp_path(asset)?;
     core.context
         .vfs()?

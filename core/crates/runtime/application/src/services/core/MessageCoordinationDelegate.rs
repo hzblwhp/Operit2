@@ -898,8 +898,8 @@ impl MessageCoordinationDelegate {
                     maxTokens,
                     policy.tokenUsageThreshold,
                     true,
-                )
-            {
+                );
+            if gateShould {
                 let _summaryCompletion = self.launchSummary(
                     enhancedAiService,
                     messages,
@@ -957,8 +957,8 @@ impl MessageCoordinationDelegate {
             ) {
                 // Detach: launchSummary already schedules the work on a host background
                 // task, so awaiting the returned completion here only stalls the caller.
-                let _summaryCompletion = self.launchSummary(service, messages, ConversationSummaryRequest {
-                    chatId, participantId: Some(configuration.profile.id.clone()),
+                let _summaryCompletion = self.launchSummary(service, messages.clone(), ConversationSummaryRequest {
+                    chatId: chatId.clone(), participantId: Some(configuration.profile.id.clone()),
                     configuration: configuration.clone(), promptFunctionType: PromptFunctionType::CHAT,
                     chatProviderIdOverride: None, chatModelIdOverride: None,
                     autoContinue: false, requireCurrentChat: false,

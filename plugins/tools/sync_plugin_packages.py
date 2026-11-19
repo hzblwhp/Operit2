@@ -608,6 +608,11 @@ def _prebuild_plans(repo_root: Path, source_dir: Path, plans: list[SyncPlanItem]
     )
     for child_dir in child_dirs:
         if _is_script_packed_toolpkg(child_dir):
+            # PengSong Windows assemble 只消费 WSL 已同步好的 toolpkg；
+            # Windows 侧复用 Linux node_modules 会缺 @esbuild/win32-x64。
+            if os.environ.get("OPERIT_SKIP_TOOLPKG_PACK") == "1":
+                print(f"SKIP-PACK: {child_dir}")
+                continue
             build_environment = _plugin_build_environment()
             corepack_command = shutil.which("corepack", path=build_environment.get("PATH"))
             if corepack_command is None:

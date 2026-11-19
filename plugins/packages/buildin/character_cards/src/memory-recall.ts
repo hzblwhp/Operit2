@@ -56,6 +56,32 @@ function escapeXml(value: string): string {
     .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 
+/** 给一个异步操作套上时间预算，超时即抛，由调用方决定降级。 */
+function withBudget<T>(work: Promise<T>, budgetMs: number, label: string): Promise<T> {
+  return new Promise<T>(function (resolve, reject) {
+    let settled = false;
+    const timer = setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      reject(new Error(label + " exceeded " + budgetMs + "ms budget"));
+    }, budgetMs);
+    work.then(
+      function (value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      function (error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 /** Formats typed matches into the injected block; an empty result injects nothing. */
 function memoryBlock(result: MemoryQueryResult): string | null {
   if (result.memories.length === 0) return null;

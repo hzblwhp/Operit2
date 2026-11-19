@@ -103,33 +103,13 @@ internal object AndroidLocalInference {
         }
         val requestedOutputPath = request.getString("outputPath")
         val outputPath = requiredOutputFile(requestedOutputPath)
-        val tts = OfflineTts(
-            config = ttsConfigForDriver(taggedDriver.name, driver, modelDirectory),
-        )
-        try {
-            require(tts.numSpeakers() == speakerCount) {
-                "LOCAL_MODEL TTS speaker count does not match the installed model manifest"
-            }
-            val generated = tts.generate(
-                text = request.getString("text"),
-                sid = speaker,
-                speed = speed.toFloat(),
-            )
-            require(generated.samples.isNotEmpty()) { "LOCAL_MODEL TTS generated no audio samples" }
-            require(generated.sampleRate > 0) { "LOCAL_MODEL TTS generated an invalid sample rate" }
-            require(generated.save(outputPath.absolutePath)) {
-                "LOCAL_MODEL TTS failed to write ${outputPath.absolutePath}"
-            }
-            require(outputPath.isFile && outputPath.length() > 44L) {
-                "LOCAL_MODEL TTS output WAV is invalid: ${outputPath.absolutePath}"
-            }
-            // Preserve the capability identity; Android may canonicalize /data/data to /data/user/0.
-            return JSONObject()
-                .put("audioPath", requestedOutputPath)
-                .put("outputFormat", "wav")
-                .toString()
-        } finally {
-            tts.release()
+        // 复用一个 OfflineTts 实例，避免每段都重新加载模型；键里包含引擎目录、
+        // 驱动声明与模型目录，配置一变就释放旧实例。
+        val ttsKey = buildString {
+            append(engineDirectory.absolutePath)
+            append('|').append(taggedDriver.name)
+            append('|').append(driver.toString())
+            append('|').append(modelDirectory.absolutePath)
         }
         val tts = synchronized(ttsLock) {
             val existing = cachedTts

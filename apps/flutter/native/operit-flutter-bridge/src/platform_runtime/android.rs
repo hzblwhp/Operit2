@@ -85,10 +85,6 @@ pub(crate) fn create_host_context(startup: &BridgeStartup) -> Result<HostManager
             deviceInfo: Arc::new(ownerDeviceInfo),
             screenshot: Arc::new(ownerScreenshot),
             recognition: Arc::new(ownerRecognizeText),
-            apps: Arc::new(ownerListInstalledApps),
-            appStarter: Arc::new(ownerStartApp),
-            appStopper: Arc::new(ownerStopApp),
-            usageStats: Arc::new(ownerAppUsageTime),
         },
     )));
     Ok(install_owner_media(context, true)

@@ -76,7 +76,7 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
 
   /// 读取本会话已保存的模型绑定，用于开关与「清除」入口的展示。
   Future<void> _reloadScopedBinding() async {
-    final chatId = widget.chatId?.trim() ?? '';
+    final chatId = widget.currentChatId?.trim() ?? '';
     final binding = chatId.isEmpty
         ? null
         : await ChatScopedModelBinding.read(_clients, chatId);
@@ -93,7 +93,7 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
 
   /// 清除本会话绑定，回到跟随全局对话模型。
   Future<void> _clearScopedBinding() async {
-    final chatId = widget.chatId?.trim() ?? '';
+    final chatId = widget.currentChatId?.trim() ?? '';
     if (chatId.isEmpty) {
       return;
     }
@@ -337,7 +337,7 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
 
   /// 读取本会话已保存的模型绑定。
   Future<void> _reloadScopedBinding() async {
-    final chatId = widget.chatId?.trim() ?? '';
+    final chatId = widget.currentChatId?.trim() ?? '';
     final binding = chatId.isEmpty
         ? null
         : await ChatScopedModelBinding.read(_clients, chatId);
@@ -354,7 +354,7 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
 
   /// 清除本会话绑定，回到跟随全局对话模型。
   Future<void> _clearScopedBinding() async {
-    final chatId = widget.chatId?.trim() ?? '';
+    final chatId = widget.currentChatId?.trim() ?? '';
     if (chatId.isEmpty) {
       return;
     }
