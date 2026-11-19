@@ -9,6 +9,7 @@ import 'package:operit_ui/operit_ui.dart';
 import '../../../../../../../core/chat/ChatScopedModelBinding.dart';
 import '../../../../../../../core/logging/ClientLogger.dart';
 import '../../../../../../../core/application/PluginHotReload.dart';
+import '../../../../../../common/contributions/ChatModelSelection.dart';
 import '../../../../../../common/contributions/ToolPkgChatUiCatalog.dart';
 import '../../../../../../main/navigation/ToolPkgCatalogChangeBus.dart';
 import '../../../../../../../core/proxy/generated/CoreProxyModels.g.dart'
@@ -142,6 +143,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
   StreamSubscription<List<core_proxy.ProviderProfile>>?
   _modelProfilesSubscription;
   StreamSubscription<void>? _modelCatalogSubscription;
+  StreamSubscription<ChatScopedModelBinding?>? _scopedModelBindingSubscription;
   int _modelLabelGeneration = 0;
   List<core_proxy.ProviderProfile> _modelProfiles = const [];
   bool _draggingFiles = false;
@@ -172,10 +174,8 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
       _inputMenuContextGeneration++;
       _dismissInputMenuPopup();
       _dismissModelSettingsPopup();
-      if (oldWidget.viewModel != widget.viewModel) {
-        _modelBindingSubscription?.cancel();
-        _modelProfilesSubscription?.cancel();
-        _modelCatalogSubscription?.cancel();
+      if (oldWidget.viewModel != widget.viewModel ||
+          oldWidget.currentChatId != widget.currentChatId) {
         _watchCurrentModelLabel();
       }
       _requestModelRefresh();
@@ -479,6 +479,10 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
 
   void _watchCurrentModelLabel() {
     final clients = widget.viewModel.clients;
+    _modelBindingSubscription?.cancel();
+    _modelProfilesSubscription?.cancel();
+    _modelCatalogSubscription?.cancel();
+    _scopedModelBindingSubscription?.cancel();
     try {
       _modelBindingSubscription = clients.preferencesFunctionalConfigManager
           .functionModelBindingFlow()
@@ -494,6 +498,13 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
       _modelCatalogSubscription = ToolPkgCatalogChangeBus.listen(
         _requestModelRefresh,
       );
+      final chatId = widget.currentChatId?.trim() ?? '';
+      if (chatId.isNotEmpty) {
+        _scopedModelBindingSubscription =
+            ChatScopedModelBinding.watch(clients, chatId).listen((_) {
+              _requestModelRefresh();
+            }, onError: _logModelLabelError);
+      }
       _requestModelRefresh();
     } catch (error, stackTrace) {
       _logModelLabelError(error, stackTrace);
@@ -525,9 +536,25 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
       _modelProviderName = '';
     });
     try {
-      final selection = await ToolPkgChatUiCatalog(
+      var selection = await ToolPkgChatUiCatalog(
         clients: widget.viewModel.clients,
       ).loadModelSelection(chatId: widget.currentChatId);
+      if (!mounted || generation != _modelLabelGeneration) return;
+      // 会话级绑定优先于全局显示，避免切换会话时看到上一个会话的模型。
+      final chatId = widget.currentChatId?.trim() ?? '';
+      final scoped = chatId.isEmpty
+          ? null
+          : await ChatScopedModelBinding.read(widget.viewModel.clients, chatId);
+      if (scoped != null) {
+        selection = ChatModelSelection(
+          globalBinding: core_proxy.FunctionModelBinding(
+            providerId: scoped.providerId,
+            modelId: scoped.modelId,
+            followsChat: false,
+          ),
+          participants: const [],
+        );
+      }
       if (!mounted || generation != _modelLabelGeneration) return;
       final binding = selection.singleBinding;
       core_proxy.ProviderProfile? boundProvider;
@@ -664,6 +691,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     _modelBindingSubscription?.cancel();
     _modelProfilesSubscription?.cancel();
     _modelCatalogSubscription?.cancel();
+    _scopedModelBindingSubscription?.cancel();
     PluginHotReload.revision.removeListener(_requestModelRefresh);
     _modelLabelGeneration++;
     _dismissModelSettingsPopup();

@@ -136,21 +136,21 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
       );
       return;
     }
-    final selection = await ToolPkgChatUiCatalog(
-      clients: _clients,
-    ).loadModelSelection(chatId: widget.currentChatId);
-    if (!mounted) return;
-    if (!selection.canSelectGlobal) {
-      setState(() {
-        _settingsFuture = _loadSettings();
-      });
-      return;
+    final chatId = widget.currentChatId?.trim() ?? '';
+    if (chatId.isNotEmpty) {
+      await ChatScopedModelBinding.write(
+        _clients,
+        chatId,
+        providerId: provider.id,
+        modelId: model.id,
+      );
+    } else {
+      await _clients.preferencesFunctionalConfigManager.setModelForFunction(
+        functionType: core_proxy.FunctionType.chat,
+        providerId: provider.id,
+        modelId: model.id,
+      );
     }
-    await _clients.preferencesFunctionalConfigManager.setModelForFunction(
-      functionType: core_proxy.FunctionType.chat,
-      providerId: provider.id,
-      modelId: model.id,
-    );
     if (!mounted) return;
     widget.onModelChanged(
       model.id,
@@ -397,21 +397,21 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
       );
       return;
     }
-    final selection = await ToolPkgChatUiCatalog(
-      clients: _clients,
-    ).loadModelSelection(chatId: widget.currentChatId);
-    if (!mounted) return;
-    if (!selection.canSelectGlobal) {
-      setState(() {
-        _settingsFuture = _loadSettings();
-      });
-      return;
+    final chatId = widget.currentChatId?.trim() ?? '';
+    if (chatId.isNotEmpty) {
+      await ChatScopedModelBinding.write(
+        _clients,
+        chatId,
+        providerId: provider.id,
+        modelId: model.id,
+      );
+    } else {
+      await _clients.preferencesFunctionalConfigManager.setModelForFunction(
+        functionType: core_proxy.FunctionType.chat,
+        providerId: provider.id,
+        modelId: model.id,
+      );
     }
-    await _clients.preferencesFunctionalConfigManager.setModelForFunction(
-      functionType: core_proxy.FunctionType.chat,
-      providerId: provider.id,
-      modelId: model.id,
-    );
     if (!mounted) return;
     widget.onDismiss();
   }
@@ -1988,6 +1988,22 @@ Future<_AgentModelSelectorData> _loadAgentModelSelectorData(
     debugPrint('AgentModelSelector loadModelSelection failed: $error');
     debugPrintStack(stackTrace: stackTrace);
     rethrow;
+  }
+  // preview.40 的全局选择器不知道会话级绑定；这里把当前会话的绑定叠上去，
+  // 保证 A 会话选了模型不会把 B 会话的显示一起改掉。
+  final normalizedChatId = chatId?.trim() ?? '';
+  final scoped = normalizedChatId.isEmpty
+      ? null
+      : await ChatScopedModelBinding.read(clients, normalizedChatId);
+  if (scoped != null) {
+    selection = ChatModelSelection(
+      globalBinding: core_proxy.FunctionModelBinding(
+        providerId: scoped.providerId,
+        modelId: scoped.modelId,
+        followsChat: false,
+      ),
+      participants: const [],
+    );
   }
   final binding = selection.singleBinding;
   final providers = await clients.preferencesModelConfigManager
