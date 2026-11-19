@@ -218,9 +218,9 @@ class _AgentModelSelectorPopupState extends State<AgentModelSelectorPopup> {
             future: _settingsFuture,
             builder: (context, snapshot) {
               if (snapshot.hasError) {
-                return const Padding(
-                  padding: EdgeInsets.all(12),
-                  child: Text('模型配置不可用，请检查当前会话的模型绑定。'),
+                return Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: SelectableText('模型配置不可用：${snapshot.error}'),
                 );
               }
               final data = snapshot.data;
@@ -460,9 +460,9 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
       future: _settingsFuture,
       builder: (context, snapshot) {
         if (snapshot.hasError) {
-          return const Padding(
-            padding: EdgeInsets.all(12),
-            child: Text('模型配置不可用，请检查当前会话的模型绑定。'),
+          return Padding(
+            padding: const EdgeInsets.all(12),
+            child: SelectableText('模型配置不可用：${snapshot.error}'),
           );
         }
         final data = snapshot.data;
@@ -1979,9 +1979,16 @@ Future<_AgentModelSelectorData> _loadAgentModelSelectorData(
   GeneratedCoreProxyClients clients,
   String? chatId,
 ) async {
-  final selection = await ToolPkgChatUiCatalog(
-    clients: clients,
-  ).loadModelSelection(chatId: chatId);
+  ChatModelSelection selection;
+  try {
+    selection = await ToolPkgChatUiCatalog(
+      clients: clients,
+    ).loadModelSelection(chatId: chatId);
+  } catch (error, stackTrace) {
+    debugPrint('AgentModelSelector loadModelSelection failed: $error');
+    debugPrintStack(stackTrace: stackTrace);
+    rethrow;
+  }
   final binding = selection.singleBinding;
   final providers = await clients.preferencesModelConfigManager
       .getProviderProfiles();
