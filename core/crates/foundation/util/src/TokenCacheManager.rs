@@ -76,6 +76,18 @@ impl TokenCacheManager {
         }
         self.previous_history_token_count =
             self.cached_input_token_count + self.current_input_token_count;
+        let _ = AppLogger::w(
+            "TokenCacheManager",
+            &format!(
+                "update_actual actual_input={} cached_input={} -> cached={} current={} prevTotal={} doubleCounted={}",
+                actual_input,
+                cached_input,
+                self.cached_input_token_count,
+                self.current_input_token_count,
+                self.previous_history_token_count,
+                cached_input > 0
+            ),
+        );
     }
 
     /// Estimates input tokens from chat message content.
@@ -102,6 +114,20 @@ impl TokenCacheManager {
             (0, calculate_tokens_for_history(&history_with_tools))
         };
 
+        // 必须在 previous_chat_history 取走 history_with_tools 之前统计，
+        // 否则后面对 history_with_tools 的任何借用都会触发 E0382。
+        let totalChars: usize = history_with_tools
+            .iter()
+            .map(|(_, content)| content.chars().count())
+            .sum();
+        let systemChars = history_with_tools
+            .iter()
+            .find(|(role, _)| role == "system")
+            .map(|(_, content)| content.chars().count())
+            .unwrap_or(0);
+        // 同理 len() 也必须提前取：随后的 previous_chat_history 赋值会把
+        // history_with_tools move 走，之后再借用就是 E0382。
+        let cur_hist_len = history_with_tools.len();
         if update_state {
             self.cached_input_token_count = cached_tokens;
             self.current_input_token_count = new_tokens;
@@ -109,19 +135,39 @@ impl TokenCacheManager {
             if !chat_history.is_empty() {
                 self.previous_chat_history = history_with_tools;
             }
-            let _ = AppLogger::trace(
+            let _ = AppLogger::w(
                 "TokenCacheManager",
                 &format!(
-                    "calculate_input_tokens cached={} new={} total={} commonPrefix={}",
+                    "calculate_input_tokens cached={} new={} total={} commonPrefix={} prevHistLen={} curHistLen={} prevTokenCount={} fullReuse={}",
                     cached_tokens,
                     new_tokens,
                     cached_tokens + new_tokens,
-                    common_prefix_length
+                    common_prefix_length,
+                    self.previous_chat_history.len(),
+                    cur_hist_len,
+                    self.previous_history_token_count,
+                    common_prefix_length == self.previous_chat_history.len()
                 ),
             );
         }
 
-        cached_tokens + new_tokens
+        let total = cached_tokens + new_tokens;
+        let _ = AppLogger::w(
+            "TokenCacheManager",
+            &format!(
+                "estimate updateState={} cached={} new={} total={} commonPrefix={} prevHistLen={} curHistLen={} totalChars={} systemChars={}",
+                update_state,
+                cached_tokens,
+                new_tokens,
+                total,
+                common_prefix_length,
+                self.previous_chat_history.len(),
+                cur_hist_len,
+                totalChars,
+                systemChars
+            ),
+        );
+        total
     }
 }
 

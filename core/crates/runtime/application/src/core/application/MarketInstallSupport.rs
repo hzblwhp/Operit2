@@ -204,8 +204,12 @@ pub(super) fn install_entry(
                 .as_deref()
                 .filter(|name| !name.trim().is_empty())
                 .ok_or("Marketplace asset has no file name")?;
-            let result =
-                app.installMarketArtifact(asset.id.clone(), file_name.into(), asset.sha256.clone());
+            let result = app.installMarketArtifact(
+                asset.id.clone(),
+                asset.url.clone(),
+                file_name.into(),
+                asset.sha256.clone(),
+            );
             let result = result?;
             if !result
                 .to_ascii_lowercase()

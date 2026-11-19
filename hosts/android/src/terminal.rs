@@ -28,6 +28,9 @@ const PTY_PROMPT_MARKER_PREFIX: &[u8] = b"\x1b]133;OperitPrompt=";
 const PTY_PROMPT_MARKER_END: u8 = 7;
 const COMMAND_CANCEL_SETTLE_TIMEOUT_MS: u64 = 3000;
 const PLATFORM: &str = "android";
+/// Idle terminal sessions are reclaimed so a chat that keeps switching
+/// `session_name` cannot accumulate permanent PTY readers.
+const TERMINAL_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const PROOT_TERMINAL: &str = "proot";
 const ANDROID_SYSTEM_TERMINAL: &str = "android-system";
 const PRIMARY_TERMINAL_TYPE: &str = "bash";
@@ -72,6 +75,8 @@ struct AndroidPtySession {
     screenOutput: Arc<Mutex<VecDeque<u8>>>,
     commandRunning: bool,
     exitCode: Option<i32>,
+    /// Last time a command was submitted to this session.
+    lastUsedAt: Instant,
 }
 
 type AndroidPtyCommandOutput = Arc<(Mutex<VecDeque<u8>>, Condvar)>;
@@ -336,7 +341,13 @@ impl TerminalHost for AndroidTerminalHost {
         {
             let mut state = self.lockState()?;
             if let Some(sessionId) = state.sessionNameToId.get(&key).cloned() {
-                if state.ptySessions.contains_key(&sessionId) {
+                // 复用前必须确认该会话的 PTY 进程仍然活着。进程退出后
+                // ptySessions 里的表项不会消失，contains_key 依旧为真，于是
+                // 上层会拿到一个永远没有回音的会话：enterTerminalDirectory
+                // 写入的 cd 一直等到 120s 超时，报
+                // "Cannot enter terminal working directory ..."，
+                // 此后整个会话只能靠重启 App 恢复。这里把死会话摘掉重建。
+                if androidPtySessionIsAlive(&*state, &sessionId) {
                     return Ok(TerminalSessionInfo {
                         sessionId,
                         sessionName: normalizedSessionName,
@@ -346,10 +357,18 @@ impl TerminalHost for AndroidTerminalHost {
                         isNewSession: false,
                     });
                 }
+                if let Some(dead) = state.ptySessions.remove(&sessionId) {
+                    drop(dead);
+                }
+                removeAndroidSessionMappings(&mut *state, &sessionId);
                 state.sessionNameToId.remove(&key);
             }
         }
 
+        {
+            let mut state = self.lockState()?;
+            reapIdleAndroidPtySessions(&mut state, TERMINAL_SESSION_IDLE_TIMEOUT);
+        }
         let workingDir = initialAndroidWorkingDir(&normalizedTerminalType)?;
         let session = createAndroidPtySession(
             normalizedSessionName.clone(),
@@ -407,6 +426,7 @@ impl TerminalHost for AndroidTerminalHost {
             let commandInput = format!("{normalizedCommand}\r");
             writeAndroidPtyBytes(&session.writer, commandInput.as_bytes())?;
             session.commandRunning = true;
+            session.lastUsedAt = Instant::now();
             (session.terminalType.clone(), session.commandOutput.clone())
         };
         let result = executeAndroidPtyCommandInSession(
@@ -629,6 +649,7 @@ fn createAndroidPtySession(
         screenOutput: screenOutput.clone(),
         commandRunning: false,
         exitCode: None,
+        lastUsedAt: Instant::now(),
     };
     scheduleAndroidPtyReader(
         readerFd,
@@ -680,7 +701,7 @@ fn scheduleAndroidPtyReader(
 ) -> HostResult<()> {
     androidLogInfo(&format!("Android PTY reader thread start fd={masterFd}"));
     let descriptor = AndroidPtyReaderFd(masterFd);
-    operit_host_native_common::scheduleNativeServiceTask("android-pty-reader", move || {
+    operit_host_native_common::scheduleNativeTerminalReaderTask("android-pty-reader", move || {
         let descriptor = descriptor;
         while !stopped.load(Ordering::Acquire) {
             match readPtyFd(descriptor.0) {
@@ -1544,11 +1565,86 @@ fn sessionKey(terminalType: &str, name: &str) -> String {
     format!("{terminalType}:{name}")
 }
 
+/// 判断缓存中的会话是否还能响应命令。
+///
+/// PTY 的子进程退出后表项仍然留在 `ptySessions` 里，直接复用它会让后续每条
+/// 命令都等一个永远不会到达的提示符（120s 后报 "Cannot enter terminal
+/// working directory"），只有重启 App 才能恢复。已退出、仍在占用或无法探活
+/// 的进程一律按死亡处理，由调用方重建会话。
+fn androidPtySessionIsAlive(state: &AndroidTerminalState, sessionId: &str) -> bool {
+    let session = match state.ptySessions.get(sessionId) {
+        Some(session) => session,
+        None => return false,
+    };
+    if session.exitCode.is_some() || session.commandRunning {
+        return false;
+    }
+    matches!(pollPidExitCode(session.pid), Ok(None))
+}
+
 fn removeAndroidSessionMappings(state: &mut AndroidTerminalState, sessionId: &str) {
     state.sessionNameToId.retain(|_, value| value != sessionId);
     state
         .hiddenExecutorKeyToSessionId
         .retain(|_, value| value != sessionId);
+}
+
+/// Decides whether a cached session can be dropped without disturbing a caller.
+///
+/// Kept free of PTY state so the policy is unit-testable: a session that is
+/// running a command is never reclaimed, an exited process is always
+/// reclaimable, and otherwise only after the idle timeout.
+fn androidPtySessionShouldReap(
+    commandRunning: bool,
+    exitCode: Option<i32>,
+    lastUsedAt: Instant,
+    now: Instant,
+    idle: Duration,
+) -> bool {
+    if commandRunning {
+        return false;
+    }
+    if exitCode.is_some() {
+        return true;
+    }
+    now.saturating_duration_since(lastUsedAt) >= idle
+}
+
+/// Drops idle sessions so their readers stop and bounded capacity comes back.
+fn reapIdleAndroidPtySessions(
+    state: &mut AndroidTerminalState,
+    idle: Duration,
+) -> usize {
+    let now = Instant::now();
+    let expired: Vec<String> = state
+        .ptySessions
+        .iter()
+        .filter(|(_, session)| {
+            androidPtySessionShouldReap(
+                session.commandRunning,
+                session.exitCode,
+                session.lastUsedAt,
+                now,
+                idle,
+            )
+        })
+        .map(|(sessionId, _)| sessionId.clone())
+        .collect();
+    for sessionId in &expired {
+        // Dropping the session stops its reader and releases the Host capacity permit.
+        if let Some(dead) = state.ptySessions.remove(sessionId) {
+            drop(dead);
+        }
+        removeAndroidSessionMappings(state, sessionId);
+    }
+    if !expired.is_empty() {
+        androidLogInfo(&format!(
+            "reapIdleAndroidPtySessions reclaimed={} remaining={}",
+            expired.len(),
+            state.ptySessions.len()
+        ));
+    }
+    expired.len()
 }
 
 fn nextTerminalId() -> String {
@@ -2353,6 +2449,25 @@ mod tests {
             error.message,
             "Timed out waiting for Android terminal prompt\nStartup output:\nproot: execve(/bin/bash): Permission denied",
         );
+    }
+
+
+    /// Reclaiming keeps running sessions and honours the idle timeout.
+    #[test]
+    fn idle_sessions_are_reaped_only_when_unused() {
+        let now = Instant::now();
+        let idle = Duration::from_secs(60);
+        let fresh = now - Duration::from_secs(5);
+        let stale = now - Duration::from_secs(600);
+        // Running commands must never be reclaimed, even when long idle.
+        assert!(!androidPtySessionShouldReap(true, None, stale, now, idle));
+        assert!(!androidPtySessionShouldReap(true, Some(0), stale, now, idle));
+        // Exited processes are reclaimable immediately.
+        assert!(androidPtySessionShouldReap(false, Some(0), fresh, now, idle));
+        // Live but recently used sessions stay.
+        assert!(!androidPtySessionShouldReap(false, None, fresh, now, idle));
+        // Live and past the idle window are reclaimed.
+        assert!(androidPtySessionShouldReap(false, None, stale, now, idle));
     }
 
     /// Ensures the native system shell and proot Bash have distinct implementation identities.

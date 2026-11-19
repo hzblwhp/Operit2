@@ -749,6 +749,7 @@ impl OperitApplication {
     pub fn installMarketArtifact(
         &self,
         assetId: String,
+        assetUrl: String,
         fileName: String,
         expectedSha256: String,
     ) -> Result<String, String> {
@@ -780,8 +781,24 @@ impl OperitApplication {
             .parent()
             .map(|path| path.to_string_lossy().to_string());
         let result = (|| {
-            operit_providers::market::MarketStatsApiService::MarketStatsApiService::new()
-                .download_asset_to_file(&assetId, &targetPath)?;
+            let market_service =
+                operit_providers::market::MarketStatsApiService::MarketStatsApiService::new();
+            match market_service.download_asset_to_file(&assetId, &targetPath) {
+                Ok(_) => {}
+                Err(primary_error) => {
+                    let mirror_source = assetUrl.trim();
+                    if mirror_source.is_empty() {
+                        return Err(primary_error);
+                    }
+                    market_service
+                        .download_github_asset_via_mirror(mirror_source, &targetPath)
+                        .map_err(|mirror_error| {
+                            format!(
+                                "{primary_error} (GitHub mirror fallback failed: {mirror_error})"
+                            )
+                        })?;
+                }
+            }
             Ok(packageManager
                 .lock()
                 .map_err(|error| error.to_string())?

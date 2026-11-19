@@ -29,5 +29,5 @@ pub use local_task_scheduler::{
 mod task_handle;
 pub use task_handle::{
     scheduleNativeBlockingTask, scheduleNativeServiceTask, scheduleNativeServiceTasks,
-    NativeTaskHandle,
+    scheduleNativeTerminalReaderTask, NativeTaskHandle,
 };

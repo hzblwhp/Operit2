@@ -286,7 +286,11 @@ impl ModelConfigManager {
         provider: ProviderProfile,
     ) -> Result<ProviderProfile, ModelConfigError> {
         if provider.id != Self::DEFAULT_PROVIDER_ID {
-            return Err(ModelConfigError::ProviderNotFound(provider.id));
+            return Err(ModelConfigError::ProviderNotFound(format!(
+                "{} (replaceDefaultProviderProfile only edits the default provider id {}; use saveProviderProfile for any other provider)",
+                provider.id,
+                Self::DEFAULT_PROVIDER_ID
+            )));
         }
         self.modelConfigDataStore.try_edit_result(|preferences| {
             Self::writeProvider(preferences, &provider)?;
@@ -868,6 +872,28 @@ impl ModelConfigManager {
         model.thinkingOverride = None;
     }
 
+    /// Builds a provider-not-found message that names every configured provider id.
+    ///
+    /// The bare `provider not found: <value>` gave a caller no way to recover. It could not
+    /// see which ids exist, and it could not tell that its value was a compound of two fields
+    /// (`providerId:modelId`) rather than an unknown id. Both cases produced identical text.
+    fn providerNotFoundMessage(requested: &str, availableIds: &[String]) -> String {
+        let available = if availableIds.is_empty() {
+            "none configured".to_string()
+        } else {
+            availableIds.join(", ")
+        };
+        let shapeHint = if requested.contains(':') {
+            " The value contains ':', so it looks like `providerId:modelId` or a provider name: pass only the provider id here and keep the model id in its own field."
+        } else {
+            ""
+        };
+        format!(
+            "{} (no provider with this id is configured). Available provider ids: [{}].{}",
+            requested, available, shapeHint
+        )
+    }
+
     /// Derives provider membership from complete records and validates their identities.
     fn readProviderList(
         preferences: &Preferences,
@@ -1074,9 +1100,12 @@ impl ModelConfigManager {
     ) -> Result<ProviderProfile, ModelConfigError> {
         let preferences = self.modelConfigDataStore.data()?;
         let providerKey = self.providerKey(providerId);
-        let providerJson = preferences
-            .get(&providerKey)
-            .ok_or_else(|| ModelConfigError::ProviderNotFound(providerId.to_string()))?;
+        let providerJson = preferences.get(&providerKey).ok_or_else(|| {
+            ModelConfigError::ProviderNotFound(Self::providerNotFoundMessage(
+                providerId,
+                &Self::readProviderList(&preferences).unwrap_or_default(),
+            ))
+        })?;
         Ok(serde_json::from_value(providerJson.clone())?)
     }
 
@@ -1139,7 +1168,10 @@ impl ModelConfigManager {
         if providerIds.iter().any(|id| id == providerId) {
             Ok(())
         } else {
-            Err(ModelConfigError::ProviderNotFound(providerId.to_string()))
+            Err(ModelConfigError::ProviderNotFound(Self::providerNotFoundMessage(
+                providerId,
+                &providerIds,
+            )))
         }
     }
 
@@ -1150,9 +1182,12 @@ impl ModelConfigManager {
         providerId: &str,
     ) -> Result<ProviderProfile, ModelConfigError> {
         let providerKey = self.providerKey(providerId);
-        let providerJson = preferences
-            .get(&providerKey)
-            .ok_or_else(|| ModelConfigError::ProviderNotFound(providerId.to_string()))?;
+        let providerJson = preferences.get(&providerKey).ok_or_else(|| {
+            ModelConfigError::ProviderNotFound(Self::providerNotFoundMessage(
+                providerId,
+                &Self::readProviderList(preferences).unwrap_or_default(),
+            ))
+        })?;
         Ok(serde_json::from_value(providerJson.clone())?)
     }
 
@@ -1197,7 +1232,10 @@ impl ModelConfigManager {
         if providerIds.iter().any(|id| id == providerId) {
             Ok(())
         } else {
-            Err(ModelConfigError::ProviderNotFound(providerId.to_string()))
+            Err(ModelConfigError::ProviderNotFound(Self::providerNotFoundMessage(
+                providerId,
+                &providerIds,
+            )))
         }
     }
 

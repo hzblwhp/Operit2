@@ -94,6 +94,7 @@ pub struct StreamingState {
     pub isInReasoningMode: bool,
     pub hasEmittedThinkStart: bool,
     pub hasEmittedRegularContent: bool,
+    pub pendingReasoningTail: String,
     pub reasoningObserved: bool,
     pub isFirstResponse: bool,
     pub streamCompletionConfirmed: bool,
@@ -1289,6 +1290,7 @@ impl OpenAIProvider {
             isInReasoningMode: false,
             hasEmittedThinkStart: false,
             hasEmittedRegularContent: false,
+            pendingReasoningTail: String::new(),
             reasoningObserved: false,
             isFirstResponse: true,
             streamCompletionConfirmed: false,
@@ -1739,6 +1741,13 @@ impl OpenAIProvider {
     /// Closes an unfinished reasoning block before another response channel is emitted.
     fn closeAssistantReasoning(&self, state: &mut StreamingState) {
         if state.isInReasoningMode {
+            let pendingReasoningTail =
+                operit_util::ChatUtils::ChatUtils::flush_thinking_markup_streaming(
+                    &mut state.pendingReasoningTail,
+                );
+            if !pendingReasoningTail.is_empty() {
+                state.chunks.push(pendingReasoningTail);
+            }
             state.chunks.push("</think>".to_string());
             state.isInReasoningMode = false;
             state.hasEmittedThinkStart = false;
@@ -1755,7 +1764,7 @@ impl OpenAIProvider {
         let hasReasoning = !reasoningContent.is_empty() && reasoningContent != "null";
         let hasRegular = !regularContent.is_empty() && regularContent != "null";
 
-        if hasReasoning && !state.hasEmittedRegularContent {
+        if hasReasoning {
             if !state.isInReasoningMode {
                 state.isInReasoningMode = true;
                 if !state.hasEmittedThinkStart {
@@ -1763,13 +1772,26 @@ impl OpenAIProvider {
                     state.hasEmittedThinkStart = true;
                 }
             }
-            state.chunks.push(reasoningContent.to_string());
+            let escapedReasoning = operit_util::ChatUtils::ChatUtils::escape_thinking_markup_streaming(
+                &mut state.pendingReasoningTail,
+                reasoningContent,
+            );
+            if !escapedReasoning.is_empty() {
+                state.chunks.push(escapedReasoning);
+            }
         }
 
         if hasRegular {
             state.regularContentDeltaCount += 1;
             state.regularContentBytes += regularContent.len();
             if state.isInReasoningMode {
+                let pendingReasoningTail =
+                    operit_util::ChatUtils::ChatUtils::flush_thinking_markup_streaming(
+                        &mut state.pendingReasoningTail,
+                    );
+                if !pendingReasoningTail.is_empty() {
+                    state.chunks.push(pendingReasoningTail);
+                }
                 state.isInReasoningMode = false;
                 state.chunks.push("</think>".to_string());
                 state.hasEmittedThinkStart = false;
@@ -1778,7 +1800,7 @@ impl OpenAIProvider {
             if state.isFirstResponse {
                 state.isFirstResponse = false;
             }
-            state.chunks.push(regularContent.to_string());
+            state.chunks.push(operit_util::ChatUtils::ChatUtils::escape_thinking_markup(regularContent));
         }
     }
 
@@ -2771,7 +2793,7 @@ impl OpenAIProvider {
         let nativeToolCallChunks = extract_tool_calls_xml_chunks(&json_response);
         if let Some(reasoning) = extract_reasoning_chunk(&json_response) {
             if !reasoning.is_empty() {
-                chunks.push(format!("<think>{reasoning}</think>"));
+                chunks.push(format!("<think>{}</think>", operit_util::ChatUtils::ChatUtils::escape_thinking_markup(&reasoning)));
             }
         }
         if let Some(content) = extract_content_chunk(&json_response) {

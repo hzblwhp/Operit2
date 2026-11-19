@@ -9,6 +9,9 @@ const RUNTIME_WORKER_COUNT: usize = 16;
 const BLOCKING_WORKER_COUNT: usize = 16;
 const NETWORK_WORKER_COUNT: usize = 4;
 const SERVICE_WORKER_COUNT: usize = 16;
+/// Terminal readers outlive individual commands and grow with the chat count,
+/// so they get a budget of their own instead of competing for service slots.
+const TERMINAL_READER_WORKER_COUNT: usize = 64;
 const TASK_QUEUE_CAPACITY: usize = 4096;
 
 thread_local! {
@@ -644,6 +647,50 @@ impl NativeHostRuntimeTaskSchedulerHost {
         queue
             .sendMany(admitted)
             .map_err(|_| HostError::new(format!("service task queue is closed or full: {name}")))?;
+        Ok(())
+    }
+
+    /// Reserves capacity for a long-lived terminal reader.
+    ///
+    /// A reader lives as long as its session, and each chat owns a session, so the
+    /// demand grows with the number of chats. Sharing `SERVICE_WORKER_COUNT` with
+    /// short-lived service calls made the 17th chat fail permanently with
+    /// "Host service capacity exhausted: android-pty-reader". Readers only poll and
+    /// read, so they also need a much smaller stack than a service worker.
+    pub fn scheduleTerminalReaderTask(&self, name: &str, task: HostRuntimeTask) -> HostResult<()> {
+        static READERS: OnceLock<Result<RuntimeTaskQueue, String>> = OnceLock::new();
+        static CAPACITY: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+        let permit = Arc::new(
+            CAPACITY
+                .get_or_init(|| {
+                    Arc::new(tokio::sync::Semaphore::new(TERMINAL_READER_WORKER_COUNT))
+                })
+                .clone()
+                .try_acquire_many_owned(1)
+                .map_err(|_| {
+                    HostError::new(format!("Host terminal reader capacity exhausted: {name}"))
+                })?,
+        );
+        let queue = READERS
+            .get_or_init(|| {
+                spawnTaskPoolWithOptions("operit-pty", TERMINAL_READER_WORKER_COUNT, 256 * 1024, false)
+            })
+            .as_ref()
+            .map_err(|error| {
+                HostError::new(format!("create terminal reader pool failed: {error}"))
+            })?;
+        queue
+            .send(Box::new(
+                move || -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> {
+                    Box::pin(async move {
+                        let _permit = permit;
+                        task();
+                    })
+                },
+            ) as HostRuntimeAsyncTask)
+            .map_err(|_| {
+                HostError::new(format!("terminal reader queue is closed or full: {name}"))
+            })?;
         Ok(())
     }
 

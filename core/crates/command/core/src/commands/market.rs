@@ -1009,10 +1009,31 @@ fn download_asset_to_temp_file(
     core: &mut MarketCommand,
     asset: &MarketEntryAsset,
 ) -> Result<PathBuf, String> {
-    let bytes = core.api().download_asset(&asset.id)?;
-    verify_market_asset_sha256(&bytes, &asset.sha256)?;
     let tmp = market_asset_temp_path(asset)?;
-    fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    let service = core.api();
+    let outcome = match service.download_asset(&asset.id) {
+        Ok(bytes) => {
+            verify_market_asset_sha256(&bytes, &asset.sha256)?;
+            fs::write(&tmp, &bytes).map_err(|e| e.to_string())
+        }
+        Err(primary_error) => {
+            let mirror_source = asset.url.trim().to_string();
+            if mirror_source.is_empty() {
+                return Err(primary_error);
+            }
+            service
+                .download_github_asset_via_mirror(&mirror_source, &tmp.to_string_lossy())
+                .map_err(|mirror_error| {
+                    format!("{primary_error} (GitHub mirror fallback failed: {mirror_error})")
+                })?;
+            let bytes = fs::read(&tmp).map_err(|e| e.to_string())?;
+            verify_market_asset_sha256(&bytes, &asset.sha256)
+        }
+    };
+    if let Err(error) = outcome {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
     Ok(tmp)
 }
 

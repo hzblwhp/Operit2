@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
 use operit_host_api::HostRuntimeTaskSchedulerHost;
@@ -14,7 +15,13 @@ use operit_link::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
-const COMMAND_CAPACITY: usize = 64;
+/// Ingress mailbox shared by every watch and push on one connection.
+/// The queue absorbs bursts of synchronized UI subscriptions; the owner drains
+/// it in microseconds, so a deep buffer only costs bytes, never latency.
+const COMMAND_CAPACITY: usize = 512;
+/// Bounded wait before a synchronous submit reports backpressure to its caller.
+const COMMAND_RETRY_WINDOW: Duration = Duration::from_millis(25);
+const COMMAND_RETRY_INTERVAL: Duration = Duration::from_millis(1);
 const PUSH_CAPACITY: usize = 16;
 pub(crate) const WATCH_BATCH_CAPACITY: usize = 64;
 
@@ -140,21 +147,45 @@ impl BridgeStreams {
     }
 
     /// Reserves ingress order synchronously for native FFI submissions.
+    ///
+    /// A burst of subscriptions from one UI frame can briefly outrun the owner,
+    /// so a full mailbox is retried for a bounded window instead of surfacing as
+    /// an error: transient pressure must not tear down a live stream.
     pub(crate) fn submit(&self, action: StreamAction) -> Result<StreamReply, CoreLinkError> {
         if *self.shutdown.borrow() {
             return Err(closed());
         }
         let (reply, response) = oneshot::channel();
-        self.commands
-            .try_send(Command { action, reply })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => CoreLinkError::new(
-                    "STREAM_BACKPRESSURE",
-                    "Connection stream command queue is full",
-                ),
-                mpsc::error::TrySendError::Closed(_) => closed(),
-            })?;
-        Ok(response)
+        let mut queued = Some(Command { action, reply });
+        let deadline = Instant::now() + COMMAND_RETRY_WINDOW;
+        loop {
+            let command = queued.take().expect("queued command is retained until accepted");
+            match self.commands.try_send(command) {
+                Ok(()) => return Ok(response),
+                Err(mpsc::error::TrySendError::Full(command)) => {
+                    if *self.shutdown.borrow() {
+                        return Err(closed());
+                    }
+                    if Instant::now() >= deadline {
+                        operit_host_api::tryLogHostConsole(
+                            5,
+                            "BridgeStreams",
+                            &format!(
+                                "stream command queue stayed full for {}ms",
+                                COMMAND_RETRY_WINDOW.as_millis()
+                            ),
+                        );
+                        return Err(CoreLinkError::new(
+                            "STREAM_BACKPRESSURE",
+                            "Connection stream command queue is full",
+                        ));
+                    }
+                    queued = Some(command);
+                    std::thread::sleep(COMMAND_RETRY_INTERVAL);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return Err(closed()),
+            }
+        }
     }
 
     /// Applies asynchronous backpressure while submitting a browser stream operation.

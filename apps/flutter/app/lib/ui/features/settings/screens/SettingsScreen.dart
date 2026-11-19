@@ -80,6 +80,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           return SettingsCategoryList(
             selectedCategory: null,
             onCategorySelected: _openPhoneCategory,
+            pluginEntries: AppNavigationEntryGateway.pluginEntries(),
+            onPluginEntrySelected: AppNavigationEntryGateway.activate,
           );
         }
 
@@ -124,6 +126,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: SettingsCategoryList(
               selectedCategory: _wideSelectedCategory,
               onCategorySelected: _selectWideCategory,
+              pluginEntries: AppNavigationEntryGateway.pluginEntries(),
+              onPluginEntrySelected: AppNavigationEntryGateway.activate,
             ),
           ),
         ),

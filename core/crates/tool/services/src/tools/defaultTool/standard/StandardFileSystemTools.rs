@@ -1039,7 +1039,7 @@ impl StandardFileSystemTools {
             }
             Err(errorValue) => {
                 let message = format!("Error writing to file: {errorValue}");
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -1064,7 +1064,7 @@ impl StandardFileSystemTools {
             Ok(value) => value,
             Err(errorValue) => {
                 let message = format!("Invalid base64 content: {errorValue}");
-                return toolError(tool, fileOperationDataToString(&message), message);
+                return toolError(tool, String::new(), message);
             }
         };
         match self.writeMappedBytes(&vfs, &path, &decoded) {
@@ -1079,7 +1079,7 @@ impl StandardFileSystemTools {
             ),
             Err(errorValue) => {
                 let message = format!("Error writing binary file: {errorValue}");
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -1112,7 +1112,7 @@ impl StandardFileSystemTools {
             ),
             Err(errorValue) => {
                 let message = errorValue;
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -1199,7 +1199,7 @@ impl StandardFileSystemTools {
             ),
             Err(errorValue) => {
                 let message = errorValue;
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -1239,7 +1239,7 @@ impl StandardFileSystemTools {
                     Self::verifyCopyOutcome(&vfs, &sourcePath, &destPath, recursive)
                 {
                     let message = format!("Copy verification failed: {verificationError}");
-                    return toolError(tool, fileOperationDataToString(&message), message);
+                    return toolError(tool, String::new(), message);
                 }
                 successData(
                     tool,
@@ -1253,7 +1253,7 @@ impl StandardFileSystemTools {
             }
             Err(errorValue) => {
                 let message = errorValue;
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -1321,7 +1321,7 @@ impl StandardFileSystemTools {
             ),
             Err(error) => {
                 let message = format!("Cross-node transfer failed: {error}");
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -1349,7 +1349,7 @@ impl StandardFileSystemTools {
             ),
             Err(errorValue) => {
                 let message = format!("Error creating directory: {errorValue}");
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -1568,18 +1568,14 @@ impl StandardFileSystemTools {
             if visitKey.trim().is_empty() || (linkNumber.is_none() && imageNumber.is_none()) {
                 return toolError(
                     tool,
-                    fileOperationDataToString(&format!(
-                        "Download failed for {destPath}: Either url or (visit_key + link_number/image_number) is required"
-                    )),
+                    String::new(),
                     "Either url or (visit_key + link_number/image_number) is required".to_string(),
                 );
             }
             let Some(cached) = StandardWebVisitTool::getCachedVisitResult(&visitKey) else {
                 return toolError(
                     tool,
-                    fileOperationDataToString(&format!(
-                        "Download failed for {destPath}: Invalid visit key."
-                    )),
+                    String::new(),
                     "Invalid visit key.".to_string(),
                 );
             };
@@ -1601,9 +1597,7 @@ impl StandardFileSystemTools {
             if resolvedUrl.trim().is_empty() {
                 return toolError(
                     tool,
-                    fileOperationDataToString(&format!(
-                        "Download failed for {destPath}: Index out of bounds."
-                    )),
+                    String::new(),
                     "Index out of bounds.".to_string(),
                 );
             }
@@ -1612,9 +1606,7 @@ impl StandardFileSystemTools {
         if resolvedUrl.trim().is_empty() || destPath.trim().is_empty() {
             return toolError(
                 tool,
-                fileOperationDataToString(&format!(
-                    "Download failed for {destPath}: URL and destination parameters are required"
-                )),
+                String::new(),
                 "URL and destination parameters are required".to_string(),
             );
         }
@@ -1622,9 +1614,7 @@ impl StandardFileSystemTools {
         if !resolvedUrl.starts_with("http://") && !resolvedUrl.starts_with("https://") {
             return toolError(
                 tool,
-                fileOperationDataToString(&format!(
-                    "Download failed for {destPath}: URL must start with http:// or https://"
-                )),
+                String::new(),
                 "URL must start with http:// or https://".to_string(),
             );
         }
@@ -1634,7 +1624,7 @@ impl StandardFileSystemTools {
             Err(error) => {
                 return toolError(
                     tool,
-                    fileOperationDataToString(&format!("Download failed for {destPath}: {error}")),
+                    String::new(),
                     error,
                 );
             }
@@ -1657,12 +1647,12 @@ impl StandardFileSystemTools {
             Ok(response) => response,
             Err(error) => {
                 let message = format!("Error downloading file: {error}");
-                return toolError(tool, fileOperationDataToString(&message), message);
+                return toolError(tool, String::new(), message);
             }
         };
         if !(200..300).contains(&response.statusCode) {
             let message = format!("Error downloading file: HTTP {}", response.statusCode);
-            return toolError(tool, fileOperationDataToString(&message), message);
+            return toolError(tool, String::new(), message);
         }
         let bytes = response.body;
 
@@ -1683,7 +1673,7 @@ impl StandardFileSystemTools {
             ),
             Err(error) => {
                 let message = format!("Error downloading file: {error}");
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -1780,14 +1770,14 @@ impl StandardFileSystemTools {
         if path.trim().is_empty() {
             return vec![toolError(
                 tool,
-                fileOperationDataToString("Path parameter is required"),
+                String::new(),
                 "Path parameter is required".to_string(),
             )];
         }
         if operationType.trim().is_empty() {
             return vec![toolError(
                 tool,
-                fileOperationDataToString("Type parameter is required (replace | delete | create)"),
+                String::new(),
                 "Type parameter is required (replace | delete | create)".to_string(),
             )];
         }
@@ -1801,7 +1791,7 @@ impl StandardFileSystemTools {
                 let message = "File does not exist. Use type=create with 'new' to create it.";
                 return vec![toolError(
                     tool,
-                    fileOperationDataToString(message),
+                    String::new(),
                     message.to_string(),
                 )];
             }
@@ -1809,7 +1799,7 @@ impl StandardFileSystemTools {
                 let message = "Parameter 'new' is required for type=create";
                 return vec![toolError(
                     tool,
-                    fileOperationDataToString(message),
+                    String::new(),
                     message.to_string(),
                 )];
             }
@@ -1829,7 +1819,7 @@ impl StandardFileSystemTools {
                     }
                     Err(error) => {
                         let message = format!("Failed to create new file: {error}");
-                        toolError(tool, fileOperationDataToString(&message), message)
+                        toolError(tool, String::new(), message)
                     }
                 },
             ];
@@ -1839,7 +1829,7 @@ impl StandardFileSystemTools {
             let message = "If you need to rewrite a whole existing file: do NOT use apply_file to overwrite it. Instead, call delete_file first, then write_file.";
             return vec![toolError(
                 tool,
-                fileOperationDataToString(message),
+                String::new(),
                 message.to_string(),
             )];
         }
@@ -1847,7 +1837,7 @@ impl StandardFileSystemTools {
             let message = format!("Path is not a file: {path}");
             return vec![toolError(
                 tool,
-                fileOperationDataToString(&message),
+                String::new(),
                 message,
             )];
         }
@@ -1858,7 +1848,7 @@ impl StandardFileSystemTools {
                 let message = format!("Failed to read original file: {error}");
                 return vec![toolError(
                     tool,
-                    fileOperationDataToString(&message),
+                    String::new(),
                     message,
                 )];
             }
@@ -1869,7 +1859,7 @@ impl StandardFileSystemTools {
                     let message = "Both 'old' and 'new' are required for type=replace";
                     return vec![toolError(
                         tool,
-                        fileOperationDataToString(message),
+                        String::new(),
                         message.to_string(),
                     )];
                 }
@@ -1884,7 +1874,7 @@ impl StandardFileSystemTools {
                     let message = "Parameter 'old' is required for type=delete";
                     return vec![toolError(
                         tool,
-                        fileOperationDataToString(message),
+                        String::new(),
                         message.to_string(),
                     )];
                 }
@@ -1900,7 +1890,7 @@ impl StandardFileSystemTools {
                 );
                 return vec![toolError(
                     tool,
-                    fileOperationDataToString(&message),
+                    String::new(),
                     message,
                 )];
             }
@@ -1912,7 +1902,7 @@ impl StandardFileSystemTools {
         if aiInstructions.to_ascii_lowercase().starts_with("error") {
             return vec![toolError(
                 tool,
-                fileOperationDataToString(&format!("File binding failed: {aiInstructions}")),
+                String::new(),
                 aiInstructions,
             )];
         }
@@ -1934,7 +1924,7 @@ impl StandardFileSystemTools {
                 }
                 Err(error) => {
                     let message = format!("Failed to write merged file: {error}");
-                    toolError(tool, fileOperationDataToString(&message), message)
+                    toolError(tool, String::new(), message)
                 }
             },
         ]
@@ -1967,7 +1957,7 @@ impl StandardFileSystemTools {
             ),
             Err(errorValue) => {
                 let message = errorValue;
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -1999,7 +1989,7 @@ impl StandardFileSystemTools {
             ),
             Err(errorValue) => {
                 let message = errorValue;
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -2025,7 +2015,7 @@ impl StandardFileSystemTools {
             ),
             Err(errorValue) => {
                 let message = errorValue;
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -2053,7 +2043,7 @@ impl StandardFileSystemTools {
             ),
             Err(errorValue) => {
                 let message = errorValue;
-                toolError(tool, fileOperationDataToString(&message), message)
+                toolError(tool, String::new(), message)
             }
         }
     }
@@ -2404,10 +2394,6 @@ fn grepResultData(searchPath: &str, pattern: &str, result: &GrepCodeResult) -> G
         totalMatches: result.totalMatches as i32,
         filesSearched: result.filesSearched as i32,
     }
-}
-
-fn fileOperationDataToString(details: &str) -> String {
-    details.to_string()
 }
 
 fn parameterValue(tool: &AITool, name: &str) -> String {

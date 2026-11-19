@@ -1353,13 +1353,12 @@ impl EnhancedAIService {
         context: &mut MessageExecutionContext,
         reason: String,
     ) {
-        AppLogger::v_with_level(
+        AppLogger::w(
             TAG,
             &format!(
-                "执行上下文已失效: id={}, reason={}",
+                "execution.context.invalidated id={} reason={}",
                 context.executionId, reason
             ),
-            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         context.isConversationActive = false;
         if let Some(active) = self
@@ -1372,7 +1371,7 @@ impl EnhancedAIService {
     }
 
     pub fn invalidateAllExecutionContexts(&mut self, reason: String) {
-        AppLogger::v_with_level(TAG, &format!("准备失效全部执行上下文: reason={}", reason), operit_util::AppLogger::VERBOSE_LEVEL_2);
+        AppLogger::w(TAG, &format!("execution.context.invalidate_all reason={}", reason));
         self.shared_state().invalidateExecutionContexts();
     }
 
@@ -2155,6 +2154,13 @@ impl EnhancedAIService {
             })
             .await;
         if !self.isExecutionContextActive(&execContext) {
+            AppLogger::w(
+                TAG,
+                &format!(
+                    "chat.turn.abort site=afterStream chatId={} reason=executionContextInactive",
+                    logChatId
+                ),
+            );
             self.unregisterExecutionContext(&execContext);
             return Ok(());
         }
@@ -2848,6 +2854,7 @@ impl EnhancedAIService {
                         )
                         .await?
                     else {
+                        AppLogger::w(TAG, "chat.turn.abort site=toolInvocationNone");
                         return Ok(());
                     };
                     continuation
@@ -2881,6 +2888,7 @@ impl EnhancedAIService {
             )
             .await?;
             if !shouldContinue {
+                AppLogger::w(TAG, "chat.turn.abort site=toolResultsShouldContinueFalse");
                 return Ok(());
             }
         }
@@ -3493,7 +3501,7 @@ fn buildPackageProxyToolPrompt() -> ToolPrompt {
                 name: "tool_name".to_string(),
                 value_type: "string".to_string(),
                 description:
-                    "Target tool name from an activated package (for example: packageName:toolName)"
+                    "The concrete package tool to run, always packageName:toolName (for example: super_admin:bash). Never pass package_proxy, proxy or search here: those are the proxy gateway itself, not callable targets."
                         .to_string(),
                 required: true,
                 default: None,
@@ -3511,7 +3519,7 @@ fn buildPackageProxyToolPrompt() -> ToolPrompt {
                 name: "tool_name".to_string(),
                 r#type: "string".to_string(),
                 description:
-                    "Target tool name from an activated package (for example: packageName:toolName)"
+                    "The concrete package tool to run, always packageName:toolName (for example: super_admin:bash). Never pass package_proxy, proxy or search here: those are the proxy gateway itself, not callable targets."
                         .to_string(),
                 required: true,
                 default: None,

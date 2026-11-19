@@ -241,22 +241,35 @@ impl FileBindingService {
             .collect::<Vec<_>>();
         let mut enrichedOps = Vec::<(EditOperation, usize, usize)>::new();
 
-        for op in operations {
-            let (start, end) = self.findBestMatchRange(&originalLines, &op.oldContent);
-            if start < 0 {
+        for (operationIndex, op) in operations.iter().enumerate() {
+            let matchResult = self.findBestMatch(&originalLines, &op.oldContent);
+            if matchResult.startLine < 0 || matchResult.bestScore <= MATCH_THRESHOLD {
                 return (
                     false,
-                    "Could not find a match for an OLD block. The file may have changed too much."
-                        .to_string(),
+                    self.describeMissingMatch(
+                        operationIndex,
+                        operations.len(),
+                        op,
+                        &originalLines,
+                        &matchResult,
+                    ),
                 );
             }
             if self.hasMultiplePerfectMatches(originalContent, &op.oldContent) {
                 return (
                     false,
-                    "Found multiple perfect matches for an OLD block in the target file. Please refine the patch so it only matches a single location.".to_string(),
+                    format!(
+                        "Found multiple perfect matches for OLD block #{} of {}. Include more surrounding lines so the block is unique in the file, or narrow it to a single distinctive line.",
+                        operationIndex + 1,
+                        operations.len()
+                    ),
                 );
             }
-            enrichedOps.push((op.clone(), start as usize, end as usize));
+            enrichedOps.push((
+                op.clone(),
+                matchResult.startLine as usize,
+                matchResult.endLine as usize,
+            ));
         }
 
         enrichedOps.sort_by(|left, right| right.1.cmp(&left.1));
@@ -434,18 +447,34 @@ impl FileBindingService {
         operations
     }
 
-    fn findBestMatchRange(&self, originalLines: &[String], oldContent: &str) -> (isize, isize) {
+    fn findBestMatch(&self, originalLines: &[String], oldContent: &str) -> MatchSearchResult {
         let oldContentLines = oldContent.lines().collect::<Vec<_>>();
         let numOldLines = oldContentLines.len();
         if numOldLines == 0 || originalLines.is_empty() {
-            return (-1, -1);
+            return MatchSearchResult {
+                bestScore: 0.0,
+                startLine: -1,
+                endLine: -1,
+                sizeDiff: usize::MAX,
+                lengthDiff: usize::MAX,
+                windows: 0,
+                lcsCalculations: 0,
+            };
         }
 
         let normalizedOldContent = normalizeWhitespace(oldContent);
         let normalizedOldLength = normalizedOldContent.len();
         let baseNgrams = self.buildNgrams(&normalizedOldContent, 3);
         if baseNgrams.is_empty() {
-            return (-1, -1);
+            return MatchSearchResult {
+                bestScore: 0.0,
+                startLine: -1,
+                endLine: -1,
+                sizeDiff: usize::MAX,
+                lengthDiff: usize::MAX,
+                windows: 0,
+                lcsCalculations: 0,
+            };
         }
 
         let delta = (numOldLines as f64 * 0.2) as isize + 2;
@@ -489,11 +518,7 @@ impl FileBindingService {
             }
         }
 
-        if best.bestScore > MATCH_THRESHOLD {
-            (best.startLine, best.endLine)
-        } else {
-            (-1, -1)
-        }
+        best
     }
 
     fn buildNgrams(&self, s: &str, n: usize) -> BTreeSet<String> {
@@ -522,6 +547,48 @@ impl FileBindingService {
         } else {
             intersection as f64 / union as f64
         }
+    }
+
+    /// Explains why an OLD block did not match, with enough detail to correct it.
+    ///
+    /// The previous message was a flat "the file may have changed too much". It did not
+    /// say which block failed, how large the target file was, or how close the nearest
+    /// candidate came, so the caller could only guess and retry. This reports all three.
+    fn describeMissingMatch(
+        &self,
+        operationIndex: usize,
+        operationCount: usize,
+        op: &EditOperation,
+        originalLines: &[String],
+        matchResult: &MatchSearchResult,
+    ) -> String {
+        let oldLines = op.oldContent.lines().collect::<Vec<_>>();
+        let preview = oldLines
+            .iter()
+            .take(2)
+            .map(|line| format!("`{}`", truncateForPreview(line, 80)))
+            .collect::<Vec<_>>()
+            .join(" then ");
+        let candidate = if matchResult.startLine < 0 {
+            "no candidate window could be scored at all".to_string()
+        } else {
+            format!(
+                "the closest candidate is L{}..L{} with similarity {:.2}",
+                matchResult.startLine + 1,
+                matchResult.endLine + 1,
+                matchResult.bestScore
+            )
+        };
+        format!(
+            "No match for OLD block #{} of {} ({} line(s), starting with {}). The target file has {} line(s), and {}. Similarity must exceed {:.2}. Re-read the file and copy the OLD block verbatim from its current content, or shrink it to a short fragment that is unique in the file.",
+            operationIndex + 1,
+            operationCount,
+            oldLines.len(),
+            if preview.is_empty() { "no text".to_string() } else { preview },
+            originalLines.len(),
+            candidate,
+            MATCH_THRESHOLD
+        )
     }
 
     fn hasMultiplePerfectMatches(&self, originalContent: &str, oldContent: &str) -> bool {
@@ -711,6 +778,17 @@ fn buildUnifiedDiffHunk(lines: Vec<UnifiedDiffLine>) -> UnifiedDiffHunk {
 
 fn normalizeWhitespace(value: &str) -> String {
     value.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+/// Clips one line so failure messages stay readable.
+fn truncateForPreview(line: &str, limit: usize) -> String {
+    let trimmed = line.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_string();
+    }
+    let mut clipped = trimmed.chars().take(limit).collect::<String>();
+    clipped.push_str("...");
+    clipped
 }
 
 fn trimTrailingNewline(value: &str) -> String {

@@ -75,6 +75,25 @@ pub fn scheduleNativeBlockingTask<T: Send + 'static>(
     Ok(NativeTaskHandle { result, completed })
 }
 
+/// Allocates a long-lived terminal reader from its own bounded capacity.
+pub fn scheduleNativeTerminalReaderTask<T: Send + 'static>(
+    name: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> HostResult<NativeTaskHandle<T>> {
+    let (sender, result) = mpsc::sync_channel(1);
+    let completed = Arc::new(AtomicBool::new(false));
+    let finished = completed.clone();
+    NativeHostRuntimeTaskSchedulerHost::new().scheduleTerminalReaderTask(
+        name,
+        Box::new(move || {
+            let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+            finished.store(true, Ordering::Release);
+            let _ = sender.send(output);
+        }),
+    )?;
+    Ok(NativeTaskHandle { result, completed })
+}
+
 /// Returns joinable results after atomically admitting every component of an OS service group.
 pub fn scheduleNativeServiceTasks(
     name: &str,

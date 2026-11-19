@@ -88,6 +88,7 @@ object AndroidRuntimeAssets {
         } else {
             Log.i(TAG, "runtime rootfs already installed elapsedMs=" + (System.currentTimeMillis() - startedAtMillis))
         }
+        installGnuTools(context, abi, rootfsDir)
 
         // proot 容器重置后 /etc/resolv.conf 会丢，DNS 随即失效。
         // 症状是「所有网络类工具莫名失败」：wget 报 bad address、
@@ -191,6 +192,41 @@ object AndroidRuntimeAssets {
     ///
     /// 用国内公共 DNS（阿里 223.5.5.5 / 腾讯 119.29.29.29）加 Google 兜底，
     /// 比读系统 DNS 更可靠：Android 的 netd 配置在 proot 里读不到。
+    /// GNU core utilities that the BusyBox applets cannot replace.
+    ///
+    /// The packaged rootfs only links `/bin/grep -> /bin/busybox`, so options such as
+    /// `--include`, `-P` and `find -newermt` are rejected. BusyBox prints its usage text
+    /// to stderr and exits, which every caller silently turns into "no match" and
+    /// produces confident but completely wrong conclusions. Staging real GNU tools in
+    /// `/usr/local/bin` (ahead of `/bin` on PATH) fixes the whole class of failure
+    /// without touching the rootfs archive, so user data inside the rootfs is never reset.
+    ///
+    /// Files are only rewritten when the size differs, therefore this is idempotent and
+    /// also repairs installs that already unpacked an older rootfs.
+    private val gnuToolNames = listOf("grep", "egrep", "fgrep", "find", "xargs")
+
+    private fun installGnuTools(context: Context, abi: String, rootfsDir: File) {
+        val assetPrefix = "$runtimeAssetsDirectory/$abi/gnu/bin"
+        val targetDir = File(rootfsDir, "usr/local/bin")
+        targetDir.mkdirs()
+        for (name in gnuToolNames) {
+            val bytes = try {
+                context.assets.open("$assetPrefix/$name").use { it.readBytes() }
+            } catch (error: Exception) {
+                Log.w(TAG, "gnu tool asset missing: " + name, error)
+                continue
+            }
+            val target = File(targetDir, name)
+            if (target.isFile && target.length() == bytes.size.toLong()) {
+                target.setExecutable(true, false)
+                continue
+            }
+            target.writeBytes(bytes)
+            target.setExecutable(true, false)
+            Log.i(TAG, "gnu tool installed: " + name + " bytes=" + bytes.size)
+        }
+    }
+
     private fun writeRootfsResolvConf(rootfsDir: File) {
         val resolv = File(rootfsDir, "etc/resolv.conf")
         resolv.parentFile?.mkdirs()

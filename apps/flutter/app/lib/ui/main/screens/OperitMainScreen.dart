@@ -285,6 +285,10 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
       toolPkgNavigationEntries: _toolPkgNavigationEntries,
     );
     AppRouteDiscoveryGateway.install(() => _navigationModel.routes);
+    AppNavigationEntryGateway.install(
+      entries: () => _navigationModel.navigationEntries,
+      activate: _navigateToNavigationEntry,
+    );
     _softwareDesignCatalog.install();
     _synchronizeSidebarDock();
     if (!_requestedInitialToolPkgNavigationRefresh) {
@@ -403,6 +407,10 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
         toolPkgNavigationEntries: _toolPkgNavigationEntries,
       );
       AppRouteDiscoveryGateway.install(() => _navigationModel.routes);
+      AppNavigationEntryGateway.install(
+        entries: () => _navigationModel.navigationEntries,
+        activate: _navigateToNavigationEntry,
+      );
       _synchronizeSidebarDock();
     });
   }
@@ -747,7 +755,9 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
           _navigationModel,
           currentRouteEntry,
         );
-        final pluginSidebarEntries = _sidebarDockController.primaryEntries;
+        // Plugin pages are hosted by the settings list, not the drawer.
+        const List<NavigationEntrySpec> pluginSidebarEntries =
+            <NavigationEntrySpec>[];
         final appBarEntries = _navigationModel.navigationEntries
             .where((entry) => entry.surface == NavigationSurface.appBar)
             .toList(growable: false);

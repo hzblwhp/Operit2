@@ -612,7 +612,10 @@ impl AIMessageManager {
         let conversationToSummarize = messagesToSummarize.iter().enumerate().map(|(index, message)| {
             let role = match message.sender.as_str() { "user" => "user", _ => "assistant" }.to_string();
             let cleanedContent = cleanSummarySourceMessage(message);
-            if !cleanedContent.trim().is_empty() {
+            // 摘要消息本身绝不进回顾段：否则上一次摘要的回顾会被再摘一遍，
+            // 每落一次盘滚一次雪球（实测第二次落盘的回顾段 42,866 字符，
+            // 比第一次整篇摘要还长 1.6 倍）。
+            if !cleanedContent.trim().is_empty() && message.sender != "summary" {
                 let displayContent = if message.sender == "ai" {
                     condenseAssistantMessageForReview(message)
                 } else { condenseUserForReview(&cleanedContent) };
@@ -630,10 +633,31 @@ impl AIMessageManager {
             return Ok(None);
         }
 
+        // 回顾段必须有硬预算。
+        //
+        // 实测同一会话两次落盘：回顾段分别占摘要总量的 66.7% 和 88.8%
+        // （第二次 48,262 字符里 42,866 是回顾段）。原因是每个工具部件都被
+        // 压成一行 `[工具: …]`，一轮任务几十次调用就是几万字符。
+        //
+        // 摘要正文已经浓缩了同样的信息，回顾段只起「保留关键原话」的辅助
+        // 作用。按最新优先截到固定预算，落盘后的残留量才是可预测的。
+        const REVIEW_BUDGET_CHARS: usize = 6000;
+        let mut keptReviewEntries: Vec<(String, String)> = Vec::new();
+        let mut reviewBudget = REVIEW_BUDGET_CHARS;
+        for entry in conversationReviewEntries.iter().rev() {
+            let cost = entry.0.chars().count() + entry.1.chars().count() + 3;
+            if cost > reviewBudget && !keptReviewEntries.is_empty() {
+                break;
+            }
+            reviewBudget = reviewBudget.saturating_sub(cost);
+            keptReviewEntries.push(entry.clone());
+        }
+        keptReviewEntries.reverse();
+
         let mut summaryWithQuotes = summary.trim().to_string();
-        if !conversationReviewEntries.is_empty() {
+        if !keptReviewEntries.is_empty() {
             summaryWithQuotes.push_str("\n\n【对话回顾】\n");
-            for (speaker, content) in conversationReviewEntries {
+            for (speaker, content) in keptReviewEntries {
                 summaryWithQuotes.push_str("- ");
                 summaryWithQuotes.push_str(&speaker);
                 summaryWithQuotes.push_str(": ");
@@ -709,6 +733,9 @@ impl AIMessageManager {
         enableSummary: bool,
         _enableSummaryByMessageCount: bool,
         _summaryMessageCountThreshold: i32,
+        // 仅用于日志：TokenCacheManager 是 provider 级（按模型缓存），多个会话共用一个实例，
+        // 没 chatId 就没法把 estimate/judge 记录归到具体会话，会看成"同一序列忽高忽低"。
+        chatId: &str,
     ) -> bool {
         if !enableSummary {
             return false;
@@ -771,8 +798,8 @@ impl AIMessageManager {
         AppLogger::w(
             "SummaryGate",
             &format!(
-                "watermark currentTokens={} historyChars={} historyTokens={} effective={} maxTokens={} ratio={:.3} wm={:.3}",
-                currentTokens, historyChars, historyTokens, effectiveTokens, maxTokens, usageRatio, watermark,
+                "watermark chatId={} currentTokens={} historyChars={} historyTokens={} effective={} maxTokens={} ratio={:.3} wm={:.3}",
+                chatId, currentTokens, historyChars, historyTokens, effectiveTokens, maxTokens, usageRatio, watermark,
             ),
         );
         usageRatio >= watermark
@@ -1275,14 +1302,13 @@ impl AIMessageManager {
         // Close the per-send gate immediately, including a send that has not yet
         // entered the provider or registered its execution context.
         operation.cancellationToken.cancel();
-        ChainLogger::verbose_with_level(
+        ChainLogger::info(
             SEND_CHAIN,
             "send.cancel.start",
             &[
                 ("chatKey", chatKey.to_string()),
                 ("operationId", operationId.to_string()),
             ],
-            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         // The token already stops response callbacks and new tool rounds. Close
         // output promptly, without waiting for a busy provider mutex; cleanup cannot

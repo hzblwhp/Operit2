@@ -848,7 +848,7 @@ impl AIService for DeepseekProvider {
             }
             let mut chunks = Vec::new();
             for reasoning in parsed.reasoningChunks {
-                chunks.push(format!("<think>{reasoning}</think>"));
+                chunks.push(format!("<think>{}</think>", operit_util::ChatUtils::ChatUtils::escape_thinking_markup(&reasoning)));
             }
             chunks.extend(parsed.reasoningMetadataTags);
             chunks.extend(parsed.outputItemMetadataTags);
@@ -877,7 +877,7 @@ impl AIService for DeepseekProvider {
         let mut chunks = Vec::new();
         if let Some(reasoning) = extract_reasoning_chunk(&json_response) {
             if !reasoning.is_empty() {
-                chunks.push(format!("<think>{}</think>", reasoning));
+                chunks.push(format!("<think>{}</think>", operit_util::ChatUtils::ChatUtils::escape_thinking_markup(&reasoning)));
             }
         }
         if let Some(content) = extract_content_chunk(&json_response) {
@@ -992,13 +992,13 @@ fn process_streaming_line(
     }
     if let Some(reasoning) = extract_reasoning_chunk(&json_response) {
         if !reasoning.is_empty() {
-            chunks.push(format!("<think>{}</think>", reasoning));
+            chunks.push(format!("<think>{}</think>", operit_util::ChatUtils::ChatUtils::escape_thinking_markup(&reasoning)));
         }
     }
     if let Some(content) = extract_content_chunk(&json_response) {
         if !content.is_empty() {
-            chunks.push(StructuredToolCallBridge::convertToolCallPayloadToXml(
-                &content,
+            chunks.push(operit_util::ChatUtils::ChatUtils::escape_thinking_markup(
+                &StructuredToolCallBridge::convertToolCallPayloadToXml(&content),
             ));
         }
     }

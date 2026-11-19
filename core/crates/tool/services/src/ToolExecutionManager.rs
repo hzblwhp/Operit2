@@ -105,112 +105,200 @@ pub struct ToolCall {
     pub parameters: BTreeMap<String, serde_json::Value>,
 }
 
+/// Guard against a hostile or cyclic envelope; real calls nest only a handful of times.
+const MAX_ENVELOPE_DEPTH: usize = 32;
+
+
 impl ToolCall {
-    /// Resolves an explicit proxy envelope once before the sole lifecycle; nested proxies are rejected.
+    /// Resolves an explicit proxy envelope before the sole lifecycle runs.
+    ///
+    /// Models routinely target the proxy itself (`tool_name` = `package_proxy`) and nest the real
+    /// call one level down, so the inner envelope is unwrapped and re-resolved. When the target
+    /// cannot be recovered the call fails with one actionable sentence instead of internal jargon.
     pub(crate) fn resolveTarget(&self, context: &ToolInvocationContext) -> Result<Self, String> {
         if !matches!(self.name.as_str(), PACKAGE_PROXY_TOOL_NAME | CLI_PROXY_TOOL_NAME) { return Ok(self.clone()); }
         if self.name == CLI_PROXY_TOOL_NAME && context.turnSnapshot().map(|turn| &turn.toolExposureMode) != Some(&ToolExposureMode::CLI) {
             return Err(CliToolModeSupport::buildCliModeUnavailableMessage(false));
         }
-        for key in self.parameters.keys() {
-            if !matches!(key.as_str(), "tool_name" | "params" | PACKAGE_CALLER_NAME_PARAM | PACKAGE_CHAT_ID_PARAM | PACKAGE_CALLER_PARTICIPANT_ID_PARAM | PACKAGE_CALLER_OWNER_PARAM) {
-                return Err(format!("Unexpected proxy parameter: {key}. Put target tool parameters inside params as a JSON object."));
+        self.resolveProxyEnvelope()
+    }
+
+    /// Context-free half of `resolveTarget`, so the envelope rules can be unit tested.
+    ///
+    /// The transport re-wraps a proxy call once per hop, so a single logical call can arrive with
+    /// the real target buried several `params` levels deep. The target is therefore searched all
+    /// the way down instead of at a fixed depth.
+    fn resolveProxyEnvelope(&self) -> Result<Self, String> {
+        let Some((name, arguments)) = Self::deepestProxyTarget(&self.parameters, 0) else {
+            return Err(self.nestedProxyAdvice());
+        };
+        // 目录入口（search）不是可调用工具，单独说清楚。
+        if !matches!(name.as_str(), PACKAGE_PROXY_TOOL_NAME | CLI_PROXY_TOOL_NAME)
+            && CliToolModeSupport::isReservedProxyTarget(&name)
+        {
+            return Err(format!(
+                "`{name}` is a catalog entry, not a callable tool. Pass the concrete package tool instead, e.g. package_proxy {{\"tool_name\":\"<packageName>:<toolName>\",\"params\":{{...}}}}."
+            ));
+        }
+        // 整棵树里只有 proxy 自己，没有真目标。
+        if matches!(name.as_str(), PACKAGE_PROXY_TOOL_NAME | CLI_PROXY_TOOL_NAME) {
+            return Err(self.nestedProxyAdvice());
+        }
+        self.finishProxyResolution(&name, arguments)
+    }
+
+    /// Descends through every `params` layer and returns the innermost callable target with its
+    /// arguments. Outer argument keys survive unless the inner envelope overrides them.
+    fn deepestProxyTarget(
+        parameters: &BTreeMap<String, serde_json::Value>,
+        depth: usize,
+    ) -> Option<(String, BTreeMap<String, serde_json::Value>)> {
+        if depth > MAX_ENVELOPE_DEPTH {
+            return None;
+        }
+        let nested = parameters
+            .get("params")
+            .and_then(Self::paramsObjectOf)
+            .and_then(|object| Self::deepestProxyTarget(&object, depth + 1))
+            // provider 会把参数整体包进 arguments / input / args / kwargs / parameters。
+            .or_else(|| {
+                proxyArgumentWrapperKeys().iter().find_map(|key| {
+                    parameters
+                        .get(*key)
+                        .and_then(Self::paramsObjectOf)
+                        .and_then(|object| Self::deepestProxyTarget(&object, depth + 1))
+                })
+            });
+        if let Some((name, arguments)) = nested {
+            let mut merged = Self::argumentsAt(parameters);
+            for (key, value) in arguments {
+                merged.insert(key, value);
+            }
+            return Some((name, merged));
+        }
+        let name = Self::proxyNameAt(parameters)?;
+        Some((name, Self::argumentsAt(parameters)))
+    }
+
+    /// Parses a `params` value that may be an object, a JSON string, or XML-escaped JSON.
+    fn paramsObjectOf(value: &serde_json::Value) -> Option<BTreeMap<String, serde_json::Value>> {
+        match value {
+            serde_json::Value::Object(object) => Some(object.clone().into_iter().collect()),
+            serde_json::Value::String(text) => {
+                let unescaped = ToolExecutionManager::unescapeXml(text);
+                serde_json::from_str::<serde_json::Value>(&unescaped)
+                    .ok()
+                    .or_else(|| serde_json::from_str::<serde_json::Value>(text).ok())
+                    .and_then(|parsed| match parsed {
+                        serde_json::Value::Object(object) => {
+                            Some(object.into_iter().collect::<BTreeMap<_, _>>())
+                        }
+                        _ => None,
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    /// Reads a nonblank `tool_name` from one flat parameter map without descending.
+    fn proxyNameAt(parameters: &BTreeMap<String, serde_json::Value>) -> Option<String> {
+        parameters
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Collects the target arguments carried by one envelope layer, dropping envelope-only keys.
+    fn argumentsAt(parameters: &BTreeMap<String, serde_json::Value>) -> BTreeMap<String, serde_json::Value> {
+        let mut arguments = parameters
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(key.as_str(), "tool_name" | "params")
+                    && !key.starts_with("__operit_package_")
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(inner) = parameters.get("params").and_then(Self::paramsObjectOf) {
+            for (key, value) in inner {
+                if matches!(key.as_str(), "tool_name" | "params") || key.starts_with("__operit_package_") {
+                    continue;
+                }
+                arguments.entry(key).or_insert(value);
             }
         }
-        // `tool_name` 可能缺失，也可能被写进 `params` 里 —— 两者都实测出现过。
-        // 过去这里只回一句 "must be text"，既没说是缺失还是类型不对，也没给正确形状，
-        // 调用方无法自我纠正（同一位调用方在同类问题上连续踩了十几次）。
-        // 现在：先从 params 回收，再给一条能直接照着改的错误信息。
-        let reclaimedName = match self.parameters.get("tool_name").and_then(serde_json::Value::as_str) {
-            Some(text) if !text.trim().is_empty() => Some(text.to_string()),
-            _ => match self.parameters.get("params") {
-                Some(serde_json::Value::Object(object)) => object
-                    .get("tool_name")
-                    .and_then(serde_json::Value::as_str)
-                    .map(|text| text.to_string()),
-                Some(serde_json::Value::String(text)) => {
-                    let unescaped = ToolExecutionManager::unescapeXml(text);
-                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&unescaped)
-                        .ok()
-                        .and_then(|object| {
-                            object
-                                .get("tool_name")
-                                .and_then(serde_json::Value::as_str)
-                                .map(|text| text.to_string())
-                        })
-                }
-                _ => None,
-            },
-        };
-        let name = reclaimedName.ok_or_else(|| {
-            let received = self
-                .parameters
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                r#"Proxy call is missing the required `tool_name` field (received parameters: [{}]). Pass it as a top-level string alongside `params`, using the exact form package_proxy {{"tool_name":"<packageName>:<toolName>","params":{{...}}}}, for example {{"tool_name":"super_admin:bash","params":{{"command":"ls"}}}}."#,
-                if received.is_empty() { "none".to_string() } else { received }
-            )
-        })?;
-        let name = name.as_str();
+        // 各家 provider 对「目标工具参数」的字段名并不统一，只剩一个包装对象时它的成员才是真参数。
+        unwrapProxyArgumentWrapper(arguments)
+    }
+
+    /// Echo of the parameter shape that actually arrived, so a caller can self-correct.
+    fn receivedArgumentsDump(&self) -> String {
+        let mut received = self
+            .parameters
+            .iter()
+            .filter(|(key, _)| !key.starts_with("__operit_package_"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(serde_json::Value::String(text)) = received.get("params").cloned() {
+            let unescaped = ToolExecutionManager::unescapeXml(&text);
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&unescaped) {
+                received.insert("params".to_string(), parsed);
+            }
+        }
+        let mut dump = serde_json::Value::Object(received.into_iter().collect()).to_string();
+        if dump.chars().count() > 400 {
+            dump = dump.chars().take(400).collect::<String>() + "...";
+        }
+        dump
+    }
+
+    /// One actionable sentence plus the parameter shape that actually arrived.
+    fn nestedProxyAdvice(&self) -> String {
+        format!(
+            "Package proxy could not resolve a real target. Received arguments: {}. Call the concrete tool directly once: package_proxy {{\"tool_name\":\"<packageName>:<toolName>\",\"params\":{{...}}}}. Never put package_proxy, proxy or search in tool_name.",
+            self.receivedArgumentsDump()
+        )
+    }
+
+    /// Builds the final target call: validates the name shape and flattens the argument object.
+    fn finishProxyResolution(&self, name: &str, arguments: BTreeMap<String, serde_json::Value>) -> Result<Self, String> {
         if name.trim().is_empty() || name.trim() != name { return Err("Proxy tool_name must be exact nonblank text".into()); }
-        if CliToolModeSupport::isReservedProxyTarget(name) { return Err(format!("Proxy cannot target another proxy or catalog entry: {name}")); }
         if self.name == PACKAGE_PROXY_TOOL_NAME {
             match name.split_once(':') {
                 Some((package, method)) if !package.is_empty() && !method.is_empty() && !method.contains(':') => {},
                 _ => return Err("tool_name must use packageName:toolName format".into()),
             }
         }
-        // `params` 完全可选：无参工具（get_bluetooth_state、get_device_info、workflow:list …）
-        // 直接 package_proxy {"tool_name":"..."} 就该能调，不必写一个空对象占位。
-        // 之前强制要求 params，导致这类工具必须被逼着传 "{}"，属于无谓的形状负担。
-        let explicitParams = self.parameters.get("params");
-        let object = match explicitParams.unwrap_or(&serde_json::Value::Null) {
-            serde_json::Value::Null => serde_json::Map::new(),
-            serde_json::Value::String(text) => {
-                // 模型从 XML 形式给出参数时，引号会被转义成 &quot; / &apos; 等。
-                // 不先还原就解析 JSON 必然失败，表现为
-                // 「Tool request contains a non-JSON value」（crossref 这类严格校验的工具首当其冲）。
-                let unescaped = ToolExecutionManager::unescapeXml(text);
-                match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&unescaped) {
-                    Ok(object) => object,
-                    // 还原后仍失败时退回原文解析，兼容调用方直接传真实 JSON 的情况。
-                    Err(_) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text)
-                        .map_err(|error| error.to_string())?,
-                }
-            }
-            serde_json::Value::Object(object) => object.clone(),
-            _ => return Err("Proxy params must be a JSON object or its legacy text encoding".into()),
-        };
-        // 模型经常把目标工具的参数直接放到顶层（command、background、city…），
-        // 而不是塞进 params。合并 preview.28 时上游重写了这一段，定义被丢掉但使用还在；
-        // 这里恢复「顶层未知键自动折叠进 params」的行为，params 里显式值优先。
-        let mut foldedTopLevel: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        for (key, value) in &self.parameters {
-            if !matches!(
-                key.as_str(),
-                "tool_name"
-                    | "params"
-                    | PACKAGE_CALLER_NAME_PARAM
-                    | PACKAGE_CHAT_ID_PARAM
-                    | PACKAGE_CALLER_PARTICIPANT_ID_PARAM
-                    | PACKAGE_CALLER_OWNER_PARAM
-            ) {
-                foldedTopLevel.insert(key.clone(), value.clone());
-            }
-        }
-        let mut parameters = object.into_iter().collect::<BTreeMap<_, _>>();
-        // 折叠的顶层参数只补缺失键，不覆盖调用方在 params 里显式写的值。
-        for (key, value) in foldedTopLevel {
-            parameters.entry(key).or_insert(value);
-        }
+        // 信封字段不能漏进目标工具，否则会被判成 `Unknown tool parameter`。
+        let mut parameters = arguments;
+        // 调用方身份由宿主注入，必须原样带到目标工具，否则 JS 工具拿不到调用上下文。
         for key in [PACKAGE_CALLER_NAME_PARAM, PACKAGE_CHAT_ID_PARAM, PACKAGE_CALLER_PARTICIPANT_ID_PARAM, PACKAGE_CALLER_OWNER_PARAM] {
             parameters.remove(key);
             if let Some(value) = self.parameters.get(key) { parameters.insert(key.to_string(), value.clone()); }
         }
         Ok(Self { name: name.to_string(), parameters })
+    }
+
+    /// Parses the envelope's `params` into an object, tolerating the legacy text encoding.
+    fn proxyParamsObject(&self) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        match self.parameters.get("params") {
+            None | Some(serde_json::Value::Null) => Ok(serde_json::Map::new()),
+            Some(serde_json::Value::String(text)) => {
+                // 模型从 XML 形式给出参数时，引号会被转义成 " / ' 等。
+                // 不先还原就解析 JSON 必然失败，表现为
+                // 「Tool request contains a non-JSON value」（crossref 这类严格校验的工具首当其冲）。
+                let unescaped = ToolExecutionManager::unescapeXml(text);
+                match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&unescaped) {
+                    Ok(object) => Ok(object),
+                    // 还原后仍失败时退回原文解析，兼容调用方直接传真实 JSON 的情况。
+                    Err(_) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text)
+                        .map_err(|error| error.to_string()),
+                }
+            }
+            Some(serde_json::Value::Object(object)) => Ok(object.clone()),
+            Some(_) => Err("Proxy params must be a JSON object or its legacy text encoding".into()),
+        }
     }
 
     /// Adapts values only at the legacy executor and text-hook contract boundary.
@@ -361,6 +449,64 @@ pub enum ToolExecutionPolicy {
     Ai { exposure: ToolExposureMode },
     /// Executes an ordinary JavaScript or application request without AI lifecycle hooks or permission preflight.
     Direct,
+}
+
+/// Names the wrapper keys that providers use for a tool call's real arguments.
+fn proxyArgumentWrapperKeys() -> [&'static str; 6] {
+    ["arguments", "args", "kwargs", "parameters", "input", "arguments_json"]
+}
+
+/// Parses a wrapper value that may be a JSON object or its text encoding.
+fn proxyArgumentWrapperObject(value: &serde_json::Value) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match value {
+        serde_json::Value::Object(object) => Some(object.clone()),
+        serde_json::Value::String(text) => {
+            let unescaped = ToolExecutionManager::unescapeXml(text);
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&unescaped)
+                .or_else(|_| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text))
+                .ok()
+        }
+        _ => None,
+    }
+}
+
+/// Recovers `tool_name` nested inside a provider-style argument wrapper.
+fn proxyWrapperToolName(parameters: &BTreeMap<String, serde_json::Value>) -> Option<String> {
+    for key in proxyArgumentWrapperKeys() {
+        let Some(value) = parameters.get(key) else { continue };
+        let Some(object) = proxyArgumentWrapperObject(value) else { continue };
+        if let Some(text) = object.get("tool_name").and_then(serde_json::Value::as_str) {
+            if !text.trim().is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Unwraps a lone `arguments`/`input`/`args` object into the target tool's real parameters.
+///
+/// Provider formats disagree on where arguments live, and a wrapped call otherwise fails
+/// every required-parameter check. Only a single wrapper key at the top of the envelope is
+/// unwrapped, so a genuine business parameter that happens to share the name is untouched.
+fn unwrapProxyArgumentWrapper(
+    parameters: BTreeMap<String, serde_json::Value>,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut current = parameters;
+    // Three rounds cover `{"arguments":{"input":{...}}}` without risking an endless loop.
+    for _ in 0..3 {
+        if current.len() != 1 {
+            break;
+        }
+        let Some(key) = current.keys().next().cloned() else { break };
+        if !proxyArgumentWrapperKeys().contains(&key.as_str()) {
+            break;
+        }
+        let Some(value) = current.get(&key) else { break };
+        let Some(object) = proxyArgumentWrapperObject(value) else { break };
+        current = object.into_iter().collect();
+    }
+    current
 }
 
 impl ToolExecutionManager {
@@ -1056,5 +1202,179 @@ mod tests {
         let mut mismatched = result;
         mismatched.toolName = "other_tool".to_string();
         assert!(ToolExecutionManager::routeChangeIntentForResult(&tool, &mismatched).is_none());
+    }
+}
+
+#[cfg(test)]
+mod proxyEnvelopeTests {
+    use super::*;
+
+    fn call(name: &str, json: serde_json::Value) -> ToolCall {
+        let parameters = json
+            .as_object()
+            .expect("test envelope must be an object")
+            .clone()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        ToolCall { name: name.to_string(), parameters }
+    }
+
+    fn resolve(name: &str, json: serde_json::Value) -> Result<ToolCall, String> {
+        call(name, json).resolveProxyEnvelope()
+    }
+
+    /// A well-formed envelope must pass through untouched.
+    #[test]
+    fn direct_target_passes_through() {
+        let resolved = resolve("package_proxy", serde_json::json!({
+            "tool_name": "extended_chat:list_chats",
+            "params": { "limit": 1 }
+        }))
+        .expect("direct target resolves");
+        assert_eq!(resolved.name, "extended_chat:list_chats");
+        assert_eq!(resolved.parameters.get("limit").and_then(|v| v.as_u64()), Some(1));
+        assert!(!resolved.parameters.contains_key("tool_name"));
+    }
+
+    /// The reported bug: the proxy names itself and nests the real call one level down.
+    #[test]
+    fn self_target_unwraps_one_level() {
+        let resolved = resolve("package_proxy", serde_json::json!({
+            "tool_name": "package_proxy",
+            "params": { "tool_name": "extended_chat:list_chats" }
+        }))
+        .expect("nested envelope resolves");
+        assert_eq!(resolved.name, "extended_chat:list_chats");
+    }
+
+    /// Nested envelope that also carries real arguments must keep them.
+    #[test]
+    fn self_target_keeps_inner_arguments() {
+        let resolved = resolve("package_proxy", serde_json::json!({
+            "tool_name": "package_proxy",
+            "params": { "tool_name": "extended_chat:list_chats", "params": { "limit": 2 } }
+        }))
+        .expect("nested envelope resolves");
+        assert_eq!(resolved.name, "extended_chat:list_chats");
+        assert_eq!(resolved.parameters.get("limit").and_then(|v| v.as_u64()), Some(2));
+    }
+
+    /// Two self-targeting levels still resolve.
+    #[test]
+    fn self_target_unwraps_two_levels() {
+        let resolved = resolve("package_proxy", serde_json::json!({
+            "tool_name": "package_proxy",
+            "params": { "tool_name": "package_proxy", "params": { "tool_name": "extended_chat:list_chats" } }
+        }))
+        .expect("double nested envelope resolves");
+        assert_eq!(resolved.name, "extended_chat:list_chats");
+    }
+
+    /// Legacy text encoding of `params` is accepted.
+    #[test]
+    fn text_encoded_params_are_parsed() {
+        let resolved = resolve("package_proxy", serde_json::json!({
+            "tool_name": "extended_chat:list_chats",
+            "params": "{\"limit\":3}"
+        }))
+        .expect("text params resolve");
+        assert_eq!(resolved.name, "extended_chat:list_chats");
+        assert_eq!(resolved.parameters.get("limit").and_then(|v| v.as_u64()), Some(3));
+    }
+
+    /// A provider wrapper that hides `tool_name` is still understood.
+    #[test]
+    fn provider_wrapper_target_is_found() {
+        let resolved = resolve("package_proxy", serde_json::json!({
+            "arguments": { "tool_name": "extended_chat:list_chats" }
+        }))
+        .expect("wrapper target resolves");
+        assert_eq!(resolved.name, "extended_chat:list_chats");
+    }
+
+    /// No target at all must fail with guidance, never panic or recurse forever.
+    #[test]
+    fn missing_target_reports_guidance() {
+        let error = resolve("package_proxy", serde_json::json!({ "params": {} }))
+            .expect_err("missing target must fail");
+        assert!(error.contains("package_proxy"), "guidance mentions the call shape: {error}");
+        assert!(
+            error.contains("Received arguments") || error.contains("keys received"),
+            "error echoes what arrived: {error}"
+        );
+    }
+
+    /// `params` nested one level too deep still yields the real target.
+    #[test]
+    fn target_nested_inside_params_is_found() {
+        let resolved = resolve("package_proxy", serde_json::json!({
+            "params": { "params": { "tool_name": "extended_chat:list_chats" } }
+        }))
+        .expect("deeply nested target resolves");
+        assert_eq!(resolved.name, "extended_chat:list_chats");
+    }
+
+    /// Text-encoded `params` that itself holds the nested envelope.
+    #[test]
+    fn self_target_with_text_encoded_params_resolves() {
+        let resolved = resolve("package_proxy", serde_json::json!({
+            "tool_name": "package_proxy",
+            "params": "{\"tool_name\":\"extended_chat:list_chats\"}"
+        }))
+        .expect("text encoded nested envelope resolves");
+        assert_eq!(resolved.name, "extended_chat:list_chats");
+    }
+
+    /// Real device capture: one logical call arrived wrapped three extra times by the transport.
+    #[test]
+    fn transport_rewrapped_envelope_reaches_real_target() {
+        let resolved = resolve("package_proxy", serde_json::json!({
+            "tool_name": "package_proxy",
+            "params": {
+                "tool_name": "package_proxy",
+                "params": {
+                    "tool_name": "package_proxy",
+                    "params": { "tool_name": "extended_chat:list_chats" }
+                }
+            }
+        }))
+        .expect("transport re-wrapped envelope resolves");
+        assert_eq!(resolved.name, "extended_chat:list_chats");
+    }
+
+    /// Two arguments split across envelope layers must both survive.
+    #[test]
+    fn arguments_from_every_layer_are_merged() {
+        let resolved = resolve("package_proxy", serde_json::json!({
+            "tool_name": "package_proxy",
+            "limit": 5,
+            "params": {
+                "tool_name": "package_proxy",
+                "params": { "tool_name": "extended_chat:list_chats", "order": "asc" }
+            }
+        }))
+        .expect("merged arguments resolve");
+        assert_eq!(resolved.name, "extended_chat:list_chats");
+        assert_eq!(resolved.parameters.get("limit").and_then(|v| v.as_u64()), Some(5));
+        assert_eq!(resolved.parameters.get("order").and_then(|v| v.as_str()), Some("asc"));
+    }
+
+    /// Only the proxy naming itself, with no inner target, must fail with guidance.
+    #[test]
+    fn proxy_chain_without_real_target_reports_guidance() {
+        let error = resolve("package_proxy", serde_json::json!({
+            "tool_name": "package_proxy",
+            "params": { "tool_name": "package_proxy", "params": {} }
+        }))
+        .expect_err("chain without target must fail");
+        assert!(error.contains("Received arguments"), "echoes what arrived: {error}");
+    }
+
+    /// Catalog entries stay rejected: they are not callable tools.
+    #[test]
+    fn catalog_entry_is_rejected() {
+        let error = resolve("package_proxy", serde_json::json!({ "tool_name": "search" }))
+            .expect_err("catalog entry must fail");
+        assert!(error.contains("catalog entry"), "explains why: {error}");
     }
 }

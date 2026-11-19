@@ -273,7 +273,12 @@ impl MessageCoordinationDelegate {
                 proxySenderName: None,
                 chatProviderIdOverride: chatProviderIdOverride.clone(),
                 chatModelIdOverride: chatModelIdOverride.clone(),
-                publishEstimate: false,
+                // 必须 publish：这是右上角水位计的唯一数据源。
+                //
+                // 原来传 false，落盘后重算出的新窗口只在内部用掉、从不发布，
+                // UI 就得等下一次真实发请求（那条路径传 true）才看到新数值，
+                // 表现为「落盘后水位计仍显示落盘前的旧值，要等一两轮才降」。
+                publishEstimate: true,
                 runtime,
             })
             .await
@@ -921,11 +926,13 @@ impl MessageCoordinationDelegate {
                     true,
                     settings.summary.enableSummaryByMessageCount,
                     settings.summary.summaryMessageCountThreshold,
+                    chatId,
                 );
             AppLogger::w(
                 "SummaryGate",
                 &format!(
-                    "judge messages={} window={} maxTokens={} threshold={:.3} => {}",
+                    "judge chatId={} messages={} window={} maxTokens={} threshold={:.3} => {}",
+                    chatId,
                     gateMessages,
                     gateWindow,
                     maxTokens,
@@ -957,8 +964,15 @@ impl MessageCoordinationDelegate {
     pub(crate) async fn checkSummaryAfterReply(
         &mut self, service: &mut EnhancedAIService, chatId: String, participantId: String,
     ) -> Result<(), String> {
-        if let Some(task) = self.messageProcessingDelegate.summaryTaskForChat(&chatId) {
-            task.completion.await?;
+        // A summary already in flight for this chat owns the work. Never await it here:
+        // that call sits on the chat-turn finalization path, so awaiting blocked every
+        // following tool round until the summary LLM call finished.
+        if self.messageProcessingDelegate.summaryTaskForChat(&chatId).is_some() {
+            AppLogger::w(
+                "SummaryGate",
+                &format!("skip trigger chatId={chatId} reason=summary_in_flight"),
+            );
+            return Ok(());
         }
         let configuration = service.resolveChatConfigurationForOptions(&SendMessageOptions {
             chatId: Some(chatId.clone()), executionParticipantId: Some(participantId),
@@ -976,13 +990,17 @@ impl MessageCoordinationDelegate {
                 messages.clone(), window, settings.context.maxContextTokens(),
                 settings.summary.tokenThresholdRatio(), settings.summary.enableSummary,
                 settings.summary.enableSummaryByMessageCount, settings.summary.summaryMessageCountThreshold,
+                &chatId,
             ) {
-                return self.launchSummary(service, messages, ConversationSummaryRequest {
+                // Detach: launchSummary already schedules the work on a host background
+                // task, so awaiting the returned completion here only stalls the caller.
+                let _summaryCompletion = self.launchSummary(service, messages, ConversationSummaryRequest {
                     chatId, participantId: Some(configuration.profile.id.clone()),
                     configuration: configuration.clone(), promptFunctionType: PromptFunctionType::CHAT,
                     chatProviderIdOverride: None, chatModelIdOverride: None,
                     autoContinue: false, requireCurrentChat: false,
-                })?.await;
+                })?;
+                return Ok(());
             }
         }
         Ok(())
@@ -1021,12 +1039,10 @@ impl MessageCoordinationDelegate {
         let mut cleanup = self.messageProcessingDelegate.clone_for_core();
         cleanup.setPendingAsyncSummaryUiForChat(chatId.clone(), true);
         cleanup.setSuppressIdleCompletedStateForChat(chatId.clone(), true);
-        cleanup.setInputProcessingStateForChat(
-            chatId.clone(),
-            InputProcessingState::Summarizing {
-                message: "chat_compressing_history".to_string(),
-            },
-        );
+        // Do NOT write InputProcessingState::Summarizing here. This runs on a host
+        // background worker; overwriting the chat's foreground state made an active turn
+        // (thinking / streaming / running tools) look frozen on "compressing history".
+        // Progress is surfaced through the pending-summary flag above instead.
         let mut service = enhancedAiService.clone();
         let workerChatId = chatId.clone();
         let workerTaskId = taskId.clone();
@@ -1339,6 +1355,7 @@ mod summary_send_policy_tests {
                     true,
                     false,
                     16,
+                    "test",
                 ));
             }
         }
@@ -1386,6 +1403,7 @@ mod summary_send_policy_tests {
                 true,
                 false,
                 16,
+                "test",
             ));
         }
     }

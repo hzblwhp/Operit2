@@ -11,7 +11,20 @@ const MARKET_V2_STATIC_URL: &str = "https://static.operit.app/market/v2";
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const USER_AGENT: &str = "Operit-Market-Stats";
 const TIMEOUT_SECONDS: u64 = 15;
+/// GitHub release redirects stall for 20-40s on mainland networks.
+/// Downloads use their own timeout instead of the 15s metadata timeout.
+const DOWNLOAD_TIMEOUT_SECONDS: u64 = 60;
+/// Total download attempts including the first one.
+const DOWNLOAD_MAX_ATTEMPTS: u32 = 4;
+/// Backoff base between download attempts, in seconds.
+const DOWNLOAD_RETRY_BACKOFF_SECONDS: u64 = 2;
 const MARKET_API_LOG_TAG: &str = "MarketStatsApiService";
+/// Mirrors that proxy GitHub release asset downloads when direct access is blocked.
+const GITHUB_ASSET_MIRROR_PREFIXES: &[&str] = &[
+    "https://gh-proxy.com/",
+    "https://ghfast.top/",
+    "https://ghproxy.net/",
+];
 
 // ---- v2 Public Models ----
 
@@ -1050,46 +1063,228 @@ impl MarketStatsApiService {
     // ── Download ───────────────────────────────────────────
 
     /// Downloads a marketplace asset by id.
+    ///
+    /// The market redirects every asset to a GitHub release URL, and that host
+    /// is intermittently unreachable on mainland networks: a request either
+    /// succeeds in a few seconds or stalls and resets around 20 seconds. A
+    /// single attempt therefore fails far too often, so this retries with its
+    /// own (longer) timeout and keeps 4xx responses fatal.
     pub fn download_asset(&self, asset_id: &str) -> Result<Vec<u8>, String> {
         let trimmed_asset_id = asset_id.trim();
         if trimmed_asset_id.is_empty() {
             return Err("asset id is empty".to_string());
         }
         let url = self.v2_url(&["assets", trimmed_asset_id, "download"])?;
-        let resp = self.request("GET", url.as_str(), Vec::new(), Vec::new(), true)?;
-        if is_success(resp.statusCode) {
-            Ok(resp.body)
-        } else {
-            Err(format!(
-                "HTTP {}: {}",
-                resp.statusCode,
-                summarize_body(&body_text(&resp.body))
-            ))
+        let mut last_error = String::from("download failed without error detail");
+        for attempt in 1..=DOWNLOAD_MAX_ATTEMPTS {
+            let started_at_millis = currentTimeMillis();
+            match self.request_with_timeout(
+                "GET",
+                url.as_str(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                DOWNLOAD_TIMEOUT_SECONDS,
+            ) {
+                Ok(resp) => {
+                    if is_success(resp.statusCode) && !resp.body.is_empty() {
+                        if attempt > 1 {
+                            AppLogger::w(
+                                MARKET_API_LOG_TAG,
+                                &format!(
+                                    "download_asset recovered attempt={} assetId={} elapsedMs={} bytes={}",
+                                    attempt,
+                                    trimmed_asset_id,
+                                    currentTimeMillis() - started_at_millis,
+                                    resp.body.len()
+                                ),
+                            );
+                        }
+                        return Ok(resp.body);
+                    }
+                    last_error = format!(
+                        "HTTP {}: {}",
+                        resp.statusCode,
+                        summarize_body(&body_text(&resp.body))
+                    );
+                    if resp.statusCode >= 400 && resp.statusCode < 500 {
+                        return Err(last_error);
+                    }
+                }
+                Err(error) => {
+                    last_error = error;
+                }
+            }
+            if attempt < DOWNLOAD_MAX_ATTEMPTS {
+                AppLogger::w(
+                    MARKET_API_LOG_TAG,
+                    &format!(
+                        "download_asset retry {}/{} assetId={} elapsedMs={} reason={}",
+                        attempt,
+                        DOWNLOAD_MAX_ATTEMPTS,
+                        trimmed_asset_id,
+                        currentTimeMillis() - started_at_millis,
+                        last_error
+                    ),
+                );
+                std::thread::sleep(std::time::Duration::from_secs(
+                    DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt as u64,
+                ));
+            }
         }
+        Err(format!(
+            "download failed after {} attempts: {}",
+            DOWNLOAD_MAX_ATTEMPTS, last_error
+        ))
     }
 
     /// Streams a marketplace asset to a caller-owned file without buffering it in the UI.
+    ///
+    /// STREAM_RETRY_MARKER: this is the path the marketplace UI really uses
+    /// (`OperitApplication::installMarketArtifact`), so the retry has to live
+    /// here and not only in `download_asset`. Every asset URL redirects to a
+    /// GitHub release host that intermittently resets the connection, and the
+    /// underlying `downloadToFile` reports that as a bare reqwest error with no
+    /// status code, so a failed attempt cannot be classified: retry regardless.
+    /// The host removes its own partial file on failure, so each attempt
+    /// restarts from a clean target path.
     pub fn download_asset_to_file(&self, asset_id: &str, target_path: &str) -> Result<u64, String> {
         let asset_id = asset_id.trim();
         if asset_id.is_empty() {
             return Err("asset id is empty".to_string());
         }
         let url = self.v2_url(&["assets", asset_id, "download"])?;
-        let result = self.http_host.downloadToFile(HttpRequestData {
-            url: url.to_string(),
-            method: "GET".to_string(),
-            headers: vec![("User-Agent".to_string(), USER_AGENT.to_string())],
-            body: Vec::new(),
-            formFields: Vec::new(),
-            fileParts: Vec::new(),
-            connectTimeoutSeconds: TIMEOUT_SECONDS,
-            readTimeoutSeconds: TIMEOUT_SECONDS,
-            followRedirects: true,
-            ignoreSsl: false,
-            proxyHost: String::new(),
-            proxyPort: 0,
-        }, target_path.to_string()).map_err(|error| error.to_string())?;
-        Ok(result.downloadedBytes)
+        let mut last_error = String::from("download failed without error detail");
+        for attempt in 1..=DOWNLOAD_MAX_ATTEMPTS {
+            let started_at_millis = currentTimeMillis();
+            let outcome = self
+                .http_host
+                .downloadToFile(
+                    HttpRequestData {
+                        url: url.to_string(),
+                        method: "GET".to_string(),
+                        headers: vec![("User-Agent".to_string(), USER_AGENT.to_string())],
+                        body: Vec::new(),
+                        formFields: Vec::new(),
+                        fileParts: Vec::new(),
+                        connectTimeoutSeconds: DOWNLOAD_TIMEOUT_SECONDS,
+                        readTimeoutSeconds: DOWNLOAD_TIMEOUT_SECONDS,
+                        followRedirects: true,
+                        ignoreSsl: false,
+                        proxyHost: String::new(),
+                        proxyPort: 0,
+                    },
+                    target_path.to_string(),
+                )
+                .map_err(|error| error.to_string());
+            match outcome {
+                Ok(result) if result.downloadedBytes > 0 => {
+                    if attempt > 1 {
+                        AppLogger::w(
+                            MARKET_API_LOG_TAG,
+                            &format!(
+                                "download_asset_to_file recovered attempt={} assetId={} elapsedMs={} bytes={}",
+                                attempt,
+                                asset_id,
+                                currentTimeMillis() - started_at_millis,
+                                result.downloadedBytes
+                            ),
+                        );
+                    }
+                    return Ok(result.downloadedBytes);
+                }
+                Ok(_) => {
+                    last_error = "downloaded zero bytes".to_string();
+                }
+                Err(error) => {
+                    last_error = error;
+                }
+            }
+            if attempt < DOWNLOAD_MAX_ATTEMPTS {
+                AppLogger::w(
+                    MARKET_API_LOG_TAG,
+                    &format!(
+                        "download_asset_to_file retry {}/{} assetId={} elapsedMs={} reason={}",
+                        attempt,
+                        DOWNLOAD_MAX_ATTEMPTS,
+                        asset_id,
+                        currentTimeMillis() - started_at_millis,
+                        last_error
+                    ),
+                );
+                std::thread::sleep(std::time::Duration::from_secs(
+                    DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt as u64,
+                ));
+            }
+        }
+        Err(format!(
+            "download failed after {} attempts: {}",
+            DOWNLOAD_MAX_ATTEMPTS, last_error
+        ))
+    }
+
+    /// Downloads one GitHub release asset through mirror prefixes into the target file.
+    /// Only used as a fallback when the market asset endpoint cannot complete the transfer.
+    pub fn download_github_asset_via_mirror(
+        &self,
+        asset_url: &str,
+        target_path: &str,
+    ) -> Result<u64, String> {
+        let asset_url = asset_url.trim();
+        if asset_url.is_empty() {
+            return Err("asset url is empty".to_string());
+        }
+        if !asset_url.starts_with("https://github.com/")
+            && !asset_url.starts_with("http://github.com/")
+        {
+            return Err("asset url is not a GitHub release url".to_string());
+        }
+        let mut last_error = String::from("mirror download failed without error detail");
+        for prefix in GITHUB_ASSET_MIRROR_PREFIXES {
+            let mirrored_url = format!("{prefix}{asset_url}");
+            let started_at_millis = currentTimeMillis();
+            let outcome = self
+                .http_host
+                .downloadToFile(
+                    HttpRequestData {
+                        url: mirrored_url,
+                        method: "GET".to_string(),
+                        headers: vec![("User-Agent".to_string(), USER_AGENT.to_string())],
+                        body: Vec::new(),
+                        formFields: Vec::new(),
+                        fileParts: Vec::new(),
+                        connectTimeoutSeconds: DOWNLOAD_TIMEOUT_SECONDS,
+                        readTimeoutSeconds: DOWNLOAD_TIMEOUT_SECONDS,
+                        followRedirects: true,
+                        ignoreSsl: false,
+                        proxyHost: String::new(),
+                        proxyPort: 0,
+                    },
+                    target_path.to_string(),
+                )
+                .map_err(|error| error.to_string());
+            match outcome {
+                Ok(result) if result.downloadedBytes > 0 => {
+                    AppLogger::w(
+                        MARKET_API_LOG_TAG,
+                        &format!(
+                            "mirror download ok prefix={} bytes={} elapsedMs={}",
+                            prefix,
+                            result.downloadedBytes,
+                            currentTimeMillis() - started_at_millis
+                        ),
+                    );
+                    return Ok(result.downloadedBytes);
+                }
+                Ok(_) => {
+                    last_error = format!("{prefix}: downloaded zero bytes");
+                }
+                Err(error) => {
+                    last_error = format!("{prefix}: {error}");
+                }
+            }
+        }
+        Err(format!("all GitHub mirrors failed: {last_error}"))
     }
 
     // ── Internal: HTTP helpers ─────────────────────────────
@@ -1239,9 +1434,21 @@ impl MarketStatsApiService {
         &self,
         method: &str,
         url: &str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        follow_redirects: bool,
+    ) -> Result<HttpResponseData, String> {
+        self.request_with_timeout(method, url, headers, body, follow_redirects, TIMEOUT_SECONDS)
+    }
+
+    fn request_with_timeout(
+        &self,
+        method: &str,
+        url: &str,
         mut headers: Vec<(String, String)>,
         body: Vec<u8>,
         follow_redirects: bool,
+        timeout_seconds: u64,
     ) -> Result<HttpResponseData, String> {
         let is_market_request =
             url.starts_with(MARKET_V2_BASE_URL) || url.starts_with(MARKET_V2_STATIC_URL);
@@ -1267,8 +1474,8 @@ impl MarketStatsApiService {
             body,
             formFields: Vec::new(),
             fileParts: Vec::new(),
-            connectTimeoutSeconds: TIMEOUT_SECONDS,
-            readTimeoutSeconds: TIMEOUT_SECONDS,
+            connectTimeoutSeconds: timeout_seconds,
+            readTimeoutSeconds: timeout_seconds,
             followRedirects: follow_redirects,
             ignoreSsl: false,
             proxyHost: String::new(),

@@ -1044,7 +1044,12 @@ async fn finalizeAdmittedChatSend(
                     );
                     (coordinator, service)
                 };
-                coordinator.checkSummaryAfterReply(&mut service, admitted.handle.chatId.clone(), participantId.to_string()).await?;
+                if let Err(error) = coordinator.checkSummaryAfterReply(&mut service, admitted.handle.chatId.clone(), participantId.to_string()).await {
+                    operit_util::AppLogger::AppLogger::e(
+                        "SummaryGate",
+                        &format!("checkSummaryAfterReply failed chatId={} error={}", admitted.handle.chatId, error),
+                    );
+                }
             }
             Ok(result)
         },

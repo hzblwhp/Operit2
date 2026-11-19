@@ -1150,7 +1150,7 @@ impl ClaudeProvider {
                             content_block.get("thinking").and_then(Value::as_str)
                         {
                             if !thinking.is_empty() {
-                                chunks.push(thinking.to_string());
+                                chunks.push(operit_util::ChatUtils::ChatUtils::escape_thinking_markup(thinking));
                             }
                         }
                     }
@@ -1171,7 +1171,7 @@ impl ClaudeProvider {
                 {
                     if let Some(thinking) = delta.get("thinking").and_then(Value::as_str) {
                         if !thinking.is_empty() {
-                            chunks.push(thinking.to_string());
+                            chunks.push(operit_util::ChatUtils::ChatUtils::escape_thinking_markup(thinking));
                         }
                     }
                 } else if self.enable_tool_call
@@ -1233,7 +1233,7 @@ impl ClaudeProvider {
                     if let Some(thinking) = block.get("thinking").and_then(Value::as_str) {
                         if !thinking.is_empty() {
                             full_text.push_str("\n<think>");
-                            full_text.push_str(thinking);
+                            full_text.push_str(&operit_util::ChatUtils::ChatUtils::escape_thinking_markup(thinking));
                             full_text.push_str("</think>\n");
                         }
                     }

@@ -255,3 +255,43 @@ class AppRouteDiscoveryGateway {
     return provider();
   }
 }
+
+
+/// Exposes the live navigation catalog and its activation path outside the
+/// main shell so other surfaces (the settings list) can host plugin entries
+/// without duplicating tool package action dispatch.
+class AppNavigationEntryGateway {
+  const AppNavigationEntryGateway._();
+
+  static List<NavigationEntrySpec> Function()? _entriesProvider;
+
+  static void Function(NavigationEntrySpec entry)? _activationHandler;
+
+  static void install({
+    required List<NavigationEntrySpec> Function() entries,
+    required void Function(NavigationEntrySpec entry) activate,
+  }) {
+    _entriesProvider = entries;
+    _activationHandler = activate;
+  }
+
+  static void clear() {
+    _entriesProvider = null;
+    _activationHandler = null;
+  }
+
+  /// Plugin-owned entries that the shell no longer hosts in the drawer.
+  static List<NavigationEntrySpec> pluginEntries() {
+    final provider = _entriesProvider;
+    if (provider == null) {
+      return const <NavigationEntrySpec>[];
+    }
+    return provider()
+        .where((entry) => entry.kind == NavigationEntryKind.plugin)
+        .toList(growable: false);
+  }
+
+  static void activate(NavigationEntrySpec entry) {
+    _activationHandler?.call(entry);
+  }
+}

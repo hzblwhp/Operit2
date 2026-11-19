@@ -1027,11 +1027,21 @@ impl MessageProcessingDelegate {
                 }
             }
         });
+        // 前台状态必须落在终态，不能在「后台摘要在跑」时把整轮标成处理中。
+        //
+        // 原来这里写 InputProcessingState::Summarizing，等效于告诉 UI「这一轮还在跑」：
+        // Dart 侧 isProcessing 的判据是 tag != Idle/Completed/Error，于是
+        // AgentChatInputSection 里 processing = isLoading || inputState.isProcessing 恒真、
+        // showCancelAction = processing && !draft 恒真，发送键整段变成「停止」按钮；
+        // 同时 ChatScreenContent 又把 Summarizing 放进 isExcludedBottomStatus，
+        // 连「正在整理上下文」的文字都不显示。
+        // 于是摘要请求那 40~50 秒里，回复其实早就结束了、新消息却发不出去、
+        // 界面还一个字都不提示 —— 用户看到的就是「落盘把任务卡了四五十秒」。
+        //
+        // 摘要进度只在内部用 pendingAsyncSummaryUi 表达，绝不再占用前台处理态。
         self.updateChatExecutionState(chatId, |state| {
             state.isLoading = false;
-            state.inputProcessingState = InputProcessingState::Summarizing {
-                message: "message_summarizing".to_string(),
-            };
+            state.inputProcessingState = InputProcessingState::Completed;
         });
         true
     }

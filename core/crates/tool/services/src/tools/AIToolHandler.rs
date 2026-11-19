@@ -2893,13 +2893,10 @@ mod tests {
         fixture.handler.registerSharedTool("fixture:probe".into(), probe.clone(), ToolRegistrationVisibility::PUBLIC);
         fixture.handler.getToolPermissionSystem().saveAiPermissionMode(AiPermissionMode::Full).unwrap();
         let invalid = [
-            (json!({"tool_name": "fixture:probe", "params": "command: git status", "timeoutMs": "120000"}), "Unexpected proxy parameter: timeoutMs"),
-            (json!({"params": "{}"}), "Proxy tool_name must be text"),
+            (json!({"params": "{}"}), "Proxy call is missing the required `tool_name` field"),
             (json!({"tool_name": " fixture:probe", "params": "{}"}), "Proxy tool_name must be exact nonblank text"),
-            (json!({"tool_name": "fixture:probe"}), "Proxy params is required"),
             (json!({"tool_name": "fixture:probe", "params": "command: [unfinished"}), "expected value"),
             (json!({"tool_name": "fixture:probe", "params": "[]"}), "invalid type: sequence"),
-            (json!({"tool_name": "fixture:probe", "params": null}), "Proxy params must be a JSON object or its legacy text encoding"),
             (json!({"tool_name": "proxy", "params": "{}"}), "Proxy cannot target another proxy"),
         ];
         for name in ["package_proxy", "proxy"] {
@@ -2954,6 +2951,72 @@ mod tests {
                 }
             }
         }
+    }
+    /// Folds target-tool parameters left at the top level so the call still reaches the tool.
+    #[tokio::test]
+    async fn proxy_folds_top_level_parameters_into_params() {
+        operit_host_api::HostManager::setDefaultHostJavaScriptRuntimeHost(Arc::new(
+            operit_host_native_scheduler::NativeHostJavaScriptRuntimeHost::new(),
+        ));
+        let mut fixture = PipelineFixture::with_package_assets(Some(&[]));
+        let context = fixture.handler.getContext();
+        operit_store::RuntimeStorageHost::setDefaultRuntimeStorageHost(context.runtimeStorageHost.unwrap());
+        operit_store::RuntimeStorageHost::setDefaultRuntimeSqliteHost(context.runtimeSqliteHost.unwrap());
+        operit_util::RuntimeStoreRoot::setDefaultRuntimeStoreRootConfig(
+            operit_util::RuntimeStoreRoot::RuntimeStoreRootConfig::new(
+                fixture.root.join("runtime"), fixture.root.join("workspaces"),
+            ),
+        );
+        {
+            let manager = fixture.handler.getOrCreatePackageManager();
+            let mut manager = manager.lock().unwrap();
+            assert!(manager.claimInitialPackageRegistryLoad().unwrap());
+            manager.loadAvailablePackages();
+        }
+        let probe = Arc::new(SharedProbe::default());
+        fixture.handler.registerSharedTool("fixture:probe".into(), probe.clone(), ToolRegistrationVisibility::PUBLIC);
+        fixture.handler.getToolPermissionSystem().saveAiPermissionMode(AiPermissionMode::Full).unwrap();
+        let exposure = ToolExposureMode::FULL;
+        let turn = ToolRuntimeContext {
+            callerChatId: Some("chat".into()), callerParticipantId: None,
+            workspacePath: None, workspaceFolders: Vec::new(),
+            toolExposureMode: exposure.clone(), extensionOwner: "config-owner".into(),
+            executionData: Default::default(),
+        };
+        // Shape that used to fail with "Unexpected proxy parameter": no `params` key at all.
+        let request = ToolCall {
+            name: "package_proxy".into(),
+            parameters: BTreeMap::from([
+                ("tool_name".into(), json!("fixture:probe")),
+                ("command".into(), json!("git status")),
+                ("timeoutMs".into(), json!("120000")),
+            ]),
+        };
+        let results = ToolExecutionManager::scopeToolRuntimeContext(turn.clone(),
+            fixture.handler.executeToolInvocation(&request, ToolExecutionPolicy::Ai { exposure })).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].toolName, "fixture:probe");
+        assert!(results[0].success, "unexpected error: {:?}", results[0].error);
+        let ToolResultData::JsonResultData(data) = &results[0].result else { panic!("Expected probe result") };
+        assert_eq!(data.value["parameters"], json!({"command": "git status", "timeoutMs": "120000"}));
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+
+        // Explicit `params` still wins over a folded top-level duplicate.
+        let merged = ToolCall {
+            name: "package_proxy".into(),
+            parameters: BTreeMap::from([
+                ("tool_name".into(), json!("fixture:probe")),
+                ("params".into(), json!({"command": "from-params"})),
+                ("command".into(), json!("from-top-level")),
+            ]),
+        };
+        let results = ToolExecutionManager::scopeToolRuntimeContext(turn,
+            fixture.handler.executeToolInvocation(&merged, ToolExecutionPolicy::Direct)).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success, "unexpected error: {:?}", results[0].error);
+        let ToolResultData::JsonResultData(data) = &results[0].result else { panic!("Expected probe result") };
+        assert_eq!(data.value["parameters"], json!({"command": "from-params"}));
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
     }
 
     /// Invalid proxy parameters reach the model as a tool result and do not abort the batch.

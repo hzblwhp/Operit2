@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:operit_ui/operit_ui.dart';
 
 import '../../../../l10n/generated/app_localizations.dart';
+import '../../../main/navigation/AppNavigationModels.dart';
 import '../../../theme/OperitGlassSurface.dart';
 import '../models/SettingsModels.dart';
 
@@ -12,10 +13,16 @@ class SettingsCategoryList extends StatelessWidget {
     super.key,
     required this.selectedCategory,
     required this.onCategorySelected,
+    this.pluginEntries = const <NavigationEntrySpec>[],
+    this.onPluginEntrySelected,
   });
 
   final SettingsCategory? selectedCategory;
   final ValueChanged<SettingsCategory> onCategorySelected;
+
+  /// Plugin-owned entries that the main drawer no longer hosts.
+  final List<NavigationEntrySpec> pluginEntries;
+  final ValueChanged<NavigationEntrySpec>? onPluginEntrySelected;
 
   /// Shares one control blur across the non-overlapping category tiles.
   @override
@@ -52,6 +59,29 @@ class SettingsCategoryList extends StatelessWidget {
       ),
     ];
     final theme = Theme.of(context);
+    final pluginTiles = <Widget>[
+      if (pluginEntries.isNotEmpty) ...<Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(8, 12, 8, 6),
+          child: Text(
+            '插件应用',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.6,
+            ),
+          ),
+        ),
+        for (final entry in pluginEntries)
+          SettingsEntryTile(
+            title: entry.title,
+            subtitle: entry.description ?? '插件提供的页面',
+            icon: entry.icon,
+            selected: false,
+            onTap: () => onPluginEntrySelected?.call(entry),
+          ),
+      ],
+    ];
     return ThemeGlassSurfaceGroup(
       child: ListView(
         padding: const EdgeInsets.fromLTRB(10, 10, 10, 16),
@@ -85,6 +115,7 @@ class SettingsCategoryList extends StatelessWidget {
                 selected: selectedCategory == category,
                 onTap: () => onCategorySelected(category),
               ),
+            if (groupEntry.key == 0) ...pluginTiles,
           ],
         ],
       ),
@@ -114,6 +145,38 @@ class SettingsCategoryTile extends StatelessWidget {
   final bool prominent;
 
   /// Builds a selectable tile for one settings category.
+  @override
+  Widget build(BuildContext context) {
+    return SettingsEntryTile(
+      title: spec.title,
+      subtitle: spec.subtitle,
+      icon: spec.icon,
+      selected: selected,
+      onTap: onTap,
+      prominent: prominent,
+    );
+  }
+}
+
+/// Shared settings list tile so plugin entries match host category styling.
+class SettingsEntryTile extends StatelessWidget {
+  const SettingsEntryTile({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+    this.prominent = false,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  final bool prominent;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -154,7 +217,7 @@ class SettingsCategoryTile extends StatelessWidget {
                       ? colorScheme.primary.withValues(alpha: 0.16)
                       : colorScheme.surface,
                   child: Icon(
-                    spec.icon,
+                    icon,
                     size: prominent ? 22 : 18,
                     color: foreground,
                   ),
@@ -165,7 +228,7 @@ class SettingsCategoryTile extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       Text(
-                        spec.title,
+                        title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: theme.textTheme.bodyMedium?.copyWith(
@@ -175,7 +238,7 @@ class SettingsCategoryTile extends StatelessWidget {
                       ),
                       const SizedBox(height: 3),
                       Text(
-                        spec.subtitle,
+                        subtitle,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: theme.textTheme.bodySmall?.copyWith(

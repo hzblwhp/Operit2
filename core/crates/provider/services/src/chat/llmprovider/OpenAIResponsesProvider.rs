@@ -1378,7 +1378,7 @@ impl AIService for OpenAIResponsesProvider {
 
         let mut chunks = Vec::new();
         for reasoning in parsed.reasoningChunks {
-            chunks.push(format!("<think>{reasoning}</think>"));
+            chunks.push(format!("<think>{}</think>", operit_util::ChatUtils::ChatUtils::escape_thinking_markup(&reasoning)));
         }
         chunks.extend(parsed.reasoningMetadataTags);
         chunks.extend(parsed.outputItemMetadataTags);

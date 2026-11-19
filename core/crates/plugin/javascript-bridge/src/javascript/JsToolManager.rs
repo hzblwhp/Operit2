@@ -237,10 +237,49 @@ impl JsToolManager {
             .collect::<Vec<_>>();
 
         if !missingRequiredParameters.is_empty() {
+            let received = if request.parameters.is_empty() {
+                "none".to_string()
+            } else {
+                request
+                    .parameters
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let accepted = definition
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    if parameter.required {
+                        format!("{} ({} required)", parameter.name, parameter.parameter_type)
+                    } else {
+                        format!("{} ({})", parameter.name, parameter.parameter_type)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            // A wrapper object is the classic cause: the caller wrote `arguments`/`input`
+            // (provider formats name the field differently) and the real fields never
+            // reached this layer, so every required check fails without a usable clue.
+            let wrapperHint = if request.parameters.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "arguments" | "args" | "input" | "kwargs" | "parameters"
+                )
+            }) {
+                " The call nested the real fields inside a wrapper object such as `arguments`; pass them as direct fields of the argument object instead."
+            } else {
+                ""
+            };
             return Err(ToolParameterConversionException {
                 message: format!(
-                    "Missing required parameters: {}",
-                    missingRequiredParameters.join(", ")
+                    "Missing required parameters: {}. Received argument(s): [{}]. `{}` accepts: {}.{}",
+                    missingRequiredParameters.join(", "),
+                    received,
+                    request.tool_name,
+                    accepted,
+                    wrapperHint
                 ),
             });
         }

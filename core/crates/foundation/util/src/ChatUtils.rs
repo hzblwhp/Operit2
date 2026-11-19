@@ -38,13 +38,73 @@ impl ChatUtils {
         )
     }
 
+    /// Escapes raw thinking delimiters inside model-provided reasoning text.
+    ///
+    /// Reasoning chunks are re-wrapped as `<think>...</think>` before they reach the
+    /// streaming parser. If the model itself prints a thinking delimiter (quoting one,
+    /// discussing the protocol, or emitting the marker as code), the wrapper closes
+    /// early and every following reasoning token is rendered as visible answer text.
+    /// A zero-width space after `<` keeps the text readable while making the sequence
+    /// non-matching for the protocol regexes.
+    pub fn escape_thinking_markup(content: &str) -> String {
+        content
+            .replace("</think", "<\u{200B}/think")
+            .replace("<think", "<\u{200B}think")
+    }
+
     /// Removes thinking and search markup from visible assistant content.
+    /// Escapes thinking markup in one streamed reasoning delta.
+    ///
+    /// Replacing per delta is not enough: a delimiter split across two deltas
+    /// matches nothing on either side on its own, yet concatenating them produces
+    /// the real delimiter and closes the block early. A tail that could still grow
+    /// into a delimiter is therefore held back in `pending` and prepended to the
+    /// next delta instead of being emitted.
+    pub fn escape_thinking_markup_streaming(pending: &mut String, delta: &str) -> String {
+        pending.push_str(delta);
+        let mut holdback = 0usize;
+        for delimiter in ["</think", "<think"] {
+            for length in 1..delimiter.len() {
+                if pending.ends_with(&delimiter[..length]) {
+                    holdback = holdback.max(length);
+                }
+            }
+        }
+        if holdback == 0 {
+            let escaped = Self::escape_thinking_markup(pending);
+            pending.clear();
+            return escaped;
+        }
+        let split_at = pending.len() - holdback;
+        let head = pending[..split_at].to_string();
+        let tail = pending[split_at..].to_string();
+        *pending = tail;
+        Self::escape_thinking_markup(&head)
+    }
+
+    /// Flushes the tail held back by `escape_thinking_markup_streaming`.
+    pub fn flush_thinking_markup_streaming(pending: &mut String) -> String {
+        if pending.is_empty() {
+            return String::new();
+        }
+        let escaped = Self::escape_thinking_markup(pending);
+        pending.clear();
+        escaped
+    }
+
     pub fn remove_thinking_content(content: &str) -> String {
         let think_pattern =
             Regex::new(r"(?s)<think(?:ing)?>.*?(</think(?:ing)?>|\z)").expect("think regex");
         let search_pattern = Regex::new(r"(?s)<search>.*?(</search>|\z)").expect("search regex");
-        search_pattern
-            .replace_all(&think_pattern.replace_all(content, ""), "")
+        let think_removed = think_pattern.replace_all(content, "");
+        let without_blocks = search_pattern.replace_all(&think_removed, "");
+        // A closing delimiter with no opening delimiter reaches this point when the model
+        // prints one by itself (reasoning-budget cut-off, or the text merely quoting it).
+        // Drop the bare delimiter so it never shows up in the answer, but keep the
+        // surrounding text: deleting it would also delete legitimate answer content.
+        let orphan_pattern = Regex::new(r"(?s)</think(?:ing)?>").expect("orphan think regex");
+        orphan_pattern
+            .replace_all(&without_blocks, "")
             .trim()
             .to_string()
     }
