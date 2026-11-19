@@ -1,3 +1,5 @@
+use super::ApiKeyProvider::KeyGetter;
+use super::ProviderHttp::KeyAuthentication;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
@@ -30,7 +32,8 @@ use operit_util::TokenCacheManager::TokenCacheManager;
 #[derive(Clone)]
 pub struct ClaudeProvider {
     pub api_endpoint: String,
-    pub api_key: String,
+    pub key_getter: KeyGetter,
+
     pub model_name: String,
     pub provider_type: String,
     pub enable_tool_call: bool,
@@ -52,7 +55,7 @@ struct ClaudeProviderState {
 impl ClaudeProvider {
     pub fn new(
         api_endpoint: String,
-        api_key: String,
+        key_getter: KeyGetter,
         model_name: String,
         provider_type: String,
         custom_headers: Vec<(String, String)>,
@@ -60,7 +63,7 @@ impl ClaudeProvider {
     ) -> Self {
         Self {
             api_endpoint,
-            api_key,
+            key_getter,
             model_name,
             provider_type,
             enable_tool_call,
@@ -122,6 +125,7 @@ impl ClaudeProvider {
         &self,
         request: super::ProviderHttp::RequestBuilder,
     ) -> Result<super::ProviderHttp::Response, AiServiceError> {
+        let request = request.key_getter(self.key_getter.clone(), KeyAuthentication::Header("x-api-key".into()));
         if self.is_cancelled() {
             return Err(AiServiceError::RequestCancelled);
         }
@@ -577,13 +581,6 @@ impl ClaudeProvider {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-        if !self.api_key.trim().is_empty() {
-            headers.insert(
-                "x-api-key",
-                HeaderValue::from_str(&self.api_key)
-                    .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?,
-            );
-        }
         for (name, value) in &self.custom_headers {
             headers.insert(
                 HeaderName::from_bytes(name.as_bytes())
@@ -964,28 +961,9 @@ impl ClaudeProvider {
             } else {
                 self.apply_usage(json_response.get("usage"))
             };
-            let mut chunks = Vec::new();
-            if let Some(content) = json_response.get("content").and_then(Value::as_array) {
-                for part in content {
-                    match part.get("type").and_then(Value::as_str).unwrap_or_default() {
-                        "text" => {
-                            if let Some(text) = part.get("text").and_then(Value::as_str) {
-                                chunks.push(StructuredToolCallBridge::convertToolCallPayloadToXml(
-                                    text,
-                                ));
-                            }
-                        }
-                        "tool_use" => {
-                            chunks.push(StructuredToolCallBridge::convertToolCallPayloadToXml(
-                                &part.to_string(),
-                            ))
-                        }
-                        _ => {}
-                    }
-                }
-            }
             let _ = token_counts;
-            return Ok(response_stream_from_chunks(chunks));
+            let content = self.parse_anthropic_non_streaming(&json_response);
+            return Ok(response_stream_from_chunks(vec![content]));
         }
     }
 

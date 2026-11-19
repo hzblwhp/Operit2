@@ -129,7 +129,7 @@ impl TtsSynthesisService {
     }
 
     /// Synthesizes cleaned text and writes every generated segment to runtime storage.
-    fn synthesizeWithResolvedConfig(
+    pub(crate) fn synthesizeWithResolvedConfig(
         &self,
         audioNamePrefix: &str,
         config: &TtsConfig,
@@ -140,20 +140,11 @@ impl TtsSynthesisService {
         let storageHost = defaultRuntimeStorageHost();
         let mut audioPaths = Vec::new();
         let mut audioStoragePaths = Vec::new();
-        // 本地神经 TTS 必须按短句合成才不会漏读，但播放侧只播第一条音频，
-        // 所以碎段必须在写盘前合并回一个 WAV，否则用户只听到头一句。
-        let mut generated: Vec<Vec<u8>> = Vec::new();
-        for segment in segments.iter() {
-            generated.push(voiceService.synthesize(config, segment)?);
-        }
-        let parts = if generated.len() > 1
-            && TtsProviderType::normalize(&config.providerType) == TtsProviderType::LOCAL_MODEL
-        {
-            vec![mergeWavParts(&generated)?]
-        } else {
-            generated
-        };
-        for (index, bytes) in parts.into_iter().enumerate() {
+        for (index, segment) in segments.iter().enumerate() {
+            let bytes = voiceService.synthesize(config, segment)?;
+            if bytes.is_empty() {
+                return Err("TTS provider returned empty audio".into());
+            }
             let extension = voiceService.outputExtension(config)?;
             let fileName = format!(
                 "{}_{}_{}.{}",

@@ -26,6 +26,7 @@
 | [附件生命周期](chat-attachment-locations.md) | 来源节点、临时文件与流式导入 |
 | [插件存储](plugin-storage.md) | Preferences、对象存储和数据集事务 |
 | [数据救援](data-rescue.md) | 备份、恢复与修复工具 |
+| [每日聊天备份](chat-backups.md) | 跨平台备份目录选择、自动聊天备份与保留规则 |
 
 ## 插件与界面
 
@@ -47,6 +48,7 @@ Compose 的执行模型与二进制协议维护在 [Compose runtime](../core/cra
 | [CLI 网络控制](cli-network-control.md) | 配对、角色、成员与审批命令 |
 | [TUI 无头管理](tui-headless-management.md) | 配置面板与后台 daemon |
 | [版本与发布](release-versioning.md) | 版本、渠道、产物与更新 |
+| [应用更新与应用管理](application-updates-and-package-tools.md) | App/CLI 共享更新、原生安装状态与各平台能力 |
 | [日志分级](logging-levels.md) | 日志级别、深度与查看入口 |
 | [GitHub OAuth](github-oauth-broker.md) | 登录事务、回调与凭证归属 |
 | [远程公告](remote-announcements.md) | 公告来源与展示 |

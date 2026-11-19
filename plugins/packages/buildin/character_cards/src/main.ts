@@ -24,12 +24,12 @@ export * from "./commands";
 export * from "./public-api";
 export { onServiceInitialize } from "./host";
 export { onMemoryMessagePersisted, onMemoryInterval } from "./memory-jobs/hooks";
-export { onMemoryRecallPromptFinalize } from "./memory-recall";
+export { onMemoryRecallPromptInput } from "./memory-recall";
 export { toolCallPolicy, toolPromptPolicy } from "./runtime-tools/policy";
 export { beforeChatCreate } from "./chat-lifecycle";
 export { onChatViewTheme } from "./chat-view-theme";
 export { onGroupInputSubmit } from "./group-execution/hooks";
-export { chatContextActionsApi, chatListSectionsApi } from "./ui-contributions";
+export { chatContextActionsApi, chatListSectionsApi, chatModelSelectionApi } from "./ui-contributions";
 export { chatSidebarPrepareApi } from "./ui-sidebar";
 import { definition } from "./definition";
 /** Connects lazy directory readers for every evaluated runtime, not just the registration-only module. */

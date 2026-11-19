@@ -12,6 +12,7 @@ import '../../features/packages/screens/ExtensionDetailScreen.dart';
 import '../../features/packages/screens/MarketCreatorScreen.dart';
 import '../../features/packages/screens/MarketEntryDetailScreen.dart';
 import '../../features/packages/screens/PackageManagerScreen.dart';
+import '../../features/packages/screens/OfficialExtensionsScreen.dart';
 import '../../features/packages/screens/StoreBrowseScreen.dart';
 import '../../features/packages/screens/ToolPkgUiLauncherScreen.dart';
 import '../../features/settings/models/SettingsModels.dart';
@@ -25,6 +26,7 @@ abstract class OperitScreen {
     this.title,
     this.participatesInCrossfadeTransition = true,
     this.keepAlive = false,
+    this.retainInBackStack = false,
     this.handlesBottomSafeArea = false,
   });
 
@@ -32,6 +34,9 @@ abstract class OperitScreen {
   final String? title;
   final bool participatesInCrossfadeTransition;
   final bool keepAlive;
+
+  /// Retains transient page state only while its route remains in back history.
+  final bool retainInBackStack;
 
   /// Lets a page extend its surfaces while keeping its own controls inset.
   final bool handlesBottomSafeArea;
@@ -114,7 +119,11 @@ class MarketScreenRoute extends OperitScreen {
 
 class ExtensionDetailScreenRoute extends OperitScreen {
   const ExtensionDetailScreenRoute({required this.kind, required this.id})
-    : super(routeTypeName: 'ExtensionDetail', title: '扩展详情');
+    : super(
+        routeTypeName: 'ExtensionDetail',
+        title: '扩展详情',
+        retainInBackStack: true,
+      );
 
   final String kind;
   final String id;
@@ -164,7 +173,7 @@ class MarketBrowseScreenRoute extends OperitScreen {
     this.type,
     this.categoryId,
     this.sort = MarketSortOption.updated,
-  }) : super(routeTypeName: 'MarketBrowse', title: '市场');
+  }) : super(routeTypeName: 'MarketBrowse', title: '市场', keepAlive: true);
 
   final String heading;
   final String? type;
@@ -195,6 +204,18 @@ class MarketBrowseScreenRoute extends OperitScreen {
       initialSort: sort,
     );
   }
+}
+
+/// Complete list of the official extensions bundled with the app.
+class OfficialExtensionsScreenRoute extends OperitScreen {
+  const OfficialExtensionsScreenRoute()
+    : super(routeTypeName: 'OfficialExtensions', title: '官方扩展');
+
+  @override
+  String? stableScreenKey() => 'OfficialExtensions';
+
+  @override
+  Widget build(BuildContext context) => const OfficialExtensionsScreen();
 }
 
 class MarketCreatorScreenRoute extends OperitScreen {

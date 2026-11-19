@@ -46,8 +46,6 @@ pub struct ThemeConfigManager {
 }
 
 impl ThemeConfigManager {
-
-
     /// Opens ordinary user preferences through the owning runtime's actual storage host.
     pub fn new(storageHost: Arc<dyn RuntimeStorageHost>) -> Self {
         Self {
@@ -289,7 +287,7 @@ impl ThemeConfigManager {
     ) -> Result<(), PreferencesDataStoreError> {
         validateThemePreferenceSnapshot(&snapshot)?;
         self.dataStore.try_edit_result(|preferences| {
-            let mut state = readCatalogState(preferences)?;
+            let mut state = readState(preferences)?;
             writeThemePreferenceSnapshot(preferences, &snapshot)?;
             state.activeThemeConfigId = None;
             writeState(preferences, &state)
@@ -322,8 +320,61 @@ fn commitAppearance(
     Ok(updated)
 }
 
-/// Decodes saved configurations independently of the ordinary appearance being replaced.
-fn readCatalogState(preferences: &Preferences) -> Result<ThemeConfigState, PreferencesDataStoreError> {
+/// Adopts old ordinary preferences during the versioned startup migration only.
+pub(super) fn migrateUnboundAppearance(
+    preferences: &mut Preferences,
+) -> Result<(), PreferencesDataStoreError> {
+    let mut state = readState(preferences)?;
+    if let Some(id) = &state.activeThemeConfigId {
+        // The selected theme owns its mode and appearance, including old global overrides.
+        writeThemePreferenceSnapshot(preferences, &findConfig(&state, id)?.snapshot)?;
+        return Ok(());
+    }
+    let initial = super::ThemePreferenceSnapshot::migrationThemeDefaults()?;
+    let normalize = |mut snapshot: BTreeMap<String, Value>| {
+        let style = snapshot
+            .remove("chatStyle")
+            .unwrap_or(Value::String("cursor".into()));
+        for role in ["userChatStyle", "aiChatStyle"] {
+            snapshot
+                .entry(role.to_string())
+                .or_insert_with(|| style.clone());
+        }
+        snapshot
+    };
+    let snapshot = normalize(readThemePreferenceSnapshot(preferences, &initial)?);
+    let id = if let Some(config) = state
+        .configs
+        .iter()
+        .find(|config| normalize(config.snapshot.clone()) == snapshot)
+    {
+        config.id.clone()
+    } else {
+        let id = Uuid::new_v4().to_string();
+        let now = tryCurrentTimeMillis().map_err(PreferencesDataStoreError::Message)?;
+        let name = match preferences
+            .get(&stringPreferencesKey("app_language"))
+            .and_then(Value::as_str)
+        {
+            Some(language) if language.starts_with("zh") => "默认主题",
+            _ => "Default theme",
+        };
+        state.configs.push(ThemeConfig {
+            id: id.clone(),
+            name: name.to_string(),
+            snapshot: snapshot.clone(),
+            createdAt: now,
+            updatedAt: now,
+        });
+        id
+    };
+    writeThemePreferenceSnapshot(preferences, &findConfig(&state, &id)?.snapshot)?;
+    state.activeThemeConfigId = Some(id);
+    writeState(preferences, &state)
+}
+
+/// Reads and validates the saved catalog independently of the current ordinary appearance.
+fn readState(preferences: &Preferences) -> Result<ThemeConfigState, PreferencesDataStoreError> {
     // Each identity has its own synchronized record; malformed records remain errors.
     let mut configs = Vec::new();
     for (key, value) in preferences.iterEntries() {
@@ -350,15 +401,6 @@ fn readCatalogState(preferences: &Preferences) -> Result<ThemeConfigState, Prefe
         activeThemeConfigId,
     };
     validateState(&state)?;
-    Ok(state)
-}
-
-/// Validates the active ordinary appearance in addition to the saved catalog.
-fn readState(preferences: &Preferences) -> Result<ThemeConfigState, PreferencesDataStoreError> {
-    let state = readCatalogState(preferences)?;
-    if let Some(id) = &state.activeThemeConfigId {
-        assertThemePreferenceSnapshot(preferences, &findConfig(&state, id)?.snapshot)?;
-    }
     Ok(state)
 }
 

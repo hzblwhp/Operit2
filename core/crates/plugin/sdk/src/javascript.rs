@@ -211,6 +211,11 @@ impl JsEnvironmentOwner {
 
 /// Defines the fixed Rust execution contract required by package JavaScript.
 pub trait JsExecutionHost: Send + Sync {
+    /// Imports an archive through the authenticated v1 chat history migrator bridge.
+    fn import_v1_migrator_archive(&self, _path: String) -> JsExecutionCompletion<Result<Value, String>> {
+        Box::pin(async { Err("The v1 chat archive importer is unavailable on this host".into()) })
+    }
+
     /// Captures immutable native caller state before crossing the JavaScript runtime scheduler.
     fn capture_tool_invocation_host(&self) -> Arc<dyn JsExecutionHost>;
 
@@ -479,6 +484,8 @@ pub struct JsPackageToolCallResult {
 /// Captures an exact executable declaration together with its immutable runtime selection.
 #[derive(Clone, Debug)]
 pub struct JsPackageToolSelection {
+    /// Contains the registered package API contract, including the v1 default for legacy metadata.
+    pub api_version: String,
     /// Contains the selected registered declaration, including its authoritative script and parameter schema.
     pub definition: crate::package::PackageTool,
     /// Contains the selected conditional state when the registered package uses one.
@@ -580,6 +587,12 @@ pub struct ToolPkgMainRegistrationCapture {
     pub chatViewHooks: Vec<String>,
     #[serde(rename = "chatMessageHooks", default)]
     pub chatMessageHooks: Vec<String>,
+    /// Captures awaited message text transformations.
+    #[serde(rename = "messageTransformHooks", default)]
+    pub messageTransformHooks: Vec<String>,
+    /// Captures native display-program preparation handlers.
+    #[serde(default)]
+    pub messageStreamTransforms: Vec<String>,
     /// Captures real package-owned lifecycle handler definitions for the strict registration parser.
     #[serde(rename = "chatLifecycleHooks", default)]
     pub chatLifecycleHooks: Vec<String>,

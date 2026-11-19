@@ -47,6 +47,7 @@ impl CoreLinkSharedClient for TestCore {
     }
     /// Waits for the test to provide a source while exposing cancellation ownership.
     async fn watch(&self, request: CoreWatchRequest) -> Result<CoreEventStream, CoreLinkError> {
+        if request.propertyName == "panic" { panic!("Watch opening panicked"); }
         self.opening.fetch_add(1, Ordering::SeqCst);
         let _opening = Opening(self.opening.clone());
         let receiver = self
@@ -217,10 +218,39 @@ async fn cancellation_drops_an_inflight_source_open() {
         assert_eq!(opening.await.unwrap().unwrap_err().code, "WATCH_CLOSED");
         assert!(source.is_closed());
         assert_eq!(core.opening.load(Ordering::SeqCst), 0);
-        assert!(events.recv().await.unwrap().event.unwrap().is_none());
+        assert!(events.try_recv().is_err());
         client.close();
     })
     .await;
+}
+
+/// An opening failure has exactly one owner and must not race a normal end frame.
+#[tokio::test]
+async fn failed_watch_open_has_no_completion_delivery() {
+    let core = Arc::new(TestCore::default());
+    let source = core.watch_source("failed");
+    drop(source);
+    let (client, mut events, owner) = BridgeStreams::channel(core);
+    drive(owner, async {
+        let error = client.request(open_watch("watch", "failed", 8)).await.unwrap_err();
+        assert_eq!(error.code, "TEST_CLOSED");
+        assert!(events.try_recv().is_err());
+        client.close();
+    }).await;
+}
+
+/// A source panic during opening must retain its cause in the opening response.
+#[tokio::test]
+async fn panicking_watch_open_preserves_original_failure() {
+    let (client, mut events, owner) = BridgeStreams::channel(Arc::new(TestCore::default()));
+    drive(owner, async {
+        let error = client.request(open_watch("watch", "panic", 8)).await.unwrap_err();
+        assert_eq!(error.code, "FATAL_CORE_PANIC");
+        assert_eq!(error.message, "Watch opening panicked");
+        assert!(events.try_recv().is_err());
+        client.request(StreamAction::CloseWatch { id: "watch".into(), tag: 8 }).await.unwrap();
+        client.close();
+    }).await;
 }
 
 /// Verifies that bounded delivery cannot retain a cancelled Core source.
@@ -362,4 +392,113 @@ async fn bounded_ingress_and_shutdown_release_queued_operations() {
             .code,
         "STREAM_CLOSED"
     );
+}
+
+/// Native bursts wait outside the bounded mailbox even if reply tasks are polled backwards.
+#[tokio::test]
+async fn native_ingress_waits_for_capacity_without_failing_the_session() {
+    let (client, _events, owner) = BridgeStreams::channel(Arc::new(TestCore::default()));
+    let mut fillers = Vec::new();
+    for index in 0..COMMAND_CAPACITY {
+        fillers.push(
+            client
+                .submit(StreamAction::CloseWatch {
+                    id: index.to_string(),
+                    tag: 1,
+                })
+                .unwrap(),
+        );
+    }
+    let replies = (0..COMMAND_CAPACITY * 16)
+        .map(|index| {
+            client.enqueue(StreamAction::CloseWatch {
+                id: index.to_string(),
+                tag: 1,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut replies = Box::pin(futures_util::future::join_all(replies.into_iter().rev()));
+    assert!(replies.as_mut().now_or_never().is_none());
+    assert_eq!(owner.commands.len(), COMMAND_CAPACITY);
+    drive(owner, async {
+        for reply in replies.await {
+            assert!(reply.unwrap().is_none());
+        }
+        for reply in fillers {
+            reply.await.unwrap().unwrap();
+        }
+        client.close();
+    })
+    .await;
+}
+
+/// Waiting for admission, rather than Core completion, preserves open/close order and cancellation.
+#[tokio::test]
+async fn native_queued_close_cancels_a_pending_open_in_submission_order() {
+    let core = Arc::new(TestCore::default());
+    let _source = core.watch_source("pending");
+    let (client, _events, owner) = BridgeStreams::channel(core);
+    let mut fillers = Vec::new();
+    for index in 0..COMMAND_CAPACITY {
+        fillers.push(
+            client
+                .submit(StreamAction::CloseWatch {
+                    id: index.to_string(),
+                    tag: 1,
+                })
+                .unwrap(),
+        );
+    }
+    let opening = client.enqueue(open_watch("watch", "pending", 7));
+    let closing = client.enqueue(StreamAction::CloseWatch {
+        id: "watch".into(),
+        tag: 7,
+    });
+    drive(owner, async {
+        // The close reply task may run before the open reply task on the Host pool.
+        let (closed, opened) = tokio::join!(closing, opening);
+        closed.unwrap();
+        assert_eq!(opened.unwrap_err().code, "WATCH_CLOSED");
+        for reply in fillers {
+            reply.await.unwrap().unwrap();
+        }
+        client.close();
+    })
+    .await;
+}
+
+/// Shutdown settles deferred admission as well as already admitted requests.
+#[tokio::test]
+async fn native_shutdown_releases_commands_waiting_for_capacity() {
+    let (client, _events, owner) = BridgeStreams::channel(Arc::new(TestCore::default()));
+    let mut fillers = Vec::new();
+    for index in 0..COMMAND_CAPACITY {
+        fillers.push(
+            client
+                .submit(StreamAction::CloseWatch {
+                    id: index.to_string(),
+                    tag: 1,
+                })
+                .unwrap(),
+        );
+    }
+    let replies = (0..2)
+        .map(|index| {
+            client.enqueue(StreamAction::CloseWatch {
+                id: index.to_string(),
+                tag: 1,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut replies = Box::pin(futures_util::future::join_all(replies));
+    assert!(replies.as_mut().now_or_never().is_none());
+    assert_eq!(owner.commands.len(), COMMAND_CAPACITY);
+    client.close();
+    owner.run().await;
+    for reply in replies.await {
+        assert_eq!(reply.unwrap_err().code, "STREAM_CLOSED");
+    }
+    for reply in fillers {
+        assert!(reply.await.is_err());
+    }
 }

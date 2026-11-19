@@ -213,6 +213,7 @@ fn initialize(
             PeerHostPortMode::Fixed
         };
         PeerStateStore::new(storage.clone()).saveHostConfig(&PeerHostConfig {
+            discovery: None,
             bindAddress: configuredAddress.clone(),
             transports: vec![PeerTransport::Tcp],
             discoveryEnabled,
@@ -226,6 +227,7 @@ fn initialize(
         services.peers(),
     )?;
     let profile = operit_edge_sdk::storage::CoreSpaceStore::CoreSpaceDeviceProfile {
+        protocolVersion: None,
         nodeId: nodeId.clone(),
         displayName: deviceInfo.model.clone(),
         userName: String::new(),

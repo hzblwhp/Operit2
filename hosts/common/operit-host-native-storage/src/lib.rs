@@ -6,10 +6,11 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 #[cfg(windows)]
 use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 
-use operit_host_api::{
+use operit_host_contract::{
     ArchiveStagingHost, HostError, HostResult, RuntimeSqliteConnection, RuntimeSqliteHost,
     RuntimeSqliteTransaction, RuntimeStorageEntry, RuntimeStorageHost, RuntimeStorageWriteHost,
     RuntimeStorageWriteSession, SqliteRow, SqliteValue,
@@ -31,7 +32,7 @@ struct NativeRuntimeStorageWriteSession {
 
 impl NativeRuntimeStorageWriteSession {
     /// Closes and atomically renames one staged runtime storage file.
-    fn commitInternal(&mut self, sync: bool) -> HostResult<()> {
+    fn commitInternal(&mut self, sync: bool, syncDirectory: bool) -> HostResult<()> {
         let file = self
             .file
             .take()
@@ -40,7 +41,7 @@ impl NativeRuntimeStorageWriteSession {
             file.sync_all()?;
         }
         drop(file);
-        publishStagedFile(&self.temporaryPath, &self.targetPath, sync)?;
+        publishStagedFile(&self.temporaryPath, &self.targetPath, syncDirectory)?;
         Ok(())
     }
 }
@@ -68,12 +69,17 @@ impl RuntimeStorageWriteSession for NativeRuntimeStorageWriteSession {
 
     /// Flushes the staged file and atomically publishes it at the requested path.
     fn commit(mut self: Box<Self>) -> HostResult<()> {
-        self.commitInternal(true)
+        self.commitInternal(true, true)
+    }
+
+    /// Keeps staged contents durable while allowing one directory flush per batch.
+    fn commitFile(mut self: Box<Self>) -> HostResult<()> {
+        self.commitInternal(true, false)
     }
 
     /// Atomically publishes the staged file without forcing a device flush.
     fn commitFast(mut self: Box<Self>) -> HostResult<()> {
-        self.commitInternal(false)
+        self.commitInternal(false, false)
     }
 
     /// Removes the private staging file without modifying the published target.
@@ -88,6 +94,9 @@ impl RuntimeStorageWriteSession for NativeRuntimeStorageWriteSession {
 
 /// Names the Host-owned temporary archive namespace excluded from portable data.
 pub const ARCHIVE_STAGING_DIRECTORY_NAME: &str = "archive_staging";
+
+/// Bounds retention of legacy archives that predate cross-process ownership leases.
+const LEGACY_ARCHIVE_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Stages streamed archive uploads in the runtime-private temporary directory.
 #[derive(Clone, Debug)]
@@ -133,7 +142,7 @@ impl Drop for NativeArchiveFiles {
     /// Releases unpublished and sealed archives when their final Host owner closes.
     fn drop(&mut self) {
         if let Err(error) = self.remove() {
-            operit_host_api::logHostError("ArchiveStagingCleanup", &error.message);
+            operit_host_contract::logHostError("ArchiveStagingCleanup", &error.message);
         }
     }
 }
@@ -191,8 +200,12 @@ impl NativeArchiveStagingHost {
 
     /// Collects abandoned archives for every runtime sharing a Host staging namespace.
     pub fn cleanupAbandonedArchivesForRuntimeParent(runtimeParent: &Path) -> HostResult<()> {
-        let root = runtimeParent.join(ARCHIVE_STAGING_DIRECTORY_NAME);
-        match fs::symlink_metadata(&root) {
+        Self::cleanupArchiveNamespace(&runtimeParent.join(ARCHIVE_STAGING_DIRECTORY_NAME), true)
+    }
+
+    /// Reclaims retired runtime owners through the same collection policy as the current owner.
+    fn cleanupArchiveNamespace(root: &Path, includeRecentLegacy: bool) -> HostResult<()> {
+        match fs::symlink_metadata(root) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {},
             Ok(_) => return Err(HostError::new("Archive staging namespace is not a regular directory")),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -203,23 +216,27 @@ impl NativeArchiveStagingHost {
             if !entry.file_type()?.is_dir() {
                 return Err(HostError::new("Archive staging owner is not a regular directory"));
             }
-            Self::new(runtimeParent.join(entry.file_name())).cleanupAbandonedArchivesDuringMaintenance()?;
+            Self {
+                stagingRoot: entry.path(),
+                uploads: Arc::new(Mutex::new(HashMap::new())),
+            }.cleanupArchiveDirectory(includeRecentLegacy)?;
         }
         Ok(())
     }
 
-    /// Removes abandoned files while retaining archives leased by any active Host.
+    /// Reclaims abandoned transfers and expired legacy files across this staging namespace.
     pub fn cleanupAbandonedArchives(&self) -> HostResult<()> {
-        self.cleanupArchiveDirectory(false)
+        let root = self.stagingRoot.parent().expect("archive staging root must have a namespace");
+        Self::cleanupArchiveNamespace(root, false)
     }
 
-    /// Collects legacy unleased archives only while maintenance owns exclusive storage access.
+    /// Also collects recent unleased archives while maintenance owns exclusive storage access.
     pub fn cleanupAbandonedArchivesDuringMaintenance(&self) -> HostResult<()> {
         self.cleanupArchiveDirectory(true)
     }
 
     /// Locks an existing staging directory before collecting its abandoned transfers.
-    fn cleanupArchiveDirectory(&self, includeLegacy: bool) -> HostResult<()> {
+    fn cleanupArchiveDirectory(&self, includeRecentLegacy: bool) -> HostResult<()> {
         match fs::symlink_metadata(&self.stagingRoot) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {},
             Ok(_) => return Err(HostError::new("Archive staging root is not a regular directory")),
@@ -227,11 +244,11 @@ impl NativeArchiveStagingHost {
             Err(error) => return Err(error.into()),
         }
         let _directoryLease = lockArchiveDirectory(&self.stagingRoot)?;
-        self.cleanupAbandonedArchivesLocked(includeLegacy)
+        self.cleanupAbandonedArchivesLocked(includeRecentLegacy)
     }
 
     /// Collects only recognized archive files under an already locked staging directory.
-    fn cleanupAbandonedArchivesLocked(&self, includeLegacy: bool) -> HostResult<()> {
+    fn cleanupAbandonedArchivesLocked(&self, includeRecentLegacy: bool) -> HostResult<()> {
         let mut ids = BTreeSet::new();
         for entry in fs::read_dir(&self.stagingRoot)? {
             let entry = entry?;
@@ -243,9 +260,10 @@ impl NativeArchiveStagingHost {
             self.validateArchiveId(id)?;
             ids.insert(id.to_owned());
         }
+        let now = SystemTime::now();
         for id in ids {
             let leasePath = self.stagingRoot.join(format!("{id}.lease"));
-            if !includeLegacy && !leasePath.try_exists()? { continue; }
+            if !includeRecentLegacy && !leasePath.try_exists()? && !self.legacyArchiveExpired(&id, now)? { continue; }
             let lease = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&leasePath)?;
             match fs2::FileExt::try_lock_exclusive(&lease) {
                 Ok(()) => {
@@ -259,6 +277,25 @@ impl NativeArchiveStagingHost {
         Ok(())
     }
 
+    /// Preserves a legacy transfer if either payload was written within the retention period.
+    fn legacyArchiveExpired(&self, id: &str, now: SystemTime) -> HostResult<bool> {
+        for extension in ["upload", "sealed"] {
+            let path = self.stagingRoot.join(format!("{id}.{extension}"));
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(HostError::new("Archive staging entry is not a regular file"));
+            }
+            if now.duration_since(metadata.modified()?).unwrap_or_default() < LEGACY_ARCHIVE_RETENTION {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Creates an archive with an explicit upload or growable-export length contract.
     fn createPendingArchive(
         &self,
@@ -267,6 +304,7 @@ impl NativeArchiveStagingHost {
     ) -> HostResult<()> {
         let path = self.uploadingArchivePath(archiveId)?;
         let sealedPath = self.sealedArchivePath(archiveId)?;
+        self.cleanupAbandonedArchives()?;
         let mut uploads = self
             .uploads
             .lock()
@@ -276,7 +314,6 @@ impl NativeArchiveStagingHost {
         }
         fs::create_dir_all(self.stagingRoot())?;
         let _directoryLease = lockArchiveDirectory(&self.stagingRoot)?;
-        self.cleanupAbandonedArchivesLocked(false)?;
         if sealedPath.exists() {
             return Err(HostError::new("Archive staging ID already exists"));
         }
@@ -530,28 +567,11 @@ impl NativeRuntimeStorageHost {
                         return Err(HostError::new("Workspace storage requires a regular file or directory")),
                     Ok(_) => {},
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(storageIoError("Inspect storage path", &current, error)),
                 }
             }
         }
         Ok(resolved)
-    }
-
-    fn storagePathForPhysical(&self, path: &Path) -> HostResult<String> {
-        if let Ok(relative) = path.strip_prefix(&self.runtimeRoot) {
-            return Ok(prefixedPath("runtime", relative));
-        }
-        if let Ok(relative) = path.strip_prefix(&self.workspaceRoot) {
-            return Ok(prefixedPath("workspaces", relative));
-        }
-        let secureRoot = legacySecurePath(&self.runtimeRoot, &[])?;
-        if let Ok(relative) = path.strip_prefix(&secureRoot) {
-            return Ok(prefixedPath("secure", relative));
-        }
-        Err(HostError::new(format!(
-            "Physical path is outside configured runtime and workspace roots: {}",
-            path.display()
-        )))
     }
 
     /// Opens a staging writer, optionally retaining identity-private catalog permissions.
@@ -604,7 +624,11 @@ impl RuntimeStorageWriteHost for NativeRuntimeStorageHost {
 }
 
 impl RuntimeStorageHost for NativeRuntimeStorageHost {
-    fn openTransactionDatabase(&self, path: &str) -> operit_host_api::HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+    fn openWriteSession(&self, path: &str) -> HostResult<Option<Box<dyn operit_host_contract::RuntimeStorageWriteSession>>> {
+        Ok(Some(self.createWriteSessionInternal(path, false)?))
+    }
+
+    fn openTransactionDatabase(&self, path: &str) -> operit_host_contract::HostResult<Box<dyn operit_host_contract::RuntimeSqliteConnection>> {
         RuntimeSqliteHost::openSqliteDatabase(self, path)
     }
 
@@ -617,12 +641,14 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
     }
 
     fn readBytes(&self, path: &str) -> HostResult<Vec<u8>> {
-        Ok(fs::read(self.resolveFile(path)?)?)
+        let resolved = self.resolveFile(path)?;
+        fs::read(&resolved).map_err(|error| storageIoError("Read storage file", &resolved, error))
     }
 
     /// Reads one bounded byte range from native runtime storage.
     fn readBytesRange(&self, path: &str, offset: u64, length: usize) -> HostResult<Vec<u8>> {
-        let mut file = fs::File::open(self.resolveFile(path)?)?;
+        let resolved = self.resolveFile(path)?;
+        let mut file = fs::File::open(&resolved).map_err(|error| storageIoError("Open storage file", &resolved, error))?;
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = vec![0; length];
         let count = file.read(&mut bytes)?;
@@ -638,7 +664,9 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
 
     /// Reads native file metadata without opening or hashing file contents.
     fn modifiedAt(&self, path: &str) -> HostResult<i64> {
-        let time = fs::metadata(self.resolveFile(path)?)?.modified()?;
+        let resolved = self.resolveFile(path)?;
+        let time = fs::metadata(&resolved).and_then(|metadata| metadata.modified())
+            .map_err(|error| storageIoError("Read storage metadata", &resolved, error))?;
         let elapsed = time.duration_since(std::time::UNIX_EPOCH).map_err(|e| HostError::new(e.to_string()))?;
         i64::try_from(elapsed.as_micros()).map_err(|e| HostError::new(e.to_string()))
     }
@@ -673,14 +701,30 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
     }
 
     fn flushFile(&self, path: &str) -> HostResult<()> {
-        let path = self.resolveFile(path)?;
-        fs::OpenOptions::new().write(true).open(&path)?.sync_all()?;
-        syncParentDirectory(&path)
+        self.flushFiles(&[path])
+    }
+
+    fn flushFiles(&self, paths: &[&str]) -> HostResult<()> {
+        for path in paths {
+            fs::OpenOptions::new().write(true).open(self.resolveFile(path)?)?.sync_all()?;
+        }
+        self.flushDirectories(paths)
+    }
+
+    fn flushDirectories(&self, paths: &[&str]) -> HostResult<()> {
+        let mut parents = BTreeSet::new();
+        for path in paths {
+            let path = self.resolveFile(path)?;
+            if let Some(parent) = path.parent() { parents.insert(parent.to_path_buf()); }
+        }
+        #[cfg(unix)]
+        for parent in parents { fs::File::open(parent)?.sync_all()?; }
+        Ok(())
     }
 
     fn delete(&self, path: &str, recursive: bool) -> HostResult<()> {
         let path = self.resolveFile(path)?;
-        if !path.exists() {
+        if !path.try_exists().map_err(|error| storageIoError("Inspect storage deletion target", &path, error))? {
             return Ok(());
         }
         if path.is_dir() {
@@ -699,20 +743,22 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
         let resolved = self.resolve(path)?;
         if self.managedRoot(path)?.is_some() {
             // A dangling link is still an occupied destination, never a new writable file.
-            return match fs::symlink_metadata(resolved) {
+            return match fs::symlink_metadata(&resolved) {
                 Ok(_) => Ok(true),
                 // A former descendant also ceases to exist when its parent
                 // directory has been replaced by a regular file.
                 Err(error) if matches!(error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                 ) => Ok(false),
-                Err(error) => Err(error.into()),
+                Err(error) => Err(storageIoError("Inspect storage path", &resolved, error)),
             };
         }
-        Ok(resolved.exists())
+        resolved.try_exists().map_err(|error| storageIoError("Inspect storage path", &resolved, error))
     }
 
+    /// Lists children in the requested namespace, including overlapping physical roots.
     fn list(&self, prefix: &str) -> HostResult<Vec<RuntimeStorageEntry>> {
+        let storagePrefix = normalizeStoragePath(prefix)?.join("/");
         let directory = self.resolve(prefix)?;
         let mut entries = Vec::new();
         let managedRoot = self.managedRoot(prefix)?;
@@ -729,32 +775,42 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
                     Ok(metadata) if isStorageLink(&metadata) => return Ok(entries),
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(storageIoError("Inspect storage directory", &current, error)),
                 }
             }
         }
-        if !directory.exists() {
+        if !directory.try_exists().map_err(|error| storageIoError("Inspect storage directory", &directory, error))? {
             return Ok(entries);
         }
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
+        for entry in fs::read_dir(&directory).map_err(|error| storageIoError("List storage directory", &directory, error))? {
+            let entry = entry.map_err(|error| storageIoError("Read storage directory entry", &directory, error))?;
             // The atomic writer stages a private sibling until commit; a killed
             // process leaves it behind and no listing may ever publish it.
-            if isPartialStagingFile(&entry.file_name().to_string_lossy()) {
+            let name = entry.file_name();
+            if isPartialStagingFile(&name.to_string_lossy()) {
+                continue;
+            }
+            // A POSIX backslash is a literal filename character. Shared paths reject
+            // it for Windows portability; never turn it into an invented directory.
+            if managedWorkspace && name.to_string_lossy().contains('\\') {
                 continue;
             }
             let metadata = if managedWorkspace {
-                let metadata = fs::symlink_metadata(entry.path())?;
+                let metadata = match fs::symlink_metadata(entry.path()) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(storageIoError("Inspect storage entry", &entry.path(), error)),
+                };
                 // Do not copy link targets or try reading sockets, devices and FIFOs as files.
                 if isStorageLink(&metadata) || (!metadata.is_dir() && !metadata.is_file()) {
                     continue;
                 }
                 metadata
             } else {
-                entry.metadata()?
+                entry.metadata().map_err(|error| storageIoError("Inspect storage entry", &entry.path(), error))?
             };
             entries.push(RuntimeStorageEntry {
-                path: self.storagePathForPhysical(&entry.path())?,
+                path: prefixedPath(&storagePrefix, Path::new(&name)),
                 isDirectory: metadata.is_dir(),
                 size: metadata.len() as i64,
             });
@@ -899,6 +955,13 @@ fn legacySecurePath(runtimeRoot: &Path, segments: &[&str]) -> HostResult<PathBuf
     Ok(resolved)
 }
 
+/// Adds the physical operation path while preserving the system error classification.
+fn storageIoError(operation: &str, path: &Path, error: std::io::Error) -> HostError {
+    let mut error = HostError::from(error);
+    error.message = format!("{operation} {}: {}", path.display(), error.message);
+    error
+}
+
 /// Normalizes a runtime storage path into safe relative segments.
 fn normalizeStoragePath(path: &str) -> HostResult<Vec<String>> {
     let path = Path::new(path);
@@ -935,7 +998,9 @@ fn joinSegments(root: &Path, segments: &[&str]) -> PathBuf {
 
 /// Builds a storage path prefixed with its virtual top-level root.
 fn prefixedPath(prefix: &str, relative: &Path) -> String {
-    let relative = relative.to_string_lossy().replace('\\', "/");
+    let relative = relative.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>().join("/");
     if relative.is_empty() {
         prefix.to_string()
     } else {
@@ -945,6 +1010,8 @@ fn prefixedPath(prefix: &str, relative: &Path) -> String {
 
 /// Opens a SQLite database under the native runtime storage root.
 impl RuntimeSqliteHost for NativeRuntimeStorageHost {
+    fn runtimeStorage(&self) -> Option<std::sync::Arc<dyn RuntimeStorageHost>> { Some(std::sync::Arc::new(self.clone())) }
+
     fn openSqliteDatabase(&self, path: &str) -> HostResult<Box<dyn RuntimeSqliteConnection>> {
         let path = self.resolve(path)?;
         if let Some(parent) = path.parent() {
@@ -952,35 +1019,80 @@ impl RuntimeSqliteHost for NativeRuntimeStorageHost {
         }
         let connection =
             rusqlite::Connection::open(path).map_err(|error| HostError::new(error.to_string()))?;
-        Ok(Box::new(RusqliteRuntimeConnection { connection }))
+        Ok(Box::new(RusqliteRuntimeConnection { connection, storage: self.clone() }))
     }
 }
 
 struct RusqliteRuntimeConnection {
     connection: rusqlite::Connection,
+    storage: NativeRuntimeStorageHost,
+}
+
+macro_rules! sqlite_access {
+    ($field:ident) => {
+    fn execute(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<usize> {
+        let params = params.into_iter().map(toRusqliteValue).collect::<Vec<_>>();
+        self.$field
+            .execute(sql, rusqlite::params_from_iter(params))
+            .map_err(|error| HostError::new(error.to_string()))
+    }
+
+    fn query(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<Vec<SqliteRow>> {
+        queryRowsConnection(&self.$field, sql, params)
+    }
+
+    fn columnSize(&mut self,table:&str,column:&str,row:i64)->HostResult<usize> {
+        self.$field.blob_open(rusqlite::DatabaseName::Main,table,column,row,true).map(|blob|blob.len()).map_err(|e|HostError::new(e.to_string()))
+    }
+
+    fn readColumnRange(&mut self, table:&str, column:&str, row:i64, offset:usize, length:usize) -> HostResult<Vec<u8>> {
+        let blob=self.$field.blob_open(rusqlite::DatabaseName::Main,table,column,row,true).map_err(|e|HostError::new(e.to_string()))?;
+        let mut bytes=vec![0;length.min(blob.len().saturating_sub(offset))];
+        if !bytes.is_empty() { blob.read_at_exact(&mut bytes,offset).map_err(|e|HostError::new(e.to_string()))?; }
+        Ok(bytes)
+    }
+
+    fn visitRows(&mut self, sql:&str, params:Vec<SqliteValue>, visitor:&mut dyn FnMut(SqliteRow)->HostResult<()>) -> HostResult<()> {
+        let limit=rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH;
+        let previous=self.$field.set_limit(limit,9*1024*1024);
+        let result=(|| {
+            let params=params.into_iter().map(toRusqliteValue).collect::<Vec<_>>();
+            let mut statement=self.$field.prepare_cached(sql).map_err(|e|HostError::new(e.to_string()))?;
+            visitRows(&mut statement,params,visitor)
+        })();
+        self.$field.set_limit(limit,previous);
+        result
+    }
+
+    fn lastInsertRowId(&self) -> HostResult<i64> {
+        Ok(self.$field.last_insert_rowid())
+    }
+
+    };
 }
 
 impl RuntimeSqliteConnection for RusqliteRuntimeConnection {
+    /// Copies committed pages including WAL through SQLite's online backup API.
+    fn snapshotDatabase(&mut self, destination: &str) -> HostResult<()> {
+        let path = self.storage.resolve(destination)?;
+        if path.exists() { return Err(HostError::new("SQLite snapshot destination already exists")); }
+        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        let mut output = rusqlite::Connection::open(&path).map_err(|e|HostError::new(e.to_string()))?;
+        {
+            let backup = rusqlite::backup::Backup::new(&self.connection, &mut output).map_err(|e|HostError::new(e.to_string()))?;
+            backup.run_to_completion(256, std::time::Duration::from_millis(10), None).map_err(|e|HostError::new(e.to_string()))?;
+        }
+        output.close().map_err(|(_,e)|HostError::new(e.to_string()))?;
+        fs::OpenOptions::new().read(true).write(true).open(path)?.sync_all()?;
+        Ok(())
+    }
     fn executeBatch(&mut self, sql: &str) -> HostResult<()> {
         self.connection
             .execute_batch(sql)
             .map_err(|error| HostError::new(error.to_string()))
     }
 
-    fn execute(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<usize> {
-        let params = params.into_iter().map(toRusqliteValue).collect::<Vec<_>>();
-        self.connection
-            .execute(sql, rusqlite::params_from_iter(params))
-            .map_err(|error| HostError::new(error.to_string()))
-    }
-
-    fn query(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<Vec<SqliteRow>> {
-        queryRowsConnection(&self.connection, sql, params)
-    }
-
-    fn lastInsertRowId(&self) -> HostResult<i64> {
-        Ok(self.connection.last_insert_rowid())
-    }
+    sqlite_access!(connection);
 
     fn beginTransaction(&mut self) -> HostResult<Box<dyn RuntimeSqliteTransaction + '_>> {
         let transaction = self
@@ -999,20 +1111,7 @@ struct RusqliteRuntimeTransaction<'a> {
 }
 
 impl RuntimeSqliteTransaction for RusqliteRuntimeTransaction<'_> {
-    fn execute(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<usize> {
-        let params = params.into_iter().map(toRusqliteValue).collect::<Vec<_>>();
-        self.transaction
-            .execute(sql, rusqlite::params_from_iter(params))
-            .map_err(|error| HostError::new(error.to_string()))
-    }
-
-    fn query(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<Vec<SqliteRow>> {
-        queryRowsTransaction(&self.transaction, sql, params)
-    }
-
-    fn lastInsertRowId(&self) -> HostResult<i64> {
-        Ok(self.transaction.last_insert_rowid())
-    }
+    sqlite_access!(transaction);
 
     fn commit(self: Box<Self>) -> HostResult<()> {
         self.transaction
@@ -1038,26 +1137,16 @@ fn queryRowsConnection(
     let mut statement = connection
         .prepare_cached(sql)
         .map_err(|error| HostError::new(error.to_string()))?;
-    collectRows(&mut statement, params)
+    let mut rows = Vec::new();
+    visitRows(&mut statement, params, &mut |row| { rows.push(row); Ok(()) })?;
+    Ok(rows)
 }
 
-/// Reuses a prepared query within the exact active transaction.
-fn queryRowsTransaction(
-    transaction: &rusqlite::Transaction<'_>,
-    sql: &str,
-    params: Vec<SqliteValue>,
-) -> HostResult<Vec<SqliteRow>> {
-    let params = params.into_iter().map(toRusqliteValue).collect::<Vec<_>>();
-    let mut statement = transaction
-        .prepare_cached(sql)
-        .map_err(|error| HostError::new(error.to_string()))?;
-    collectRows(&mut statement, params)
-}
-
-fn collectRows(
+fn visitRows(
     statement: &mut rusqlite::Statement<'_>,
     params: Vec<Value>,
-) -> HostResult<Vec<SqliteRow>> {
+    visitor: &mut dyn FnMut(SqliteRow) -> HostResult<()>,
+) -> HostResult<()> {
     let columns = statement
         .column_names()
         .into_iter()
@@ -1066,7 +1155,6 @@ fn collectRows(
     let mut rows = statement
         .query(rusqlite::params_from_iter(params))
         .map_err(|error| HostError::new(error.to_string()))?;
-    let mut out = Vec::new();
     while let Some(row) = rows
         .next()
         .map_err(|error| HostError::new(error.to_string()))?
@@ -1078,12 +1166,12 @@ fn collectRows(
                 .map_err(|error| HostError::new(error.to_string()))?;
             values.push(fromRusqliteValue(value));
         }
-        out.push(SqliteRow {
+        visitor(SqliteRow {
             columns: columns.clone(),
             values,
-        });
+        })?;
     }
-    Ok(out)
+    Ok(())
 }
 
 fn toRusqliteValue(value: SqliteValue) -> Value {
@@ -1109,16 +1197,65 @@ fn fromRusqliteValue(value: Value) -> SqliteValue {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
 
-    use operit_host_api::{ArchiveStagingHost, RuntimeStorageHost, RuntimeStorageWriteHost};
+    use operit_host_contract::{ArchiveStagingHost, RuntimeStorageHost, RuntimeStorageWriteHost};
 
     use super::{NativeArchiveStagingHost, NativeRuntimeStorageHost};
+
+    /// Listings retain the requested namespace when physical storage roots overlap.
+    #[test]
+    fn listings_preserve_namespaces_for_overlapping_roots() {
+        let root = std::env::temp_dir().join(format!("operit-storage-roots-{}", uuid::Uuid::new_v4()));
+        for (name, runtime, workspace) in [
+            ("equal", "shared", "shared"),
+            ("workspace-in-runtime", "shared", "shared/workspaces"),
+            ("runtime-in-workspace", "shared/runtime", "shared"),
+            ("secure-is-workspace", "runtime", "secure"),
+        ] {
+            let base = root.join(name);
+            let host = NativeRuntimeStorageHost::new(base.join(runtime), base.join(workspace));
+            for namespace in ["runtime", "workspaces", "secure"] {
+                host.writeBytes(&format!("{namespace}/project/{namespace}.txt"), namespace.as_bytes()).unwrap();
+            }
+            for namespace in ["runtime", "workspaces", "secure"] {
+                let directories = host.list(namespace).unwrap();
+                assert!(directories.iter().any(|entry| entry.path == format!("{namespace}/project")), "{name}: {directories:?}");
+                assert!(directories.iter().all(|entry| entry.path.starts_with(&format!("{namespace}/"))), "{name}: {directories:?}");
+                let prefix = format!("{namespace}/project");
+                let files = host.list(&format!("./{prefix}//")).unwrap();
+                assert!(!files.is_empty());
+                for entry in files {
+                    assert!(entry.path.starts_with(&format!("{prefix}/")), "{name}: {}", entry.path);
+                    let file = Path::new(&entry.path).file_stem().unwrap().to_str().unwrap();
+                    assert_eq!(host.readBytes(&entry.path).unwrap(), file.as_bytes(), "{name}: {}", entry.path);
+                }
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Literal POSIX backslashes stay filename characters outside the portable sync tree.
+    #[cfg(unix)]
+    #[test]
+    fn posix_filename_backslashes_are_not_rewritten_as_storage_separators() {
+        let root = std::env::temp_dir().join(format!("operit-posix-path-{}", uuid::Uuid::new_v4()));
+        let host = NativeRuntimeStorageHost::new(root.join("runtime"), root.join("workspaces"));
+        let path = r"runtime/cache/system-systemd\x2dcryptsetup.slice";
+        host.writeBytes(path, b"original").unwrap();
+        let entries = host.list("runtime/cache").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, path);
+        assert_eq!(host.readBytes(&entries[0].path).unwrap(), b"original");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// Transactions reserve their writer before reads so independent plugin
     /// connections cannot deadlock while upgrading a read lock to a write lock.
     #[test]
     fn sqlite_transactions_reserve_the_writer_before_reading() {
-        use operit_host_api::RuntimeSqliteHost;
+        use operit_host_contract::RuntimeSqliteHost;
         let root =
             std::env::temp_dir().join(format!("operit-sqlite-lock-{}", uuid::Uuid::new_v4()));
         let host = NativeRuntimeStorageHost::new(root.join("runtime"), root.join("workspaces"));
@@ -1266,6 +1403,11 @@ mod tests {
             replacement.discard().unwrap();
             assert_eq!(host.list(prefix).unwrap().len(), 1);
             assert_eq!(host.readBytes(&path).unwrap(), b"original");
+            let mut batched = host.createWriteSession(&path).unwrap();
+            batched.writeChunk(b"batched replacement").unwrap();
+            batched.commitFile().unwrap();
+            host.flushDirectories(&[&path]).unwrap();
+            assert_eq!(host.readBytes(&path).unwrap(), b"batched replacement");
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -1394,6 +1536,57 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Reclaims expired unleased archives during transfers, including retired runtime owners.
+    #[test]
+    fn archive_staging_collects_expired_legacy_files_during_transfers() {
+        let root = std::env::temp_dir().join(format!("operit-archive-legacy-{}", uuid::Uuid::new_v4()));
+        let active = NativeArchiveStagingHost::new(root.join("runtime"));
+        active.createExportArchive("active").unwrap();
+        active.writeExportArchive("active", 0, b"active payload").unwrap();
+        active.sealArchive("active").unwrap();
+        let staging = active.stagingRoot();
+        let retired = staging.parent().unwrap().join("retired-identity");
+        fs::create_dir_all(&retired).unwrap();
+        let now = SystemTime::now();
+        let expired = now - Duration::from_secs(36 * 24 * 60 * 60);
+        let recent = now - Duration::from_secs(6 * 24 * 60 * 60);
+        let writeAt = |path: &Path, modified: SystemTime| {
+            fs::write(path, b"legacy payload").unwrap();
+            fs::OpenOptions::new().write(true).open(path).unwrap()
+                .set_times(fs::FileTimes::new().set_modified(modified)).unwrap();
+        };
+        writeAt(&staging.join("expired.upload"), expired);
+        writeAt(&retired.join("expired.sealed"), expired);
+        writeAt(&retired.join("recent.upload"), recent);
+        writeAt(&retired.join("future.upload"), now + Duration::from_secs(24 * 60 * 60));
+        writeAt(&retired.join("mixed.upload"), expired);
+        writeAt(&retired.join("mixed.sealed"), recent);
+        writeAt(&retired.join("unrelated.txt"), expired);
+        fs::OpenOptions::new().write(true).open(active.sealedArchivePath("active").unwrap()).unwrap()
+            .set_times(fs::FileTimes::new().set_modified(expired)).unwrap();
+        let next = NativeArchiveStagingHost::new(root.join("runtime"));
+        // Constructing a Host does not introduce startup collection.
+        assert!(staging.join("expired.upload").exists());
+        assert!(retired.join("expired.sealed").exists());
+        next.createArchive("next", 4).unwrap();
+        assert!(!staging.join("expired.upload").exists());
+        assert!(!staging.join("expired.lease").exists());
+        assert!(!retired.join("expired.sealed").exists());
+        assert!(!retired.join("expired.lease").exists());
+        for name in ["recent.upload", "future.upload", "mixed.upload", "mixed.sealed", "unrelated.txt"] {
+            assert!(retired.join(name).exists(), "{name}");
+        }
+        assert_eq!(active.readArchive("active", 0, 14).unwrap(), b"active payload");
+        next.cleanupAbandonedArchives().unwrap();
+        assert_eq!(active.readArchive("active", 0, 14).unwrap(), b"active payload");
+        next.appendArchive("next", b"test").unwrap();
+        next.sealArchive("next").unwrap();
+        assert_eq!(next.readArchive("next", 0, 4).unwrap(), b"test");
+        drop(next);
+        drop(active);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Keeps another process's live upload and export leased while reclaiming an abandoned archive.
     #[test]
     fn archive_staging_preserves_live_archives_across_processes() {
@@ -1415,6 +1608,9 @@ mod tests {
         host.createExportArchive("active").unwrap();
         host.writeExportArchive("active", 0, b"live export").unwrap();
         host.sealArchive("active").unwrap();
+        let expired = SystemTime::now() - Duration::from_secs(36 * 24 * 60 * 60);
+        fs::OpenOptions::new().write(true).open(host.sealedArchivePath("active").unwrap()).unwrap()
+            .set_times(fs::FileTimes::new().set_modified(expired)).unwrap();
         host.createArchive("uploading", 100).unwrap();
         host.appendArchive("uploading", b"live upload").unwrap();
         fs::write(host.uploadingArchivePath("abandoned").unwrap(), b"abandoned").unwrap();

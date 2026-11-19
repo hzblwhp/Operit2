@@ -2,10 +2,30 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
+import { stripTypeScriptTypes } from 'node:module';
 
 const root = new URL('../../', import.meta.url);
 const source = path => readFileSync(new URL(path, root), 'utf8');
 const worker = source('apps/flutter/app/web/runtime/src/operit_runtime_worker.ts');
+
+/** Runs startup without browser capabilities to ensure failures precede shared-memory allocation. */
+test('runtime startup explains missing shared memory before allocating worker channels', () => {
+  const capabilities = stripTypeScriptTypes(source('apps/flutter/app/web/runtime/src/browser_system_capabilities.ts'))
+    .replace(/^export /gm, '');
+  const startup = stripTypeScriptTypes(worker, { mode: 'transform' }).replace(/^import .*\n/gm, '').replace(/^export \{\s*\};?\n/gm, '');
+  for (const [environment, reason] of [
+    [{ isSecureContext: false, crossOriginIsolated: false }, /requires HTTPS/],
+    [{ isSecureContext: true, crossOriginIsolated: false }, /requires cross-origin isolation/],
+    [{ isSecureContext: true, crossOriginIsolated: true }, /browser does not expose SharedArrayBuffer/],
+  ]) {
+    const context = vm.createContext({ ...environment, SharedArrayBuffer: undefined });
+    vm.runInContext(capabilities, context);
+    assert.throws(() => vm.runInContext(startup, context), reason);
+  }
+  const supported = vm.createContext({ isSecureContext: true, crossOriginIsolated: true, SharedArrayBuffer });
+  vm.runInContext(capabilities, supported);
+  assert.doesNotThrow(() => vm.runInContext('requireBrowserSharedMemory()', supported));
+});
 
 /** Executes the actual worker registrations without starting a browser/OPFS runtime. */
 function registrations() {
@@ -57,4 +77,38 @@ test('both page and worker runtime proxies expose event ingress', () => {
   assert.equal((execution.match(/runtimeEventRequest\(encoded\)/g) ?? []).length, 2);
   assert.match(source('apps/flutter/native/operit-flutter-bridge/src/BridgeExports.rs'),
     /pub async fn emitRuntimeEvent[\s\S]*?self\.inner\.emitRuntimeEvent\(eventJson\)\.await/);
+});
+
+/** Ensures transitive TypeScript imports survive the explicit deployment asset list. */
+test('web build stages the complete runtime module dependency graph', async () => {
+  const { stripTypeScriptTypes } = await import('node:module');
+  const runtimeRoot = 'apps/flutter/app/web/runtime/src/';
+  const config = JSON.parse(source(`${runtimeRoot}tsconfig.json`));
+  const hook = source('apps/flutter/app/hook/build.dart');
+  const declaration = hook.match(/const Set<String> _webRuntimeArtifactNames = <String>\{([\s\S]*?)\n\};/);
+  assert.ok(declaration, 'runtime deployment artifact list must be declared');
+  const staged = new Set([...declaration[1].matchAll(/'([^']+)'/g)].map(match => match[1]));
+  const pending = [...config.include];
+  const visited = new Set();
+  while (pending.length > 0) {
+    const filename = pending.pop();
+    if (visited.has(filename)) continue;
+    visited.add(filename);
+    const artifact = filename.replace(/\.ts$/, '.js');
+    assert.ok(staged.has(artifact), `${artifact} is missing from the Web deployment`);
+    const javascript = stripTypeScriptTypes(source(`${runtimeRoot}${filename}`), { mode: 'transform' });
+    const imports = javascript.matchAll(/(?:^|\n)\s*(?:import|export)\s+(?:[^;]*?\bfrom\s+)?["'](\.\/[^"']+\.js)["']/g);
+    for (const [, specifier] of imports) {
+      const dependency = specifier.slice(2);
+      assert.ok(staged.has(dependency), `${artifact} imports unstaged module ${dependency}`);
+      const input = dependency.replace(/\.js$/, '.ts');
+      try {
+        source(`${runtimeRoot}${input}`);
+        pending.push(input);
+      } catch (error) {
+        // MessagePack and wasm-bindgen modules are generated outside TypeScript.
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+  }
 });

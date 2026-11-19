@@ -27,7 +27,7 @@ use operit_runtime::services::RuntimeHostInteractionService::{
 };
 use operit_util::MarkdownRenderStream::MarkdownStreamEvent;
 use operit_util::RuntimeStorageLayout::{RUNTIME_ROOT_DIR_PATH, WORKSPACE_DIR_PATH};
-use operit_util::RuntimeStoreRoot::{setDefaultRuntimeStoreRootConfig, RuntimeStoreRootConfig};
+
 use serde_json::{json, Value};
 
 struct OwnerInteractionBrowserHost;
@@ -249,10 +249,7 @@ fn register_test_runtime_roots() -> Arc<TestRuntimeStorageHost> {
     let workspace_root = root.join(WORKSPACE_DIR_PATH);
     std::fs::create_dir_all(&runtime_root).expect("test runtime root must be created");
     std::fs::create_dir_all(&workspace_root).expect("test workspace root must be created");
-    setDefaultRuntimeStoreRootConfig(RuntimeStoreRootConfig::new(
-        runtime_root.clone(),
-        workspace_root.clone(),
-    ));
+
     Arc::new(TestRuntimeStorageHost::new(runtime_root, workspace_root))
 }
 
@@ -361,7 +358,7 @@ async fn generated_proxy_blob_presence_preserves_batch_results() {
         assert_eq!(presence[0], Ok(true));
         assert_eq!(presence[1], Ok(false));
         assert!(presence[2].as_ref().unwrap_err().contains("SHA-256"));
-        assert!(presence[3].is_err());
+        assert_eq!(presence[3], Ok(true));
 
         let empty = CoreLinkSharedClient::call(&proxy, CoreCallRequest::new(
             "empty-blob-presence", "core/application", "syncBlobExists",
@@ -375,6 +372,71 @@ async fn generated_proxy_blob_presence_preserves_batch_results() {
             toCoreValue(json!({"references": {"invalid": true}})).unwrap(),
         )).await;
         assert!(malformed.result.is_err(), "invalid batches must fail without hiding per-blob errors");
+    }).await;
+}
+
+/// Resets real plugin databases through the application and replays their complete baselines.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_transactions_preserves_plugin_definitions_and_replay() {
+    let _guard = SHARED_CONCURRENCY_TEST_LOCK.lock().await;
+    tokio::task::LocalSet::new().run_until(async {
+        use operit_store::{PluginStorage::{self, PluginStorageSession}, SyncOperationStore::SyncClock};
+        let peer = register_test_runtime_roots();
+        let storage = register_test_runtime_roots();
+        let mut hosts = HostManager::withFileSystemHost(Arc::new(PosixFileSystemHost::new()));
+        hosts.runtimeStorageHost = Some(storage.clone());
+        hosts.runtimeSqliteHost = Some(storage.clone());
+        hosts.hostSecretStore = Some(Arc::new(TestSecretStore::default()));
+        hosts.hostJavaScriptRuntimeHost = Some(Arc::new(NativeHostJavaScriptRuntimeHost::new()));
+        hosts.hostRuntimeTaskSchedulerHost = Some(Arc::new(NativeHostRuntimeTaskSchedulerHost::new()));
+        let app = OperitApplication::newWithContext(hosts);
+        let session = PluginStorageSession::default();
+        let call = |request: Value| {
+            serde_json::to_value(session.request(storage.clone(), storage.clone(),
+                serde_json::from_value(request).unwrap(), "reset-source").unwrap()).unwrap()
+        };
+        let mut captured = Vec::new();
+        for kind in ["objects", "sqlite"] {
+            let path = format!("runtime/plugin_data/space/reset_test/{kind}.sqlite");
+            let handle = call(json!({"op":"open","path":path,"kind":kind}))["handle"].as_str().unwrap().to_owned();
+            if kind == "objects" {
+                call(json!({"op":"commit","handle":handle,"mutations":[{
+                    "collection":"keys","key":"one","value":{"name":"preserved"},
+                    "deleted":false,"checkVersion":false,"expectedVersion":null
+                }]}));
+            } else {
+                call(json!({"op":"define_table","handle":handle,"table":{
+                    "name":"records","primaryKey":"id","columns":[
+                        {"name":"id","affinity":"text","nullable":false},
+                        {"name":"value","affinity":"integer","nullable":false}
+                    ]
+                }}));
+                call(json!({"op":"execute","handle":handle,"statement":{
+                    "sql":"INSERT INTO records VALUES('one',42)","params":[]
+                }}));
+            }
+            captured.push((path.clone(),
+                PluginStorage::syncSnapshot(storage.clone(), &path, "reset-source").unwrap().data,
+                PluginStorage::snapshotDefinition(storage.clone(), &path).unwrap()));
+        }
+        for _ in 0..2 {
+            let result = app.syncResetTransactions().expect("plugin database definitions must accompany reset baselines");
+            assert!(result["owners"].as_u64().unwrap() >= 2);
+            let exported = PluginStorage::operationsSince(storage.clone(), &SyncClock::empty(), &[], 100).unwrap();
+            assert_eq!(exported.len(), captured.len());
+            for operation in &exported {
+                let initialization = operit_store::Transaction::compaction::Initialization::decode(operation).unwrap().unwrap();
+                let (_, data, definition) = captured.iter().find(|(path,_,_)|path == &initialization.data.owner.path).unwrap();
+                assert_eq!(&initialization.data, data);
+                assert_eq!(initialization.definition.as_ref(), Some(definition));
+                PluginStorage::applyOperation(peer.clone(), peer.clone(), operation, &BTreeMap::new()).unwrap();
+            }
+            for (path, data, definition) in &captured {
+                assert_eq!(&PluginStorage::syncSnapshot(storage.clone(), path, "reset-source").unwrap().data, data);
+                assert_eq!(&PluginStorage::syncSnapshot(peer.clone(), path, "reset-peer").unwrap().data, data);
+                assert_eq!(&PluginStorage::snapshotDefinition(peer.clone(), path).unwrap(), definition);
+            }
+        }
     }).await;
 }
 
@@ -1162,6 +1224,7 @@ async fn owned_core_command_releases_application_while_registry_is_loading() {
     hosts.hostSecretStore = Some(Arc::new(TestSecretStore::default()));
     hosts.hostJavaScriptRuntimeHost = Some(Arc::new(NativeHostJavaScriptRuntimeHost::new()));
     hosts.hostRuntimeTaskSchedulerHost = Some(Arc::new(NativeHostRuntimeTaskSchedulerHost::new()));
+    ui_resource_tests::configure_package_hosts(&mut hosts);
     let application = OperitApplication::newWithContext(hosts);
     let readiness = application.packageManager().lock().unwrap().packageRegistryReadiness();
     assert!(readiness.claim_initial_load().unwrap());
@@ -1178,6 +1241,12 @@ async fn owned_core_command_releases_application_while_registry_is_loading() {
     let command = tokio::time::timeout(Duration::from_secs(2), pending).await.unwrap();
     assert!(response.expect("Core command must release the application lock").result.is_ok());
     assert_eq!(command.result.unwrap_err().message, "core command startup error");
+    for method in ["getExtensionCatalogSnapshot", "checkExtensionCatalogUpdates"] {
+        let response = tokio::time::timeout(Duration::from_secs(2), CoreLinkSharedClient::call(
+            &proxy, CoreCallRequest::new(method, app_target, method, toCoreValue(json!({})).unwrap()),
+        )).await.expect("catalog I/O must complete through its detached host task");
+        assert!(response.result.is_ok(), "{method}: {response:?}");
+    }
 }
 
 /// Covers the local-proxy to annotation-route boundary used by Flutter chat pages.
@@ -1415,3 +1484,9 @@ mod failed_package_tests;
 
 #[path = "support/relative_terminal_tests.rs"]
 mod relative_terminal_tests;
+
+#[path = "support/market_update_tests.rs"]
+mod market_update_tests;
+
+#[path = "support/font_storage_stream_tests.rs"]
+mod font_storage_stream_tests;

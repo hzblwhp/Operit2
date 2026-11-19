@@ -650,7 +650,8 @@ fn synthesizeTts(
         )));
     }
     Ok(LocalTtsInferenceHostResponse {
-        audioPath: outputPath.to_string_lossy().to_string(),
+        // Return the selected capability identity, not the canonical filesystem spelling.
+        audioPath: request.outputPath,
         outputFormat: "wav".to_string(),
     })
 }

@@ -101,15 +101,35 @@ internal object AndroidLocalInference {
         require(speaker in 0 until speakerCount) {
             "LOCAL_MODEL TTS speaker must be between 0 and ${speakerCount - 1}"
         }
-        val outputPath = requiredOutputFile(request.getString("outputPath"))
-        // 模型常驻：分段朗读时每段都重新加载 Kokoro（约 100MB 权重 + 词典）
-        // 会让第一句之后的每一段都多等好几秒。键里包含引擎目录、驱动声明与模型目录，
-        // 配置一变就释放旧实例，避免把两套模型混用。
-        val ttsKey = buildString {
-            append(engineDirectory.absolutePath)
-            append('|').append(taggedDriver.name)
-            append('|').append(driver.toString())
-            append('|').append(modelDirectory.absolutePath)
+        val requestedOutputPath = request.getString("outputPath")
+        val outputPath = requiredOutputFile(requestedOutputPath)
+        val tts = OfflineTts(
+            config = ttsConfigForDriver(taggedDriver.name, driver, modelDirectory),
+        )
+        try {
+            require(tts.numSpeakers() == speakerCount) {
+                "LOCAL_MODEL TTS speaker count does not match the installed model manifest"
+            }
+            val generated = tts.generate(
+                text = request.getString("text"),
+                sid = speaker,
+                speed = speed.toFloat(),
+            )
+            require(generated.samples.isNotEmpty()) { "LOCAL_MODEL TTS generated no audio samples" }
+            require(generated.sampleRate > 0) { "LOCAL_MODEL TTS generated an invalid sample rate" }
+            require(generated.save(outputPath.absolutePath)) {
+                "LOCAL_MODEL TTS failed to write ${outputPath.absolutePath}"
+            }
+            require(outputPath.isFile && outputPath.length() > 44L) {
+                "LOCAL_MODEL TTS output WAV is invalid: ${outputPath.absolutePath}"
+            }
+            // Preserve the capability identity; Android may canonicalize /data/data to /data/user/0.
+            return JSONObject()
+                .put("audioPath", requestedOutputPath)
+                .put("outputFormat", "wav")
+                .toString()
+        } finally {
+            tts.release()
         }
         val tts = synchronized(ttsLock) {
             val existing = cachedTts

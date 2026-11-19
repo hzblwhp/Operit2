@@ -1,12 +1,20 @@
 #include "cpu/aarch64/execution_engine.h"
+#if OPERIT_ARM64_GUEST_AOT
+#include "cpu/aarch64/guest_aot.h"
+#endif
+#if OPERIT_ARM64_PROFILE_SUPERBLOCKS
+#include "cpu/aarch64/profile_superblocks.h"
+#endif
 #include "execution_test_support.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <algorithm>
 #include <thread>
+#include <unordered_set>
 using namespace operit::arm64;
 namespace {
 void require(bool value,const char *why) {if(!value)throw std::runtime_error(why);}
@@ -15,6 +23,1588 @@ void same(const CpuState &a,const CpuState &b) {
 }
 void map(Memory &m,const uint32_t *words,size_t count) {
     m.set_parallel_access(false);m.map(0x10000,page_size,read_perm|write_perm|exec_perm);m.copy_in(0x10000,words,count*4);
+}
+void lowering_address_independence() {
+    const uint32_t words[]{0xf9400420,0xf9000862,0x394000a4,0x390000e6,0xb9400128,0xb900016a,
+                           0xf8408dad,0xf80085ef,0x3dc00231,0x3d800273};
+    std::vector<std::pair<uint64_t,uint32_t>> first,second;
+    for(size_t n=0;n<std::size(words);++n) {
+        first.emplace_back(0x10000+n*4,words[n]);second.emplace_back(0x20000+n*4,words[n]);
+    }
+    auto a=build_instruction_graph(first,0x10000);lower_graph(*a);
+    auto b=build_instruction_graph(second,0x20000);lower_graph(*b);
+    const auto &left=a->entries.at(0x10000)->code,&right=b->entries.at(0x20000)->code;
+    require(left.size()==right.size(),"lowering changed with guest address");
+    for(size_t n=2;n+1<left.size();++n) {
+        const auto &x=left[n],&y=right[n];const auto i=operation_info(x),j=operation_info(y);
+        require(x.entry==y.entry && x.immediate==y.immediate && x.a==y.a && x.b==y.b && x.d==y.d &&
+                x.extra==y.extra && i.pc+0x10000==j.pc && i.code==j.code && i.prefix==j.prefix &&
+                i.auxiliary==j.auxiliary,"lowering reused address-dependent metadata");
+    }
+}
+void gp_operand_mapping_paths() {
+    for(bool parallel:{false,true})for(unsigned bits:{32u,64u})for(unsigned reg=0;reg<32;++reg) {
+        const uint32_t words[]{
+            (bits==64 ? 0x8b000000u:0x0b000000u)|(reg<<16)|(31u<<5)|reg,
+            (bits==64 ? 0x91000400u:0x11000400u)|(reg<<5)|31u,
+            (bits==64 ? 0x91000800u:0x11000800u)|(31u<<5)|reg,
+            0x14000000u};
+        Memory memory(1<<20);map(memory,words,std::size(words));memory.set_parallel_access(parallel);
+        ExecutionEngine engine;
+        for(unsigned budget=0;budget<=4;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.sp=0x123456789abcdef0ull;actual.nzcv=0xa;
+            for(unsigned i=0;i<actual.x.size();++i)actual.x[i]=0x1234567800000000ull+i*17;
+            auto expected=actual;
+            for(unsigned i=0;i<budget;++i)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            require(engine.run(actual,memory,budget).instructions==budget,"GP operand mapping retirement mismatch");
+            same(actual,expected);
+        }
+    }
+}
+void shifted_add_sub_paths() {
+    struct Registers {unsigned d,a,b;};
+    const Registers registers[]{{0,0,0},{13,13,13},{19,0,13},{13,19,30},{30,13,0},{31,0,13}};
+    for(bool parallel:{false,true})for(unsigned bits:{32u,64u})for(unsigned mode=0;mode<3;++mode)
+    for(const auto r:registers)for(unsigned shift:{1u,bits-1})for(unsigned sub=0;sub<2;++sub)
+    for(unsigned flags=0;flags<2;++flags) {
+        const uint32_t word=0x0b000000u | (bits==64 ? 0x80000000u:0u) | (sub<<30) | (flags<<29) |
+            (mode<<22) | (r.b<<16) | (shift<<10) | (r.a<<5) | r.d;
+        const uint32_t words[]{word,0x14000000};
+        Memory memory(1<<20);map(memory,words,std::size(words));memory.set_parallel_access(parallel);
+        ExecutionEngine engine;
+        for(uint64_t value:{0ull,1ull,0x8000000080000001ull,UINT64_MAX})for(unsigned budget=0;budget<=3;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.x[0]=value;actual.x[13]=~value;
+            actual.x[19]=value^0x5555555555555555ull;actual.x[30]=value+1;actual.nzcv=0xa;
+            auto expected=actual;
+            for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto before=engine.executed_instructions;engine.run(actual,memory,budget);
+            require(engine.executed_instructions-before==budget,"shifted add/sub retirement mismatch");same(actual,expected);
+        }
+    }
+}
+void vector_logical_paths() {
+    struct Registers {unsigned d,a,b;};
+    const Registers registers[]{{0,1,2},{0,0,2},{1,0,1},{0,0,0},{13,14,15},
+                                {13,13,15},{13,14,13},{13,13,13},{7,13,2},{13,7,14},
+                                {31,31,7},{31,7,31},{31,31,31}};
+    for(bool parallel:{false,true})for(unsigned bits:{64u,128u})for(unsigned op=0;op<8;++op)
+    for(const auto r:registers) {
+        const uint32_t word=0x0e201c00u | (bits==128 ? 1u<<30:0) | ((op>>2)<<29) |
+            ((op&3)<<22) | (r.b<<16) | (r.a<<5) | r.d;
+        const uint32_t words[]{word,0x14000000};
+        Memory memory(1<<20);map(memory,words,std::size(words));memory.set_parallel_access(parallel);
+        const auto effects=instruction_effects(decode(word));
+        const auto reads=(uint32_t{1}<<r.a)|(uint32_t{1}<<r.b)|(op>=5 ? uint32_t{1}<<r.d:0);
+        require(effects.vector_read==reads && effects.vector_write==(uint32_t{1}<<r.d) &&
+                !effects.gp_read && !effects.gp_write && !effects.flags_read && !effects.flags_write &&
+                !effects.memory && !effects.control,"vector logical effects mismatch");
+        const auto graph=build_graph(0x10000,memory);
+        const auto role=[](unsigned reg){return reg<8 ? reg:8;};
+        require(graph->entries.at(0x10000)->code[2].entry==
+                static_entry(StaticCode::VectorLogical,bits,role(r.d),role(r.a),role(r.b),op),
+                "vector logical native handler not installed");
+        ExecutionEngine engine;
+        for(unsigned seed:{0u,1u,93u})for(unsigned budget=0;budget<=3;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.nzcv=0xa;
+            for(unsigned reg=0;reg<32;++reg)for(unsigned byte=0;byte<16;++byte)
+                actual.v[reg][byte]=uint8_t(seed+reg*37+byte*19);
+            auto expected=actual;
+            for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto before=engine.executed_instructions;engine.run(actual,memory,budget);
+            require(engine.executed_instructions-before==budget,"vector logical retirement mismatch");same(actual,expected);
+        }
+        memory.store<4>(0x10000,word^(1u<<30));
+        CpuState actual;actual.pc=0x10000;actual.nzcv=7;
+        for(unsigned reg=0;reg<32;++reg)for(unsigned byte=0;byte<16;++byte)
+            actual.v[reg][byte]=uint8_t(reg*13+byte*29);
+        auto expected=actual;
+        for(unsigned n=0;n<2;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        engine.run(actual,memory,2);same(actual,expected);
+    }
+}
+void load_acquire_paths() {
+    struct Registers {unsigned d,a;};
+    const Registers registers[]{{0,1},{13,14},{30,13},{13,13},{31,1},{0,31}};
+    for(bool parallel:{false,true})for(unsigned size=0;size<4;++size)for(const auto r:registers) {
+        const uint32_t word=0x08dffc00u|(size<<30)|(r.a<<5)|r.d;
+        const uint32_t words[]{word,0x14000000};
+        Memory memory(1<<20);map(memory,words,2);memory.map(0x20000,page_size,read_perm|write_perm);
+        memory.store<8>(0x20000,0xfedcba9876543210ull);memory.set_parallel_access(parallel);
+        const auto instruction=decode(word);
+        require(instruction.encoding==Encoding::LoadAcquire && instruction.width==(8u<<size),"load acquire decoding");
+        const auto effects=instruction_effects(instruction);
+        require(effects.memory && effects.gp_read==(uint32_t{1}<<r.a) &&
+                effects.gp_write==(r.d==31 ? 0u:uint32_t{1}<<r.d),"load acquire effects");
+        auto graph=build_graph(0x10000,memory);bool installed=false;
+        for(const auto &op:graph->entries.at(0x10000)->code) {
+            const auto info=operation_info(op);
+            if(info.node && info.node->instruction.raw==word && info.code==StaticCode::LoadAcquire)installed=true;
+        }
+        require(installed,"load acquire native handler not installed");
+        ExecutionEngine engine;
+        for(unsigned budget=0;budget<=3;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.nzcv=0xa;actual.sp=0x20000;
+            for(unsigned n=0;n<31;++n)actual.x[n]=0x20000;
+            actual.exclusive_valid=true;actual.exclusive_address=0x34560;actual.exclusive_size=8;actual.exclusive_epoch=123;
+            auto expected=actual;
+            for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto before=engine.executed_instructions;engine.run(actual,memory,budget);
+            require(engine.executed_instructions-before==budget,"load acquire retirement");same(actual,expected);
+            require(actual.exclusive_valid==expected.exclusive_valid && actual.exclusive_address==expected.exclusive_address &&
+                    actual.exclusive_size==expected.exclusive_size && actual.exclusive_epoch==expected.exclusive_epoch,
+                    "load acquire modified exclusive monitor");
+        }
+    }
+    for(bool parallel:{false,true})for(bool shared:{false,true}) {
+        const uint32_t words[]{0xc8dffc02,0x17ffffff};
+        Memory memory(1<<20);map(memory,words,2);memory.map(0x20000,page_size,read_perm|write_perm,false,shared);
+        memory.store<8>(0x20000,42);memory.set_parallel_access(parallel);
+        CpuState cpu;cpu.pc=0x10000;cpu.x[0]=0x20000;ExecutionEngine engine;
+        engine.run(cpu,memory,100);const auto before=engine.slow_calls;engine.run(cpu,memory,1000);
+        require(cpu.x[2]==42,"load acquire loop result");
+        if(!parallel && !shared)require(engine.slow_calls-before<5,"private load acquire did not warm");
+        else require(engine.slow_calls-before>100,"shared or parallel load acquire bypassed slow path");
+    }
+    for(bool denied:{false,true}) {
+        const uint32_t words[]{0xc8dffc02,0x14000000};
+        Memory memory(1<<20);map(memory,words,2);memory.map(0x20000,page_size,read_perm|write_perm);
+        if(denied)memory.protect(0x20000,page_size,0);
+        CpuState actual;actual.pc=0x10000;actual.x[0]=0x20000+!denied;actual.x[2]=91;actual.nzcv=3;
+        auto expected=actual;bool reference_fault=false,actual_fault=false;ExecutionEngine engine;
+        try {execute_one(expected,memory,decode(words[0]));}catch(const Failure &) {reference_fault=true;}
+        try {engine.run(actual,memory,1);}catch(const Failure &) {actual_fault=true;}
+        require(reference_fault && actual_fault && !engine.executed_instructions,"load acquire fault retirement");same(actual,expected);
+    }
+    std::unique_ptr<FILE,decltype(&std::fclose)> file(std::tmpfile(),&std::fclose);
+    require(bool(file) && !ftruncate(fileno(file.get()),page_size),"load acquire file fixture");
+    uint64_t value=71;require(pwrite(fileno(file.get()),&value,8,0)==8,"load acquire file contents");
+    const uint32_t words[]{0xc8dffc02,0x17ffffff};Memory memory(1<<20);map(memory,words,2);
+    Memory::Backing backing;memory.map_file(0x20000,page_size,read_perm,fileno(file.get()),backing);
+    CpuState cpu;cpu.pc=0x10000;cpu.x[0]=0x20000;ExecutionEngine engine;engine.run(cpu,memory,100);
+    const auto before=engine.slow_calls;engine.run(cpu,memory,100);
+    require(cpu.x[2]==71 && engine.slow_calls-before>20,"file load acquire did not fall back");
+    value=99;require(pwrite(fileno(file.get()),&value,8,0)==8,"load acquire file update");
+    engine.run(cpu,memory,2);require(cpu.x[2]==99,"load acquire missed file update");
+    Memory writer(1<<20);Memory::Backing shared_backing;shared_backing.shared=true;
+    writer.map_file(0x30000,page_size,read_perm|write_perm,fileno(file.get()),shared_backing);
+    writer.store<8>(0x30000,0);
+    std::atomic<bool> stop{false};
+    std::thread background([&]{for(unsigned n=0;n<20000 && !stop.load(std::memory_order_relaxed);++n)
+        writer.store<8>(0x30000,n&1 ? UINT64_MAX:0);});
+    bool consistent=true;
+    try {for(unsigned n=0;n<200;++n) {engine.run(cpu,memory,100);consistent&=cpu.x[2]==0 || cpu.x[2]==UINT64_MAX;}}
+    catch(...) {stop.store(true,std::memory_order_relaxed);background.join();throw;}
+    stop.store(true,std::memory_order_relaxed);background.join();
+    require(consistent,"load acquire file page bypassed exclusive lock");
+    require(!ftruncate(fileno(file.get()),0),"load acquire file truncate");cpu.pc=0x10000;
+    try {engine.run(cpu,memory,1);require(false,"load acquire ignored file truncation");}
+    catch(const MemoryFault &fault) {require(fault.kind==MemoryFault::Kind::Bus && fault.address==0x20000,"load acquire file fault");}
+    require(memory_detail::AccessSynchronization::read_depth()==0,"load acquire leaked reader lock");
+}
+void decoded_node_consistency() {
+    std::vector<uint32_t> encodings{0,0xffffffff,0xd503201f,0x91000400,0x14000000,0xf9400000};
+    uint32_t random=0x2d319ac7;
+    for(unsigned n=0;n<2048;++n) {
+        random^=random<<13;random^=random>>17;random^=random<<5;
+        encodings.push_back(random);
+    }
+    // Rebuild at several guest addresses, including repeated and zero words.
+    for(unsigned round=0;round<3;++round) {
+        const uint64_t base=0x10000+round*0x10000;
+        std::vector<std::pair<uint64_t,uint32_t>> words;
+        for(size_t n=0;n<encodings.size();++n)words.emplace_back(base+n*4,encodings[n]);
+        auto graph=build_instruction_graph(words,base);
+        size_t checked=0;
+        for(const auto &block:graph->blocks)for(const auto &node:block->instructions) {
+            const auto index=(node.pc-base)/4;
+            require(index<encodings.size(),"decoded node address outside input");
+            const auto expected=decode(encodings[index]);
+            const auto effects=instruction_effects(expected);
+            const auto &actual=node.instruction;
+            require(actual.immediate==expected.immediate && actual.auxiliary==expected.auxiliary &&
+                    actual.raw==expected.raw && actual.op==expected.op && actual.encoding==expected.encoding &&
+                    actual.rd==expected.rd && actual.rn==expected.rn && actual.rm==expected.rm &&
+                    actual.ra==expected.ra && actual.width==expected.width && actual.shift==expected.shift &&
+                    actual.flags==expected.flags && actual.terminal==expected.terminal,
+                    "decoded node differs from direct decoder");
+            require(node.effects.gp_read==effects.gp_read && node.effects.gp_write==effects.gp_write &&
+                    node.effects.vector_read==effects.vector_read && node.effects.vector_write==effects.vector_write &&
+                    node.effects.flags_read==effects.flags_read && node.effects.flags_write==effects.flags_write &&
+                    node.effects.memory==effects.memory && node.effects.control==effects.control &&
+                    node.semantic==select_semantic(expected),"decoded node analysis mismatch");
+            ++checked;
+        }
+        require(checked==encodings.size(),"decoded node count mismatch");
+    }
+}
+#if OPERIT_EXECUTION_DIAGNOSTICS
+void diagnostic_recipe_paths() {
+    const uint32_t words[]{
+        0x8b0600a3, // add x3,x5,x6
+        0xcb0614a4, // sub x4,x5,x6,lsl #5
+        0xf94000a0, // ldr x0,[x5]
+        0xf94004a1, // ldr x1,[x5,#8]
+        0xa9000440, // stp x0,x1,[x2]
+        0xf100043f, // cmp x1,#1
+        0x54000040, // b.eq +8
+        0xd28000e3, // mov x3,#7
+        0x17fffff8, // b to start
+    };
+    Memory memory(1<<20);map(memory,words,std::size(words));
+    auto graph=build_graph(0x10000,memory);
+    size_t checked=0;
+    for(const auto &block:graph->blocks) {
+        require(block->recipes.size()==block->code.size(),"recipe and operation count mismatch");
+        for(size_t i=0;i<block->code.size();++i) {
+            const auto &recipe=block->recipes[i];
+            if(!recipe.valid)continue;
+            require(static_entry(recipe.code,recipe.bits,recipe.d,recipe.a,recipe.b,recipe.flags)==recipe.selected,
+                    "diagnostic recipe selects different handler");
+            ++checked;
+        }
+    }
+    require(checked>=6,"too few diagnostic recipes checked");
+}
+#endif
+#if OPERIT_ARM64_GUEST_AOT
+#if OPERIT_ARM64_GUEST_AOT_TRACES && OPERIT_ARM64_GUEST_AOT_TRACE_MAX_BLOCKS >= 3
+void long_guest_trace_paths() {
+    for(bool parallel:{false,true})for(uint64_t address:{0x20000ull,0x30000ull})
+    for(uint64_t first:{0ull,UINT64_MAX})for(uint64_t second:{0ull,UINT64_MAX}) {
+        const uint32_t words[]{0x9100054a,0xb400006a,0x9100056b,0xb400006b,
+                               0xf94000cb,0x9100056c,0x910005ad,0x14000000};
+        Memory memory(1<<20),reference(1<<20);
+        map(memory,words,std::size(words));map(reference,words,std::size(words));
+        for(auto *m:{&memory,&reference}) {
+            m->map(0x20000,page_size,read_perm|write_perm);m->store<8>(0x20000,42);
+            m->set_parallel_access(parallel);
+        }
+        const auto graph=build_graph(0x10000,memory);
+        const auto blocks=guest_trace_block_count(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(blocks==3,"three-block trace was not installed");
+        if(blocks!=3)continue;
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<4;++pass) {
+            if(pass==2)for(auto *m:{&memory,&reference})m->store<4>(0x10008,0x9100096b);
+            if(pass==3)for(auto *m:{&memory,&reference})m->store<4>(0x10010,0xf94004cb);
+            for(unsigned budget=0;budget<=8;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=address;actual.x[10]=first;
+                actual.x[11]=second;actual.x[12]=17;actual.x[13]=19;actual.nzcv=9;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,reference,decode(reference.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"three-block trace fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"three-block trace retirement mismatch");
+            }
+        }
+    }
+    for(bool parallel:{false,true})for(uint64_t address:{0x20000ull,0x30000ull})
+    for(uint64_t condition:{0ull,UINT64_MAX})for(unsigned budget=0;budget<=7;++budget) {
+        const uint32_t words[]{0x9100054a,0xb400006a,0xf94000cb,0x9100056c,
+                               0x9100058d,0x910005ad,0x14000000};
+        Memory memory(1<<20),reference(1<<20);
+        map(memory,words,std::size(words));map(reference,words,std::size(words));
+        for(auto *m:{&memory,&reference}) {
+            m->map(0x20000,page_size,read_perm|write_perm);m->store<8>(0x20000,73);
+            m->set_parallel_access(parallel);
+        }
+        const auto graph=build_graph(0x10000,memory);
+        const auto blocks=guest_trace_block_count(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(blocks==3,"mixed three-block trace was not installed");
+        if(blocks!=3)continue;
+        CpuState actual;actual.pc=0x10000;actual.x[6]=address;actual.x[10]=condition;
+        actual.x[11]=3;actual.x[12]=5;actual.x[13]=7;actual.nzcv=9;
+        auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+        try {for(;completed<budget;++completed)execute_one(expected,reference,decode(reference.load<4>(expected.pc,exec_perm)));}
+        catch(const MemoryFault &) {expected_fault=true;}
+        ExecutionEngine engine;
+        try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+        require(actual_fault==expected_fault,"mixed three-block trace fault mismatch");same(actual,expected);
+        require(engine.executed_instructions==completed,"mixed three-block trace retirement mismatch");
+    }
+#if OPERIT_ARM64_GUEST_AOT_TRACE_REGISTER_MEMORY
+    for(bool parallel:{false,true})for(uint64_t source:{0x20000ull,0x30000ull})
+    for(uint64_t target:{0x20000ull,0x30000ull})for(uint64_t offset:{0ull,8ull})
+    for(uint64_t condition:{0ull,UINT64_MAX})for(unsigned budget=0;budget<=7;++budget) {
+        const uint32_t words[]{0x9100054a,0xb400006a,0xf86968cb,0xb400006b,
+                               0xf86968ec,0x9100058d,0x14000000};
+        Memory memory(1<<20),reference(1<<20);
+        map(memory,words,std::size(words));map(reference,words,std::size(words));
+        for(auto *m:{&memory,&reference}) {
+            m->map(0x20000,page_size,read_perm|write_perm);m->store<8>(0x20000,42);
+            m->store<8>(0x20008,0);m->set_parallel_access(parallel);
+        }
+        const auto graph=build_graph(0x10000,memory);
+        const auto blocks=guest_trace_block_count(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(blocks==3,"register memory three-block trace was not installed");
+        if(blocks!=3)continue;
+        CpuState actual;actual.pc=0x10000;actual.x[6]=source;actual.x[7]=target;
+        actual.x[9]=offset;actual.x[10]=condition;actual.x[11]=3;actual.x[12]=5;actual.x[13]=7;actual.nzcv=9;
+        auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+        try {for(;completed<budget;++completed)execute_one(expected,reference,decode(reference.load<4>(expected.pc,exec_perm)));}
+        catch(const MemoryFault &) {expected_fault=true;}
+        ExecutionEngine engine;
+        try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+        require(actual_fault==expected_fault,"register memory three-block trace fault mismatch");same(actual,expected);
+        require(engine.executed_instructions==completed,"register memory three-block trace retirement mismatch");
+    }
+#endif
+}
+#endif
+void guest_aot_integer_paths() {
+    std::vector<uint32_t> instructions;
+    for(unsigned width:{0u,1u}) {
+        for(unsigned op:{2u,3u,8u,9u,10u,11u})
+            instructions.push_back((width<<31)|0x1ac00000u|(11u<<16)|(op<<10)|(10u<<5)|12u);
+        for(unsigned op:{0u,1u,2u,3u})for(unsigned condition:{0u,1u,10u,14u,15u})
+            instructions.push_back((width<<31)|0x1a800000u|((op>>1)<<30)|((op&1)<<10)|
+                                   (11u<<16)|(condition<<12)|(10u<<5)|12u);
+    }
+    const uint64_t values[]{0,1,31,32,63,64,65,0x80000000ull,0xffffffffull,
+                            0x8000000000000000ull,0x7fffffffffffffffull,UINT64_MAX};
+    for(uint32_t word:instructions)for(bool parallel:{false,true}) {
+        const uint32_t words[]{word,0x910004a5,0x14000000};
+        Memory memory(1<<20);map(memory,words,std::size(words));
+        memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==2,"integer AOT fixture was not installed");
+        if(length!=2)continue;
+        ExecutionEngine engine;
+        for(uint64_t left:values)for(uint64_t right:values)for(unsigned flags=0;flags<16;++flags)
+        for(unsigned budget=0;budget<=3;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.sp=0x20000;actual.x[5]=UINT64_MAX;
+            actual.x[10]=left;actual.x[11]=right;actual.x[12]=0x123456789abcdef0ull;actual.nzcv=flags;
+            auto expected=actual;
+            for(unsigned i=0;i<budget;++i)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto before=engine.executed_instructions;
+            engine.run(actual,memory,budget);same(actual,expected);
+            require(engine.executed_instructions-before==budget,"integer AOT retirement mismatch");
+        }
+        // A cached translation must stop matching when its source instruction changes.
+        memory.store<4>(0x10000,0x9100054c); // add x12,x10,#1
+        CpuState actual;actual.pc=0x10000;actual.x[10]=19;actual.nzcv=9;auto expected=actual;
+        for(unsigned i=0;i<2;++i)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        engine.run(actual,memory,2);same(actual,expected);
+    }
+}
+void guest_aot_multiply_paths() {
+    struct Registers {unsigned d,n,m,a;};
+    const Registers registers[]{{12,10,11,13},{10,10,11,10},{11,10,11,11},{13,10,11,13},
+                                {12,31,11,13},{12,10,31,13},{12,10,11,31},{31,10,11,13},
+                                {0,0,2,3},{0,0,1,2},{19,20,30,0},{30,19,1,2},
+                                {0,31,31,31},{31,0,1,31}};
+    const uint64_t values[]{0,1,0xffffffffull,0x8000000000000000ull,UINT64_MAX};
+    for(unsigned width:{0u,1u})for(unsigned sub:{0u,1u})for(const auto r:registers)
+    for(bool parallel:{false,true}) {
+        const uint32_t word=(width<<31)|0x1b000000u|(r.m<<16)|(sub<<15)|(r.a<<10)|(r.n<<5)|r.d;
+        const uint32_t words[]{word,0x910004a5,0x14000000};
+        Memory memory(1<<20);map(memory,words,std::size(words));memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+        // Constant folding reduces an all-zero MSUB to one record, so a
+        // two-record AOT translation must not be installed for it.
+        const bool folded=sub && r.n==31 && r.m==31 && r.a==31;
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT") && length!=2 && !folded) {
+            char message[96];std::snprintf(message,sizeof(message),"multiply AOT fixture was not installed: 0x%08x",word);
+            throw std::runtime_error(message);
+        }
+        if(folded)require(length!=2,"constant-folded multiply installed mismatched records");
+        if(length!=2 && !folded)continue;
+        ExecutionEngine engine;
+        for(uint64_t left:values)for(uint64_t right:values)for(uint64_t addend:values)
+        for(unsigned budget=0;budget<=3;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.sp=0x20000;actual.x[5]=UINT64_MAX;
+            actual.x[0]=left;actual.x[1]=right;actual.x[2]=addend;actual.x[3]=right;
+            actual.x[19]=left;actual.x[20]=right;actual.x[30]=addend;
+            actual.x[10]=left;actual.x[11]=right;actual.x[12]=0x123456789abcdef0ull;actual.x[13]=addend;actual.nzcv=9;
+            auto expected=actual;
+            for(unsigned i=0;i<budget;++i)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto before=engine.executed_instructions;
+            engine.run(actual,memory,budget);same(actual,expected);
+            require(engine.executed_instructions-before==budget,"multiply AOT retirement mismatch");
+        }
+        memory.store<4>(0x10000,word^(1u<<15));
+        CpuState actual;actual.pc=0x10000;actual.x[10]=19;actual.x[11]=5;actual.x[13]=73;actual.nzcv=9;
+        auto expected=actual;
+        for(unsigned i=0;i<2;++i)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        engine.run(actual,memory,2);same(actual,expected);
+    }
+}
+void guest_aot_shifted_paths() {
+    std::vector<uint32_t> instructions;
+    for(unsigned width:{0u,1u}) {
+        for(unsigned sub:{0u,1u})instructions.push_back((width<<31)|0x0b000000u|(sub<<30)|
+                                                        (11u<<16)|(6u<<10)|(10u<<5)|12u);
+        for(unsigned op=0;op<4;++op)for(unsigned invert=0;invert<2;++invert)
+            instructions.push_back((width<<31)|0x0a000000u|(op<<29)|(invert<<21)|
+                                   (11u<<16)|(6u<<10)|(10u<<5)|12u);
+        for(unsigned op:{0u,2u})instructions.push_back((width<<31)|0x0a000000u|(op<<29)|(1u<<21)|
+                                                       (11u<<16)|(10u<<5)|12u);
+    }
+    for(const auto word:instructions)for(bool parallel:{false,true}) {
+        const uint32_t words[]{word,0x9100054a,0x14000000};
+        Memory memory(1<<20);map(memory,words,std::size(words));memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==2,"shifted AOT fixture was not installed");
+        if(length!=2)continue;
+        ExecutionEngine engine;
+        for(uint64_t value:{0ull,1ull,0x8000000080000001ull,UINT64_MAX})for(unsigned budget=0;budget<=3;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.x[10]=value;actual.x[11]=~value;
+            actual.x[12]=0x123456789abcdef0ull;actual.nzcv=9;auto expected=actual;
+            for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto before=engine.executed_instructions;engine.run(actual,memory,budget);same(actual,expected);
+            require(engine.executed_instructions-before==budget,"shifted AOT retirement mismatch");
+        }
+    }
+#if OPERIT_ARM64_GUEST_AOT_BRANCHES
+    // A sampled interpreter loop includes a writeback load followed by two
+    // shifted arithmetic instructions and a backward conditional branch.
+    for(bool parallel:{false,true})for(unsigned budget=0;budget<=29;++budget) {
+        const uint32_t words[]{0x38401661,0x0b020022,0x0b022842,0x4a421842,0xeb13007f,0x54ffff61,0x14000000};
+        Memory memory(1<<20);map(memory,words,std::size(words));memory.map(0x20000,page_size,read_perm|write_perm);
+        memory.store<8>(0x20000,0x123456789abcdef0ull);memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==6,"shifted loop AOT fixture was not installed");
+        if(length!=6)continue;
+        CpuState actual;actual.pc=0x10000;actual.x[19]=0x20000;actual.x[3]=0x20004;
+        actual.x[2]=0x87654321;actual.nzcv=9;auto expected=actual;
+        for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        ExecutionEngine engine;engine.run(actual,memory,budget);same(actual,expected);
+        require(engine.executed_instructions==budget,"shifted loop AOT retirement mismatch");
+    }
+#endif
+}
+void guest_aot_unscaled_paths() {
+    std::vector<uint32_t> instructions;
+    for(unsigned shift=0;shift<4;++shift)for(unsigned load=0;load<2;++load)for(unsigned mode:{1u,3u})
+        instructions.push_back(0x38000000u|(shift<<30)|(load<<22)|(8u<<12)|(mode<<10)|(6u<<5)|11u);
+    for(uint32_t word:{0xf84084c6u,0xf8008cc6u,0xf85f8febu,0xf81f87ffu,0xf85f80cbu,0xf81f88cbu,
+                       0xb85f84c6u,0xb81f8cc6u,0x38401661u,0xf8008c13u,0xf8408400u})
+        instructions.push_back(word);
+    for(const auto word:instructions)for(bool parallel:{false,true})for(bool readonly:{false,true})
+    for(uint64_t address:{0x20020ull,0x20fffull,0x30000ull}) {
+        const uint32_t words[]{word,0x9100054a,0x14000000};
+        Memory actual_memory(1<<20),expected_memory(1<<20);
+        for(auto *m:{&actual_memory,&expected_memory}) {
+            map(*m,words,std::size(words));m->map(0x20000,page_size,read_perm|write_perm);
+            m->store<8>(0x20018,0xfedcba9876543210ull);m->store<8>(0x20020,0x123456789abcdef0ull);
+            m->store<8>(0x20028,0x9876543210abcdefull);m->store<8>(0x20ff8,0xaabbccddeeff1122ull);
+            if(readonly)m->protect(0x20000,page_size,read_perm);
+            m->set_parallel_access(parallel);
+        }
+        const auto graph=build_graph(0x10000,actual_memory);
+        const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==2,"unscaled AOT fixture was not installed");
+        if(length!=2)continue;
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<2;++pass)for(unsigned budget=0;budget<=3;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.sp=address;actual.x[6]=address;
+            actual.x[0]=address;actual.x[19]=address;
+            actual.x[10]=UINT64_MAX;actual.x[11]=0x1122334455667788ull;actual.nzcv=9;
+            auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+            try {for(;completed<budget;++completed)execute_one(expected,expected_memory,decode(expected_memory.load<4>(expected.pc,exec_perm)));}
+            catch(const MemoryFault &) {expected_fault=true;}
+            const auto before=engine.executed_instructions;
+            try {engine.run(actual,actual_memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+            require(actual_fault==expected_fault,"unscaled AOT fault mismatch");same(actual,expected);
+            require(engine.executed_instructions-before==completed,"unscaled AOT retirement mismatch");
+            for(uint64_t at:{0x20018ull,0x20020ull,0x20028ull,0x20ff8ull})
+                require(actual_memory.load<8>(at)==expected_memory.load<8>(at),"unscaled AOT memory mismatch");
+        }
+        for(auto *m:{&actual_memory,&expected_memory})m->store<4>(0x10000,0x910004c6);
+        CpuState actual;actual.pc=0x10000;actual.x[6]=address;actual.x[10]=7;auto expected=actual;
+        for(unsigned i=0;i<2;++i)execute_one(expected,expected_memory,decode(expected_memory.load<4>(expected.pc,exec_perm)));
+        engine.run(actual,actual_memory,2);same(actual,expected);
+    }
+}
+void guest_aot_paths() {
+    guest_aot_integer_paths();
+    guest_aot_multiply_paths();
+    guest_aot_unscaled_paths();
+    guest_aot_shifted_paths();
+#if OPERIT_ARM64_GUEST_AOT_TRACES && OPERIT_ARM64_GUEST_AOT_TRACE_MAX_BLOCKS >= 3
+    long_guest_trace_paths();
+#endif
+#if OPERIT_ARM64_GUEST_AOT_REGISTER_MEMORY
+    for(unsigned option:{2u,3u,6u,7u})for(bool scaled:{false,true})for(bool writing:{false,true})
+    for(bool parallel:{false,true})for(uint64_t offset:{0ull,1ull,0x7ffull,0xffffffffull,UINT64_MAX})
+    for(unsigned budget=0;budget<=3;++budget) {
+        const uint32_t memory_word=0xf8200800u|(writing ? 0u:1u<<22)|(9u<<16)|(option<<13)|
+                                   (unsigned(scaled)<<12)|(6u<<5)|11u;
+        const uint32_t words[]{0x9100054a,memory_word,0x9100056c,0x14000000};
+        Memory memory(1<<20),reference(1<<20);
+        map(memory,words,std::size(words));map(reference,words,std::size(words));
+        for(auto *m:{&memory,&reference}) {
+            m->map(0x20000,page_size,read_perm|write_perm);
+            for(uint64_t p=0x20000;p<0x21000;p+=8)m->store<8>(p,p*0x102030405ull);
+            m->set_parallel_access(parallel);
+        }
+        const auto graph=build_graph(0x10000,memory);
+        const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==3,"register memory AOT fixture was not installed");
+        if(length!=3)continue;
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<3;++pass) {
+            if(pass==2)for(auto *m:{&memory,&reference})m->store<4>(0x10004,memory_word^(1u<<12));
+            CpuState actual;actual.pc=0x10000;actual.x[6]=0x20800;actual.x[9]=offset;
+            actual.x[10]=UINT64_MAX;actual.x[11]=0x123456789abcdef0ull;actual.x[12]=13;actual.nzcv=9;
+            auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+            try {for(;completed<budget;++completed)execute_one(expected,reference,decode(reference.load<4>(expected.pc,exec_perm)));}
+            catch(const MemoryFault &) {expected_fault=true;}
+            const auto before=engine.executed_instructions;
+            try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+            require(actual_fault==expected_fault,"register memory AOT fault mismatch");same(actual,expected);
+            require(engine.executed_instructions-before==completed,"register memory AOT retirement mismatch");
+            std::array<uint8_t,page_size> actual_bytes{},expected_bytes{};
+            memory.copy_out(0x20000,actual_bytes.data(),actual_bytes.size());
+            reference.copy_out(0x20000,expected_bytes.data(),expected_bytes.size());
+            require(actual_bytes==expected_bytes,"register memory AOT data mismatch");
+        }
+    }
+    for(uint32_t word:{0x386968c6u,0x786968c9u,0xb87f68cbu,0xf8696bebu,
+                       0x382968c6u,0x782968c9u,0xb83f68cbu,0xf8296bffu})
+    for(bool parallel:{false,true})for(unsigned budget=0;budget<=3;++budget) {
+        const uint32_t words[]{0x9100054a,word,0x9100056c,0x14000000};
+        Memory memory(1<<20),reference(1<<20);
+        map(memory,words,std::size(words));map(reference,words,std::size(words));
+        for(auto *m:{&memory,&reference}) {
+            m->map(0x20000,page_size,read_perm|write_perm);
+            m->store<8>(0x20800,0x0123456789abcdefull);m->set_parallel_access(parallel);
+        }
+        const auto graph=build_graph(0x10000,memory);
+        const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==3,"register memory alias AOT fixture was not installed");
+        if(length!=3)continue;
+        CpuState actual;actual.pc=0x10000;actual.sp=0x20800;actual.x[6]=0x20800;
+        actual.x[9]=0;actual.x[10]=7;actual.x[11]=0xaabbccdd;actual.nzcv=9;
+        auto expected=actual;
+        for(unsigned n=0;n<budget;++n)execute_one(expected,reference,decode(reference.load<4>(expected.pc,exec_perm)));
+        ExecutionEngine engine;engine.run(actual,memory,budget);same(actual,expected);
+        require(engine.executed_instructions==budget,"register memory alias AOT retirement mismatch");
+        require(memory.load<8>(0x20800)==reference.load<8>(0x20800),"register memory alias AOT data mismatch");
+    }
+#endif
+#if OPERIT_ARM64_GUEST_AOT_TRACES
+    for(bool parallel:{false,true})for(uint64_t value:{0ull,1ull,UINT64_MAX})for(unsigned budget=0;budget<=5;++budget) {
+        const uint32_t words[]{0x0b0b194c,0xb400006a,0x4a2b194c,0x9100054a,0x910005ad,0x14000000};
+        Memory memory(1<<20);map(memory,words,std::size(words));memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        const bool installed=is_guest_trace_entry(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"shifted arithmetic trace was not installed");
+        if(!installed)continue;
+        CpuState actual;actual.pc=0x10000;actual.x[10]=value;actual.x[11]=~value;actual.nzcv=9;
+        auto expected=actual;
+        for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        ExecutionEngine engine;engine.run(actual,memory,budget);same(actual,expected);
+        require(engine.executed_instructions==budget,"shifted arithmetic trace retirement mismatch");
+    }
+    for(bool parallel:{false,true})for(uint64_t source:{0x20000ull,0x30000ull})
+    for(uint64_t target:{0x20000ull,0x30000ull})for(uint64_t condition:{0ull,UINT64_MAX}) {
+        const uint32_t words[]{0x9100054a,0xf80084cb,0xb400006a,
+                               0xf84084ec,0x9100058d,0x910005ad,0x14000000};
+        Memory memory(1<<20),reference(1<<20);
+        for(auto *m:{&memory,&reference}) {
+            map(*m,words,std::size(words));m->map(0x20000,page_size,read_perm|write_perm);
+            m->store<8>(0x20000,42);m->set_parallel_access(parallel);
+        }
+        const auto graph=build_graph(0x10000,memory);
+        const bool installed=is_guest_trace_entry(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"unscaled memory trace was not installed");
+        if(!installed)continue;
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<3;++pass) {
+            if(pass==2)for(auto *m:{&memory,&reference})m->store<4>(0x1000c,0x9100054c);
+            for(unsigned budget=0;budget<=6;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=source;actual.x[7]=target;
+                actual.x[10]=condition;actual.x[11]=0x123456789abcdef0ull;actual.nzcv=9;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,reference,decode(reference.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"unscaled trace fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"unscaled trace retirement mismatch");
+                require(memory.load<8>(0x20000)==reference.load<8>(0x20000),"unscaled trace memory mismatch");
+            }
+        }
+    }
+    for(bool parallel:{false,true})for(uint64_t address:{0x20000ull,0x30000ull}) {
+        const uint32_t words[]{0x9b0bb54c,0xb400006a,0xf94000cb,0x9100056c,0x910005ad,0x14000000};
+        Memory memory(1<<20);map(memory,words,std::size(words));
+        memory.map(0x20000,page_size,read_perm|write_perm);memory.store<8>(0x20000,0x123456789abcdef0ull);
+        memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        const bool installed=is_guest_trace_entry(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"multiply AOT trace was not installed");
+        if(!installed)continue;
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<3;++pass) {
+            if(pass==2)memory.store<4>(0x10008,0x9100054b);
+            for(uint64_t left:{0ull,1ull,UINT64_MAX})for(unsigned budget=0;budget<=6;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=address;actual.x[10]=left;
+                actual.x[11]=3;actual.x[12]=7;actual.x[13]=17;actual.nzcv=9;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"multiply AOT trace fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"multiply AOT trace retirement mismatch");
+            }
+        }
+    }
+#if OPERIT_ARM64_GUEST_AOT_TRACE_REGISTER_MEMORY
+    for(bool parallel:{false,true})for(uint64_t source:{0x20000ull,0x30000ull})
+    for(uint64_t target:{0x20000ull,0x30000ull})for(unsigned budget=0;budget<=5;++budget) {
+        const uint32_t words[]{0x9100054a,0xf82968cb,0xb400006a,
+                               0xf86968ec,0x9100058d,0x910005ad,0x14000000};
+        Memory memory(1<<20),reference(1<<20);
+        map(memory,words,std::size(words));map(reference,words,std::size(words));
+        for(auto *m:{&memory,&reference}) {
+            m->map(0x20000,page_size,read_perm|write_perm);m->store<8>(0x20000,42);m->set_parallel_access(parallel);
+        }
+        const auto graph=build_graph(0x10000,memory);
+        const bool installed=is_guest_trace_entry(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"register memory store trace was not installed");
+        if(!installed)continue;
+        const auto trace=reinterpret_cast<uintptr_t>(graph->entries.at(0x10000)->code[2].entry);
+        require(!is_guest_trace_entry(nullptr) && !is_guest_trace_entry(static_entry(StaticCode::Block)) &&
+                !is_guest_trace_entry(reinterpret_cast<const void*>(trace+1)),"trace entry lookup accepted non-entry");
+        CpuState actual;actual.pc=0x10000;actual.x[6]=source;actual.x[7]=target;actual.x[9]=0;
+        actual.x[10]=0;actual.x[11]=0x123456789abcdef0ull;auto expected=actual;
+        unsigned completed=0;bool expected_fault=false,actual_fault=false;
+        try {for(;completed<budget;++completed)execute_one(expected,reference,decode(reference.load<4>(expected.pc,exec_perm)));}
+        catch(const MemoryFault &) {expected_fault=true;}
+        ExecutionEngine engine;
+        try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+        require(actual_fault==expected_fault,"register memory store trace fault mismatch");same(actual,expected);
+        require(engine.executed_instructions==completed,"register memory store trace retirement mismatch");
+        require(memory.load<8>(0x20000)==reference.load<8>(0x20000),"register memory store trace data mismatch");
+    }
+    for(bool parallel:{false,true})for(uint64_t source:{0x20000ull,0x30000ull})
+    for(uint64_t target:{0x20000ull,0x30000ull})for(uint64_t condition:{0ull,UINT64_MAX}) {
+        const uint32_t words[]{0x9100054a,0xf86968cb,0xb400006a,
+                               0xf86968ec,0x9100058d,0x910005ad,0x14000000};
+        Memory memory(1<<20);map(memory,words,std::size(words));
+        memory.map(0x20000,page_size,read_perm|write_perm);memory.store<8>(0x20000,0x123456789abcdef0ull);
+        memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        const bool installed=is_guest_trace_entry(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"register memory conditional trace was not installed");
+        if(!installed)continue;
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<4;++pass) {
+            if(pass==2)memory.store<4>(0x10010,0x9100098d);
+            if(pass==3)memory.store<4>(0x10000,0x9100094a);
+            for(unsigned budget=0;budget<=6;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=source;actual.x[7]=target;
+                actual.x[9]=0;actual.x[10]=condition;actual.x[11]=3;actual.x[12]=5;actual.x[13]=7;actual.nzcv=9;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"register memory conditional trace fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"register memory conditional trace retirement mismatch");
+            }
+        }
+    }
+    for(bool parallel:{false,true})for(uint64_t address:{0x20000ull,0x30000ull}) {
+        const uint32_t words[]{0xf86968cb,0x9100056c,0x9100058d,0xb5ffffc9};
+        Memory memory(1<<20);map(memory,words,std::size(words));
+        memory.map(0x20000,page_size,read_perm|write_perm);memory.store<8>(0x20000,0x123456789abcdef0ull);
+        memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        const bool installed=is_guest_trace_entry(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"register memory natural trace was not installed");
+        if(!installed)continue;
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<3;++pass) {
+            if(pass==2)memory.store<4>(0x10004,0x9100096c);
+            for(unsigned budget=0;budget<=3;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=address;actual.x[9]=0;
+                actual.x[11]=3;actual.x[12]=5;actual.x[13]=7;auto expected=actual;
+                unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"register memory natural trace fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"register memory natural trace retirement mismatch");
+            }
+        }
+    }
+#endif
+    for(bool memory_target:{false,true})for(bool parallel:{false,true})
+    for(uint64_t address:{0x20000ull,0x30000ull}) {
+        const uint32_t words[]{0x9100054a,0xb400006a,
+                               memory_target ? 0xf94000cbu:0x9100054bu,0x9100056c,
+                               0x910005ad,0x14000000};
+        Memory memory(1<<20);map(memory,words,std::size(words));
+        memory.map(0x20000,page_size,read_perm|write_perm);memory.store<8>(0x20000,0x123456789abcdef0ull);
+        memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        const auto &source=*graph->entries.at(0x10000);
+        const bool installed=is_guest_trace_entry(source.code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"guest AOT trace fixture was not installed");
+        if(!installed)continue;
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<3;++pass) {
+            if(pass==2)memory.store<4>(0x1000c,0x9100096c); // change the traced target block
+            for(uint64_t x10:{0ull,UINT64_MAX})for(unsigned budget=0;budget<=7;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=address;actual.x[10]=x10;
+                actual.x[11]=0x1234;actual.x[12]=0x5678;actual.x[13]=97;actual.nzcv=9;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"guest AOT trace fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"guest AOT trace retirement mismatch");
+            }
+        }
+    }
+    for(bool parallel:{false,true})for(uint64_t address:{0x20000ull,0x30000ull}) {
+        // The backward branch makes the second instruction a leader, leaving
+        // the first block with one instruction and a natural forward edge.
+        const uint32_t words[]{0x9100054a,0xf94000cb,0x9100056c,0xb5ffffc9};
+        Memory memory(1<<20);map(memory,words,std::size(words));
+        memory.map(0x20000,page_size,read_perm|write_perm);memory.store<8>(0x20000,0x123456789abcdef0ull);
+        memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        const auto &source=*graph->entries.at(0x10000);
+        const bool installed=is_guest_trace_entry(source.code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"natural guest AOT trace fixture was not installed");
+        if(!installed)continue;
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<3;++pass) {
+            if(pass==2)memory.store<4>(0x10008,0x9100096c);
+            for(unsigned budget=0;budget<=6;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=address;actual.x[9]=1;
+                actual.x[10]=UINT64_MAX;actual.x[11]=0x1234;actual.x[12]=0x5678;actual.nzcv=9;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"natural guest AOT trace fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"natural guest AOT trace retirement mismatch");
+            }
+        }
+    }
+#endif
+#if OPERIT_ARM64_GUEST_AOT_INDIRECT
+    {
+        const std::array<std::array<uint32_t,3>,3> programs{{
+            {{0xf9400400,0xd65f03c0,0x14000000}}, // ldr x0,[x0,#8]; ret
+            {{0x9100114a,0xd61f0140,0x14000000}}, // add x10,x10,#4; br x10
+            {{0x910013de,0xd63f03c0,0x14000000}}, // add x30,x30,#4; blr x30
+        }};
+        const uint32_t target_words[]{0x9100056b,0x14000000};
+        for(unsigned program=0;program<programs.size();++program)for(bool parallel:{false,true})
+        for(uint64_t target:{0x20000ull,0x40000ull}) {
+            Memory memory(1<<20);map(memory,programs[program].data(),programs[program].size());
+            memory.map(0x20000,page_size,read_perm|write_perm|exec_perm);
+            memory.copy_in(0x20000,target_words,sizeof(target_words));
+            memory.map(0x30000,page_size,read_perm|write_perm);memory.store<8>(0x30008,0xfedcba9876543210ull);
+            memory.set_parallel_access(parallel);
+            auto graph=build_graph(0x10000,memory);
+            const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+            if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==2,"guest AOT indirect fixture was not installed");
+            if(length!=2)continue;
+            ExecutionEngine engine;
+            for(unsigned pass=0;pass<3;++pass)for(unsigned budget=0;budget<=4;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[0]=0x30000;actual.x[10]=target-4;
+                actual.x[30]=program==2 ? target-4:target;actual.x[11]=123;auto expected=actual;
+                unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"guest AOT indirect fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"guest AOT indirect retirement mismatch");
+            }
+        }
+        for(bool parallel:{false,true}) {
+            Memory memory(1<<20);map(memory,programs[0].data(),programs[0].size());
+            memory.map(0x20000,page_size,read_perm|write_perm|exec_perm);
+            memory.copy_in(0x20000,target_words,sizeof(target_words));
+            memory.map(0x30000,page_size,read_perm|write_perm);memory.store<8>(0x30008,42);
+            memory.set_parallel_access(parallel);
+            auto graph=build_graph(0x10000,memory);
+            const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+            if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==2,"guest AOT indirect invalidation fixture was not installed");
+            if(length!=2)continue;
+            ExecutionEngine engine;
+            for(unsigned pass=0;pass<4;++pass) {
+                if(pass==2)memory.store<4>(0x20000,0x9100096b); // add x11,x11,#2
+                if(pass==3)memory.protect(0x20000,page_size,read_perm|write_perm);
+                CpuState actual;actual.pc=0x10000;actual.x[0]=0x30000;actual.x[30]=0x20000;actual.x[11]=123;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<3;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,3);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"guest AOT indirect invalidation fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"guest AOT indirect invalidation retirement mismatch");
+            }
+        }
+        {
+            Memory memory(1<<20);map(memory,programs[0].data(),programs[0].size());
+            const auto graph=build_graph(0x10000,memory);
+            const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+            if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==2,"guest AOT indirect load-fault fixture was not installed");
+            if(length==2)for(unsigned budget=0;budget<=3;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[0]=0x30000;actual.x[30]=0x20000;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                ExecutionEngine engine;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"guest AOT indirect load fault mismatch");same(actual,expected);
+                require(engine.executed_instructions==completed,"guest AOT indirect load-fault retirement mismatch");
+            }
+        }
+    }
+#endif
+#if OPERIT_ARM64_GUEST_AOT_BRANCHES
+    for(const uint32_t branch:{0x54000040u,0x54000041u,0x54000042u,0x54000043u,
+                               0x54000044u,0x54000045u,0x54000046u,0x54000047u,
+                               0x54000048u,0x54000049u,0x5400004au,0x5400004bu,
+                               0x5400004cu,0x5400004du,0x5400004eu,0x5400004fu,
+                               0xb400004au,0x3500004au,0x3700004au,0xb6f8004au}) {
+        const uint32_t words[]{0x9100054a,branch,0x9100056b,0x9100096b,0xf94000c5};
+        Memory branch_memory(1<<20);map(branch_memory,words,std::size(words));
+        auto branch_graph=build_graph(0x10000,branch_memory);
+        const auto &branch_block=*branch_graph->entries.at(0x10000);
+        const auto length=guest_aot_entry_length(branch_block.code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==2,"branch AOT fixture was not installed");
+        if(length!=2)continue;
+        ExecutionEngine engine;
+        for(const uint64_t x10:{0ull,1ull,0x7ffffffffffffffeull,0xffffffffffffffffull})
+            for(unsigned flags=0;flags<16;++flags)for(unsigned budget=0;budget<=6;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=0x30000;actual.x[10]=x10;
+                actual.x[11]=0x1234;actual.nzcv=flags;auto expected=actual;
+                unsigned completed=0;bool reference_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,branch_memory,decode(branch_memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {reference_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,branch_memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(reference_fault==actual_fault,"branch AOT fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"branch AOT retirement mismatch");
+            }
+    }
+    {
+        // Pre-populate a distant target graph so the taken edge must use the
+        // normal cross-graph link and be invalidated after guest code changes.
+        const uint32_t words[]{0x9100054a,0xb407ffea,0xf94000c5};
+        const uint32_t target[]{0x9100056b,0x14000000};
+        Memory branch_memory(1<<20);map(branch_memory,words,std::size(words));
+        branch_memory.map(0x20000,page_size,read_perm|write_perm|exec_perm);
+        branch_memory.copy_in(0x20000,target,sizeof(target));
+        auto graph=build_graph(0x10000,branch_memory);
+        const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==2,"cross-graph AOT fixture was not installed");
+        if(length==2) {
+            ExecutionEngine engine;CpuState warm;warm.pc=0x20000;engine.run(warm,branch_memory,1);
+            for(unsigned pass=0;pass<3;++pass) {
+                if(pass==2)branch_memory.store<4>(0x20000,0x9100096b);
+                CpuState actual;actual.pc=0x10000;actual.x[10]=UINT64_MAX;actual.x[11]=7;auto expected=actual;
+                for(unsigned n=0;n<3;++n)execute_one(expected,branch_memory,decode(branch_memory.load<4>(expected.pc,exec_perm)));
+                engine.run(actual,branch_memory,3);same(actual,expected);
+            }
+        }
+    }
+#endif
+    struct Case {std::array<uint32_t,4> words;};
+    const Case cases[]{
+        {{{0x9100054a,0x8b09014b,0xca0d016c,0xf94000c5}}},
+        {{{0x1100054a,0x110043ff,0x2a0a03eb,0xf94000c5}}},
+        {{{0xf2a2468a,0xca09014b,0x9100056c,0xf94000c5}}},
+        {{{0x92401d6a,0xd348fd4b,0xb3401d6c,0xf94000c5}}},
+        {{{0x12001d5f,0x110007eb,0x33001d6b,0xf94000c5}}},
+        {{{0xb100054a,0xeb09015f,0xea09014b,0xf94000c5}}},
+        {{{0x3100054a,0x72001d5f,0x1100056b,0xf94000c5}}},
+    };
+    for(const auto &test:cases) {
+        // A fault after the pure sequence tests state publication and prefix.
+        Memory memory(1<<20);map(memory,test.words.data(),test.words.size());
+        auto graph=build_graph(0x10000,memory);
+        const auto &block=*graph->entries.at(0x10000);
+        if(!is_guest_aot_entry(block.code[2].entry)) {
+            require(!std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"),"guest AOT fixture was not installed");
+            continue;
+        }
+        ExecutionEngine engine;
+        for(unsigned seed=0;seed<32;++seed)for(unsigned budget=0;budget<=5;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.sp=0xfedcba9876540000ull+seed;
+            uint64_t state=0x9e3779b97f4a7c15ull+seed;
+            for(auto &value:actual.x) {state^=state<<13;state^=state>>7;state^=state<<17;value=state;}
+            actual.x[6]=0x30000;actual.nzcv=seed&15;auto expected=actual;
+            bool reference_fault=false,actual_fault=false;unsigned completed=0;
+            try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+            catch(const MemoryFault &) {reference_fault=true;}
+            const auto before=engine.executed_instructions;
+            try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+            require(reference_fault==actual_fault,"guest AOT fault mismatch");same(actual,expected);
+            require(engine.executed_instructions-before==completed,"guest AOT retirement mismatch");
+        }
+        memory.store<4>(0x10000,0x9100094a); // add x10,x10,#2
+        CpuState actual;actual.pc=0x10000;actual.x[10]=123;auto expected=actual;
+        for(unsigned n=0;n<3;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        engine.run(actual,memory,3);same(actual,expected);
+    }
+    {
+        const uint32_t words[]{0x91000529,0x9100054a,0x9100056b,0x9100058c,
+                               0x910005ad,0x910005ce,0x910005ef,0x91000610,
+                               0x91000631,0x91000652,0x91000529,0x9100054a,0xf94000c5};
+        Memory memory(1<<20);map(memory,words,std::size(words));
+        auto graph=build_graph(0x10000,memory);
+        const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==12,"long guest AOT fixture was not installed");
+        if(length==12) {
+            ExecutionEngine engine;
+            for(unsigned seed=0;seed<32;++seed)for(unsigned budget=0;budget<=14;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=0x30000;actual.nzcv=seed&15;
+                for(unsigned n=9;n<=18;++n)actual.x[n]=UINT64_MAX-seed*n;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"long guest AOT fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"long guest AOT retirement mismatch");
+            }
+        }
+    }
+    // The first fixture sequence appears after a constant-folded producer.
+    const uint32_t folded[]{0xd280008a,0x9100054a,0x8b09014b,0xca0d016c,0xf94000c5};
+    Memory memory(1<<20);map(memory,folded,std::size(folded));
+    auto graph=build_graph(0x10000,memory);
+    const auto &block=*graph->entries.at(0x10000);
+    require(block.instructions[1].constant_result,"guest AOT folded fixture was not optimized");
+    bool folded_installed=false;
+    for(const auto &op:block.code) {
+        const auto info=operation_info(op);
+        if(info.node && info.node->instruction.raw==0x9100054a) {
+#if OPERIT_ARM64_GUEST_AOT_FOLDED
+            folded_installed=is_guest_aot_entry(op.entry);
+#else
+            require(op.entry==static_entry(StaticCode::Move,64,6,7,7,0),"guest AOT installed into a folded block");
+#endif
+        }
+    }
+#if OPERIT_ARM64_GUEST_AOT_FOLDED
+    if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(folded_installed,"folded AOT fixture was not installed");
+    if(folded_installed) {
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<2;++pass) {
+            // Changing the folded producer forces validation and rebuilding.
+            if(pass)memory.store<4>(0x10000,0xd28000ea);
+            for(unsigned seed=0;seed<32;++seed)for(unsigned budget=0;budget<=5;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=0x30000;actual.nzcv=seed&15;
+                for(unsigned n=0;n<31;++n)if(n!=6)actual.x[n]=UINT64_MAX-seed*(n+1);
+                auto expected=actual;unsigned completed=0;bool reference_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {reference_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(reference_fault==actual_fault,"folded AOT fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"folded AOT retirement mismatch");
+            }
+        }
+    }
+    for(const uint32_t address:{0x1000004au,0xb000000au})for(const uint64_t base:{0x10000ull,0x21000ull}) {
+        const uint32_t words[]{address,0x9100054b,0xf94000c5};
+        Memory address_memory(1<<20);address_memory.set_parallel_access(false);
+        address_memory.map(base,page_size,read_perm|write_perm|exec_perm);
+        address_memory.copy_in(base,words,sizeof(words));
+        const auto address_graph=build_graph(base,address_memory);
+        const auto &address_block=*address_graph->entries.at(base);
+        require(address_block.instructions[0].constant_result && address_block.instructions[1].constant_result,
+                "address fixture was not folded");
+        const bool installed=guest_aot_entry_length(address_block.code[2].entry)==2;
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"address AOT fixture was not installed");
+        if(installed) {
+            ExecutionEngine engine;
+            for(unsigned seed=0;seed<16;++seed)for(unsigned budget=0;budget<=3;++budget) {
+                CpuState actual;actual.pc=base;actual.x[6]=0x30000;actual.x[10]=UINT64_MAX-seed;
+                actual.x[11]=seed;actual.nzcv=seed;auto expected=actual;
+                unsigned completed=0;bool reference_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,address_memory,decode(address_memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {reference_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,address_memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(reference_fault==actual_fault,"address AOT fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"address AOT retirement mismatch");
+            }
+        }
+    }
+    {
+        const uint32_t words[]{0xf94000cb,0x1000004a,0x9100054b,0x14000000};
+        Memory address_memory(1<<20);map(address_memory,words,std::size(words));
+        address_memory.map(0x20000,page_size,read_perm|write_perm);
+        address_memory.store<8>(0x20000,0x123456789abcdef0ull);
+        const auto address_graph=build_graph(0x10000,address_memory);
+        const auto &address_block=*address_graph->entries.at(0x10000);
+        const bool installed=guest_aot_entry_length(address_block.code[2].entry)==3;
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"post-load address AOT fixture was not installed");
+        if(installed) {
+            ExecutionEngine engine;
+            for(const uint64_t address:{0x20000ull,0x30000ull})for(unsigned budget=0;budget<=4;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=address;actual.x[10]=99;actual.x[11]=77;
+                auto expected=actual;unsigned completed=0;bool reference_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,address_memory,decode(address_memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {reference_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,address_memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(reference_fault==actual_fault,"post-load address AOT fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"post-load address AOT retirement mismatch");
+            }
+        }
+    }
+#else
+    (void)folded_installed;
+#endif
+    {
+        // A folded instruction outside the replacement window must not
+        // prevent the following unchanged operations from being translated.
+        const uint32_t words[]{0xd2800090,0x9100054a,0x8b09014b,0xca0d016c,0xf94000c5};
+        Memory partial_memory(1<<20);map(partial_memory,words,std::size(words));
+        auto partial_graph=build_graph(0x10000,partial_memory);
+        const auto &partial=*partial_graph->entries.at(0x10000);
+        require(partial.instructions[0].constant_result,"partial AOT fixture was not optimized");
+        bool installed=false;
+        for(const auto &op:partial.code) {
+            const auto info=operation_info(op);
+            if(info.node && info.pc==0x10004 && is_guest_aot_entry(op.entry))installed=true;
+        }
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"partial AOT fixture was not installed");
+        if(installed) {
+            ExecutionEngine engine;
+            for(unsigned seed=0;seed<32;++seed)for(unsigned budget=0;budget<=6;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=0x30000;actual.nzcv=seed&15;
+                for(unsigned n=0;n<31;++n)if(n!=6)actual.x[n]=UINT64_MAX-seed*(n+1);
+                auto expected=actual;unsigned completed=0;bool reference_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,partial_memory,decode(partial_memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {reference_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,partial_memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(reference_fault==actual_fault,"partial AOT fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"partial AOT retirement mismatch");
+            }
+        }
+    }
+    {
+        // An eliminated write before the window has no StaticOperation; the
+        // following sequence must still enter through its own metadata.
+        const uint32_t words[]{0xd2800090,0xd28000b0,0x9100054a,0x8b09014b,0xca0d016c,0xf94000c5};
+        Memory partial_memory(1<<20);map(partial_memory,words,std::size(words));
+        auto partial_graph=build_graph(0x10000,partial_memory);
+        const auto &partial=*partial_graph->entries.at(0x10000);
+        require(partial.instructions[0].dead_result,"partial AOT dead-write fixture was not optimized");
+        bool installed=false;
+        for(const auto &op:partial.code) {
+            const auto info=operation_info(op);
+            if(info.node && info.pc==0x10008 && is_guest_aot_entry(op.entry))installed=true;
+        }
+        if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(installed,"partial AOT dead-write fixture was not installed");
+        if(installed) {
+            ExecutionEngine engine;
+            for(unsigned budget=0;budget<=7;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[6]=0x30000;
+                actual.x[9]=9;actual.x[10]=10;actual.x[13]=13;auto expected=actual;
+                unsigned completed=0;bool reference_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,partial_memory,decode(partial_memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {reference_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,partial_memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(reference_fault==actual_fault,"partial AOT dead-write fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"partial AOT dead-write retirement mismatch");
+            }
+        }
+    }
+    const uint32_t memory_words[]{0x9100054a,0xf94000cb,0x8b0a016c,0xf90004cc,0x14000000};
+    for(const uint64_t address:{0x20000ull,0x20ff8ull,0x20ffcull}) {
+        Memory actual_memory(1<<20),expected_memory(1<<20);
+        for(auto *m:{&actual_memory,&expected_memory}) {
+            map(*m,memory_words,std::size(memory_words));
+            m->map(0x20000,page_size,read_perm|write_perm);
+            m->store<8>(0x20000,0x123456789abcdef0ull);
+            m->store<8>(0x20ff8,0xfedcba9876543210ull);
+        }
+        auto memory_graph=build_graph(0x10000,actual_memory);
+        const auto &memory_block=*memory_graph->entries.at(0x10000);
+        if(!is_guest_aot_entry(memory_block.code[2].entry)) {
+            require(!std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"),"guest AOT memory fixture was not installed");
+            continue;
+        }
+        ExecutionEngine engine;
+        for(unsigned budget=0;budget<=5;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.x[6]=address;actual.x[10]=0x1234567890ull;
+            actual.nzcv=9;auto expected=actual;bool expected_fault=false,actual_fault=false;unsigned completed=0;
+            try {for(;completed<budget;++completed)execute_one(expected,expected_memory,decode(expected_memory.load<4>(expected.pc,exec_perm)));}
+            catch(const MemoryFault &) {expected_fault=true;}
+            const auto before=engine.executed_instructions;
+            try {engine.run(actual,actual_memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+            require(actual_fault==expected_fault,"guest AOT memory fault mismatch");same(actual,expected);
+            require(engine.executed_instructions-before==completed,"guest AOT memory retirement mismatch");
+            require(actual_memory.load<8>(0x20000)==expected_memory.load<8>(0x20000) &&
+                    actual_memory.load<8>(0x20008)==expected_memory.load<8>(0x20008) &&
+                    actual_memory.load<8>(0x20ff8)==expected_memory.load<8>(0x20ff8),"guest AOT memory contents mismatch");
+        }
+    }
+    {
+        // The load overwrites its own dirty address register with a W result.
+        // Test cache hits, fallback, and faults with each retirement budget.
+        const uint32_t words[]{0x9100214a,0xb940014a,0x9100054b,0x14000000};
+        for(bool parallel:{false,true})for(uint64_t address:{0x20000ull,0x20fffull,0x30000ull}) {
+            Memory actual_memory(1<<20),expected_memory(1<<20);
+            for(auto *m:{&actual_memory,&expected_memory}) {
+                map(*m,words,std::size(words));m->map(0x20000,page_size,read_perm|write_perm);
+                m->store<4>(0x20000,0x87654321);m->set_parallel_access(parallel);
+            }
+            const auto graph=build_graph(0x10000,actual_memory);
+            const auto length=guest_aot_entry_length(graph->entries.at(0x10000)->code[2].entry);
+            if(std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"))require(length==3,"guest AOT alias fixture was not installed");
+            if(length!=3)continue;
+            ExecutionEngine engine;
+            for(unsigned pass=0;pass<2;++pass)for(unsigned budget=0;budget<=4;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[10]=address-8;actual.x[11]=UINT64_MAX;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,expected_memory,decode(expected_memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,actual_memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"guest AOT aliased load fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"guest AOT aliased load retirement mismatch");
+            }
+        }
+    }
+    for(unsigned size:{1u,2u,4u,8u})for(bool parallel:{false,true})for(bool readonly:{false,true}) {
+        const auto shift=unsigned(__builtin_ctz(size));
+        const uint32_t words[]{0x394000cbu|(shift<<30),0x390004cbu|(shift<<30),0x14000000};
+        Memory actual_memory(1<<20),expected_memory(1<<20);
+        for(auto *m:{&actual_memory,&expected_memory}) {
+            map(*m,words,std::size(words));m->map(0x20000,page_size,read_perm|write_perm);
+            m->store<8>(0x20000,0xfedcba9876543210ull);m->store<8>(0x20008,0x123456789abcdef0ull);
+            if(readonly)m->protect(0x20000,page_size,read_perm);
+            m->set_parallel_access(parallel);
+        }
+        auto graph=build_graph(0x10000,actual_memory);
+        if(!is_guest_aot_entry(graph->entries.at(0x10000)->code[2].entry)) {
+            require(!std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"),"guest AOT width fixture was not installed");
+            continue;
+        }
+        ExecutionEngine engine;
+        for(unsigned budget=0;budget<=3;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.x[6]=0x20000;actual.x[11]=UINT64_MAX;actual.nzcv=7;
+            auto expected=actual;bool expected_fault=false,actual_fault=false;unsigned completed=0;
+            uint64_t expected_address=0,actual_address=0;unsigned expected_permissions=0,actual_permissions=0;
+            try {for(;completed<budget;++completed)execute_one(expected,expected_memory,decode(expected_memory.load<4>(expected.pc,exec_perm)));}
+            catch(const MemoryFault &e) {expected_fault=true;expected_address=e.address;expected_permissions=e.permissions;}
+            const auto before=engine.executed_instructions;
+            try {engine.run(actual,actual_memory,budget);}
+            catch(const MemoryFault &e) {actual_fault=true;actual_address=e.address;actual_permissions=e.permissions;}
+            require(actual_fault==expected_fault && actual_address==expected_address && actual_permissions==expected_permissions,
+                    "guest AOT width or permission fault mismatch");same(actual,expected);
+            require(engine.executed_instructions-before==completed,"guest AOT width retirement mismatch");
+            require(actual_memory.load<8>(0x20000)==expected_memory.load<8>(0x20000) &&
+                    actual_memory.load<8>(0x20008)==expected_memory.load<8>(0x20008),"guest AOT width contents mismatch");
+        }
+    }
+    {
+        const std::array<std::array<uint32_t,3>,5> pairs{{
+            {{0xa94030cb,0xa90130cb,0x14000000}},
+            {{0x294030cb,0x290130cb,0x14000000}},
+            {{0x694030cb,0x9100056b,0x14000000}},
+            {{0xa9c130cb,0xa88130cb,0x14000000}},
+            {{0xa8c130c6,0x9100056b,0x14000000}},
+        }};
+        for(const auto &words:pairs)for(bool parallel:{false,true})for(bool readonly:{false,true})
+        for(uint64_t address:{0x20000ull,0x20ff0ull,0x20ff8ull,0x21000ull})for(unsigned budget=0;budget<=3;++budget) {
+            Memory actual_memory(1<<20),expected_memory(1<<20);
+            for(auto *m:{&actual_memory,&expected_memory}) {
+                map(*m,words.data(),words.size());m->map(0x20000,page_size,read_perm|write_perm);
+                for(uint64_t p:{0x20000ull,0x20008ull,0x20010ull,0x20018ull,0x20ff0ull,0x20ff8ull})
+                    m->store<8>(p,0xdeadbeef80000000ull+p);
+                if(readonly)m->protect(0x20000,page_size,read_perm);
+                m->set_parallel_access(parallel);
+            }
+            auto graph=build_graph(0x10000,actual_memory);
+            if(!is_guest_aot_entry(graph->entries.at(0x10000)->code[2].entry)) {
+                require(!std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"),"guest AOT pair fixture was not installed");
+                continue;
+            }
+            CpuState actual;actual.pc=0x10000;actual.x[6]=address;actual.x[11]=71;actual.x[12]=83;actual.nzcv=9;
+            auto expected=actual;bool expected_fault=false,actual_fault=false;unsigned completed=0;
+            uint64_t expected_address=0,actual_address=0;unsigned expected_permissions=0,actual_permissions=0;
+            MemoryFault::Kind expected_kind{},actual_kind{};
+            try {for(;completed<budget;++completed)execute_one(expected,expected_memory,decode(expected_memory.load<4>(expected.pc,exec_perm)));}
+            catch(const MemoryFault &e) {expected_fault=true;expected_address=e.address;expected_permissions=e.permissions;expected_kind=e.kind;}
+            ExecutionEngine engine;
+            try {engine.run(actual,actual_memory,budget);}
+            catch(const MemoryFault &e) {actual_fault=true;actual_address=e.address;actual_permissions=e.permissions;actual_kind=e.kind;}
+            require(actual_fault==expected_fault && actual_address==expected_address && actual_permissions==expected_permissions &&
+                    actual_kind==expected_kind,"guest AOT pair fault mismatch");same(actual,expected);
+            require(engine.executed_instructions==completed,"guest AOT pair retirement mismatch");
+            for(uint64_t p:{0x20000ull,0x20008ull,0x20010ull,0x20018ull,0x20ff0ull,0x20ff8ull})
+                require(actual_memory.load<8>(p)==expected_memory.load<8>(p),"guest AOT pair memory mismatch");
+        }
+    }
+    for(bool parallel:{false,true}) {
+        std::unique_ptr<FILE,decltype(&std::fclose)> file(std::tmpfile(),&std::fclose);
+        require(bool(file) && !ftruncate(fileno(file.get()),page_size),"guest AOT pair file fixture");
+        const uint32_t values[]{0x80000000u,0xffffffffu};
+        require(pwrite(fileno(file.get()),values,sizeof(values),0)==sizeof(values),"guest AOT pair file write");
+        const uint32_t words[]{0x694030cb,0x9100056b,0x14000000};
+        Memory memory(4*page_size);map(memory,words,std::size(words));Memory::Backing backing;
+        memory.map_file(0x40000,page_size,read_perm,fileno(file.get()),backing);memory.set_parallel_access(parallel);
+        auto graph=build_graph(0x10000,memory);
+        if(!is_guest_aot_entry(graph->entries.at(0x10000)->code[2].entry)) {
+            require(!std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"),"guest AOT pair file fixture was not installed");
+            continue;
+        }
+        ExecutionEngine engine;CpuState cpu;cpu.pc=0x10000;cpu.x[6]=0x40000;
+        engine.run(cpu,memory,3);
+        require(cpu.x[11]==0xffffffff80000001ull && cpu.x[12]==UINT64_MAX,"guest AOT signed pair file read mismatch");
+        require(!ftruncate(fileno(file.get()),0),"guest AOT pair file truncate");
+        cpu.pc=0x10000;const auto before=engine.executed_instructions;
+        try {engine.run(cpu,memory,3);require(false,"guest AOT pair missed file truncation");}
+        catch(const MemoryFault &fault) {require(fault.address==0x40000 && fault.kind==MemoryFault::Kind::Bus,"guest AOT pair file fault mismatch");}
+        require(cpu.pc==0x10000 && engine.executed_instructions==before,"guest AOT pair file fault prefix");
+    }
+    // A generated store modifies an instruction in the block currently being
+    // executed. The next entry must observe the new code, including when the
+    // store falls back to the normal invalidation path.
+    for(bool parallel:{false,true}) {
+        const uint32_t words[]{0xb94000cb,0xb90004cb,0x14000000};
+        Memory actual_memory(1<<20),expected_memory(1<<20);
+        for(auto *m:{&actual_memory,&expected_memory}) {
+            map(*m,words,std::size(words));m->set_parallel_access(parallel);
+        }
+        auto graph=build_graph(0x10000,actual_memory);
+        if(!is_guest_aot_entry(graph->entries.at(0x10000)->code[2].entry)) {
+            require(!std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"),"guest AOT self-modifying fixture was not installed");
+            continue;
+        }
+        ExecutionEngine engine;CpuState actual;actual.x[6]=0x10000;auto expected=actual;
+        for(unsigned pass=0;pass<2;++pass) {
+            actual.pc=expected.pc=0x10000;
+            for(unsigned n=0;n<3;++n)execute_one(expected,expected_memory,decode(expected_memory.load<4>(expected.pc,exec_perm)));
+            const auto before=engine.executed_instructions;
+            engine.run(actual,actual_memory,3);same(actual,expected);
+            require(engine.executed_instructions-before==3,"guest AOT self-modifying retirement mismatch");
+            require(actual_memory.load<4>(0x10004)==expected_memory.load<4>(0x10004) &&
+                    actual_memory.load<4>(0x10004)==words[0],"guest AOT self-modifying code mismatch");
+        }
+    }
+    for(bool parallel:{false,true}) {
+        std::unique_ptr<FILE,decltype(&std::fclose)> file(std::tmpfile(),&std::fclose);
+        require(bool(file) && !ftruncate(fileno(file.get()),page_size),"guest AOT file fixture");
+        uint64_t value=37;require(pwrite(fileno(file.get()),&value,8,0)==8,"guest AOT file write");
+        const uint32_t words[]{0xf94000cb,0x9100056c,0x17fffffe};
+        Memory memory(4*page_size);map(memory,words,std::size(words));Memory::Backing backing;
+        memory.map_file(0x40000,page_size,read_perm,fileno(file.get()),backing);memory.set_parallel_access(parallel);
+        auto graph=build_graph(0x10000,memory);
+        if(!is_guest_aot_entry(graph->entries.at(0x10000)->code[2].entry)) {
+            require(!std::getenv("OPERIT_TEST_REQUIRE_GUEST_AOT"),"guest AOT file fixture was not installed");
+            continue;
+        }
+        ExecutionEngine engine;CpuState cpu;cpu.pc=0x10000;cpu.x[6]=0x40000;
+        engine.run(cpu,memory,300);require(cpu.x[11]==37 && cpu.x[12]==38,"guest AOT file read mismatch");
+        value=91;require(pwrite(fileno(file.get()),&value,8,0)==8,"guest AOT file modification");
+        cpu.pc=0x10000;engine.run(cpu,memory,3);require(cpu.x[11]==91 && cpu.x[12]==92,"guest AOT stale file read");
+        require(!ftruncate(fileno(file.get()),0),"guest AOT file truncate");
+        cpu.pc=0x10000;const auto before=engine.executed_instructions;
+        try {engine.run(cpu,memory,3);require(false,"guest AOT missed file truncation");}
+        catch(const MemoryFault &fault) {require(fault.address==0x40000 && fault.kind==MemoryFault::Kind::Bus,"guest AOT file fault mismatch");}
+        require(cpu.pc==0x10000 && engine.executed_instructions==before,"guest AOT file fault prefix");
+    }
+}
+#endif
+#if OPERIT_ARM64_PROFILE_SUPERBLOCKS
+#if OPERIT_ARM64_GUEST_AOT
+void combined_aot_superblock_paths() {
+    const uint32_t words[]{0x9100054a,0x8b09014b,0xca0d016c,
+                           0xa9425bf5,0xa94363f7,0x14000000};
+    for(bool parallel:{false,true}) {
+        Memory memory(1<<20),reference(1<<20);
+        map(memory,words,std::size(words));map(reference,words,std::size(words));
+        for(auto *m:{&memory,&reference}) {
+            m->map(0x20000,page_size,read_perm|write_perm);
+            m->store<8>(0x20ff0,11);m->store<8>(0x20ff8,22);m->set_parallel_access(parallel);
+        }
+        const auto graph=build_graph(0x10000,memory);
+        const auto &code=graph->entries.at(0x10000)->code;
+        const bool installed=guest_aot_entry_length(code[2].entry)==3 &&
+                             is_profile_superblock_entry(code[5].entry);
+        if(std::getenv("OPERIT_TEST_REQUIRE_COMBINED_AOT"))require(installed,"combined AOT and superblock not installed");
+        if(!installed)continue;
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<2;++pass) {
+            if(pass)for(auto *m:{&memory,&reference})m->store<4>(0x10010,0xd503201f);
+            for(unsigned budget=0;budget<=6;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.sp=0x20fd0;actual.x[9]=7;
+                actual.x[10]=13;actual.x[11]=17;actual.x[12]=19;actual.x[13]=23;actual.nzcv=9;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,reference,decode(reference.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"combined AOT fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"combined AOT retirement mismatch");
+            }
+        }
+    }
+}
+#endif
+void profile_superblock_paths() {
+    // The training profile contains this pair; other profiles may not.
+    const uint32_t words[]{0xa9425bf5,0xa94363f7,0x14000000};
+    Memory memory(1<<20);map(memory,words,std::size(words));
+    memory.map(0x20000,page_size,read_perm|write_perm);
+    memory.store<8>(0x20ff0,11);memory.store<8>(0x20ff8,22);
+    auto graph=build_graph(0x10000,memory);
+    const auto &block=*graph->entries.at(0x10000);
+    const auto *plain=static_entry(StaticCode::PairLoad,64,6,5,6,0);
+    if(block.code[2].entry==plain) {
+        require(!std::getenv("OPERIT_TEST_REQUIRE_PROFILE_SUPERBLOCK"),"profiled pair was not installed");
+        return;
+    }
+    ExecutionEngine engine;
+    // Budget 3 admits the whole block, so the second load faults inside the
+    // generated sequence; smaller budgets exercise the reference suffix.
+    for(unsigned budget=0;budget<=3;++budget) {
+        CpuState actual;actual.pc=0x10000;actual.sp=0x20fd0;auto expected=actual;
+        bool reference_fault=false,actual_fault=false;
+        try {for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+        catch(const MemoryFault &) {reference_fault=true;}
+        const auto retired=engine.executed_instructions;
+        try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+        require(reference_fault==actual_fault,"profiled pair fault mismatch");same(actual,expected);
+        require(engine.executed_instructions-retired==std::min(budget,1u),"profiled pair retirement mismatch");
+    }
+    // Replacing the first instruction must invalidate any installed sequence.
+    memory.store<4>(0x10000,0xd503201f);
+    CpuState actual;actual.pc=0x10000;actual.sp=0x20fd0;auto expected=actual;
+    execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+    engine.run(actual,memory,1);same(actual,expected);
+}
+#endif
+// These are semantic differential tests: joins, backedges, entry state changes,
+// and exact fault prefixes must agree with the independent instruction path.
+void global_value_paths() {
+    const uint32_t constant_join[]{
+        0xd28000e3, // mov x3,#7
+        0xb4000060, // cbz x0,+12
+        0x91000421, // add x1,x1,#1
+        0x14000002, // b +8
+        0x91000821, // add x1,x1,#2
+        0x91001464, // add x4,x3,#5 (constant across the diamond)
+        0x14000000, // b .
+    };
+    const uint32_t unequal_join[]{
+        0xb4000060,0xd28000e3,0x14000002,0xd2800103,0x91001464,0x14000000,
+    };
+    const uint32_t expressions[]{
+        0x8b0600a3, // add x3,x5,x6
+        0x14000001, // b +4
+        0x8b0600a4, // add x4,x5,x6 (available in x3)
+        0xcb0600a7, // sub x7,x5,x6 (a different expression)
+        0x0b0600a8, // add w8,w5,w6 (different upper-half semantics)
+        0x14000000,
+    };
+    const uint32_t loop_phi[]{
+        0xd28000e3,0x14000001,0x91000463,0x91001464,0x17fffffe,
+    };
+    const uint32_t unavailable[]{
+        0x8b0600a3, // dead x3 assignment must not become a copy source
+        0x8b0600a4,0xd2800023,0x14000000,
+    };
+    const uint32_t zero_sp[]{
+        0xaa1f03e3, // mov x3,xzr; ZR must never be identified with SP
+        0x910003e4, // mov x4,sp
+        0x91000485,0x14000000,
+    };
+    const uint32_t flags[]{
+        0xf100003f, // cmp x1,#0
+        0x14000001,
+        0x9a820023, // csel x3,x1,x2,eq
+        0xf100005f, // cmp x2,#0
+        0x9a820024,0x14000000,
+    };
+    const uint32_t call_return[]{
+        0xd28000e3, // mov x3,#7
+        0x94000003, // bl +12
+        0x91001464, // must see the callee's x3, not pre-call #7
+        0x14000000,
+        0xd2800163, // mov x3,#11
+        0xd65f03c0, // ret
+    };
+    const std::vector<std::vector<uint32_t>> programs{
+        {std::begin(constant_join),std::end(constant_join)},
+        {std::begin(unequal_join),std::end(unequal_join)},
+        {std::begin(expressions),std::end(expressions)},
+        {std::begin(loop_phi),std::end(loop_phi)},
+        {std::begin(unavailable),std::end(unavailable)},
+        {std::begin(zero_sp),std::end(zero_sp)},
+        {std::begin(flags),std::end(flags)},
+        {std::begin(call_return),std::end(call_return)},
+    };
+    for(const auto &words:programs) {
+        Memory memory(1<<20);map(memory,words.data(),words.size());ExecutionEngine engine;
+        // Reuse one engine across arbitrary entry points, input values, and
+        // budgets; this specifically exercises cached interior entry safety.
+        for(unsigned input=0;input<5;++input)for(unsigned entry=0;entry<words.size();++entry)
+            for(unsigned budget=0;budget<35;++budget) {
+                CpuState actual;actual.pc=0x10000+entry*4;actual.sp=0x80000+input*16;
+                for(unsigned r=0;r<31;++r)actual.x[r]=0x100000001ull*(r+input);
+                actual.x[0]=input&1;actual.x[30]=0x1000c;actual.nzcv=input;
+                auto expected=actual;
+                for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+                require(engine.run(actual,memory,budget).instructions==budget,"SSA prefix retirement");
+                try {same(actual,expected);}catch(...) {
+                    std::fprintf(stderr,"SSA program=%08x input=%u entry=%u budget=%u pc=%llx expected=%llx\n",
+                        words.front(),input,entry,budget,(unsigned long long)actual.pc,(unsigned long long)expected.pc);
+                    for(unsigned r=0;r<31;++r)if(actual.x[r]!=expected.x[r])std::fprintf(stderr,"x%u=%llx expected=%llx\n",r,(unsigned long long)actual.x[r],(unsigned long long)expected.x[r]);
+                    throw;
+                }
+            }
+    }
+#if OPERIT_ARM64_GLOBAL_VALUES
+    Memory constants(1<<20);map(constants,constant_join,std::size(constant_join));
+    auto cg=build_graph(0x10000,constants);
+    require(cg->ssa_constants && cg->root_entry_only,"cross-block constant propagation inactive");
+    Memory cse(1<<20);map(cse,expressions,std::size(expressions));auto eg=build_graph(0x10000,cse);
+    require(eg->cse_copies && eg->root_entry_only,"global CSE inactive");
+#endif
+}
+void randomized_value_paths() {
+    uint64_t seed=0x6c22f3ca1918ull;
+    const auto random=[&]() {seed^=seed<<13;seed^=seed>>7;seed^=seed<<17;return seed;};
+    const unsigned registers[]{0,1,2,3,4,5,6,7,8,9,23,30};
+    const auto random_register=[&]() {return registers[random()%std::size(registers)];};
+    for(unsigned trial=0;trial<32;++trial) {
+        std::vector<uint32_t> words;
+        for(unsigned b=0;b<8;++b) {
+            const auto rn=random_register(),rm=random_register(),rd=random_register();
+            const uint32_t opcodes[]{0x8b000000u,0xcb000000u,0x0b000000u,0x4b000000u,
+                0xca000000u,0x4a000000u,0xaa000000u,0x8a000000u,0xca200000u,
+                0x9a000000u,0xda000000u,0x9b007c00u,0x9ac02000u,0x9ac00800u,
+                0x8b000400u,0xab000000u,0xeb000000u};
+            const auto opcode=opcodes[random()%std::size(opcodes)];
+            words.push_back(opcode|(rm<<16)|(rn<<5)|rd);
+            words.push_back(0xb4000040u); // cbz x0,+8
+            words.push_back(opcode|(rm<<16)|(rn<<5)|random_register());
+            const auto immediate=unsigned(random()%32),source=random_register(),dest=random_register();
+            words.push_back(0x91000000u|(immediate<<10)|(source<<5)|dest);
+        }
+        words.push_back(0x14000000u|((uint32_t(-int(words.size())))&0x3ffffffu));
+        Memory memory(1<<20);map(memory,words.data(),words.size());ExecutionEngine engine;
+        for(unsigned run=0;run<16;++run) {
+            CpuState actual;actual.pc=0x10000;actual.sp=0x90000;actual.nzcv=random()&15;
+            for(auto &x:actual.x)x=random();actual.x[0]=run&1;
+            auto expected=actual;const auto budget=100+unsigned(random()%300);
+            for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            require(engine.run(actual,memory,budget).instructions==budget,"random SSA retirement");same(actual,expected);
+        }
+    }
+}
+void scheduled_load_paths() {
+    // Reverse-address loads separated by dependent arithmetic: fetching the
+    // second value early is safe only if its destination is not used there.
+    const uint32_t words[]{0xf94004a0,0x91000402,0xf94000a1,0x17fffffd};
+    for(bool parallel:{false,true}) {
+        Memory memory(1<<20);map(memory,words,std::size(words));memory.map(0x20000,page_size*2,read_perm|write_perm);
+        memory.store<8>(0x20000,0x123456789abcdef0ull);memory.store<8>(0x20008,0xfedcba9876543210ull);
+        memory.set_parallel_access(parallel);ExecutionEngine engine;
+        for(unsigned budget=0;budget<40;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.x[5]=0x20000;auto expected=actual;
+            for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            require(engine.run(actual,memory,budget).instructions==budget,"scheduled load prefix retirement");same(actual,expected);
+        }
+#if OPERIT_ARM64_MEMORY_SCHEDULING
+        auto graph=build_graph(0x10000,memory);require(graph->scheduled_loads==1,"load scheduler inactive");
+#endif
+#if OPERIT_ARM64_MEMORY_SCHEDULING
+        if(!parallel) {
+            ExecutionEngine hot;CpuState cpu;cpu.pc=0x10000;cpu.x[5]=0x20000;
+            hot.run(cpu,memory,4000);
+            require(hot.slow_calls<8,"scheduled load guard never warmed");
+        }
+#endif
+        // Warm the cache, then exercise reversed loads across a page boundary.
+        CpuState across;across.pc=0x10000;across.x[5]=0x20ff8;auto expected=across;
+        for(unsigned n=0;n<4;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        engine.run(across,memory,4);same(across,expected);
+    }
+    // Ascending loads: the second one faults. The first destination and the
+    // intervening arithmetic must be visible, with precise PC and retirement.
+    const uint32_t fault_words[]{0xf94000a0,0x91000402,0xf94004a1,0x14000000};
+    for(bool parallel:{false,true}) {
+        Memory memory(1<<20);map(memory,fault_words,std::size(fault_words));memory.map(0x20000,page_size,read_perm|write_perm);
+        memory.store<8>(0x20ff8,123);memory.set_parallel_access(parallel);ExecutionEngine engine;
+        CpuState actual;actual.pc=0x10000;actual.x[5]=0x20ff8;auto expected=actual;
+        bool reference_fault=false,actual_fault=false;
+        try {for(unsigned n=0;n<4;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+        catch(const MemoryFault &) {reference_fault=true;}
+        try {engine.run(actual,memory,4);}catch(const MemoryFault &) {actual_fault=true;}
+        require(reference_fault && actual_fault,"scheduled load lost fault");same(actual,expected);
+        require(engine.executed_instructions==2,"scheduled load fault retirement");
+    }
+    // Signed unscaled offsets straddle zero in the decoded immediate. Sort
+    // them as signed offsets, not as unsigned addresses.
+    for(bool reverse:{false,true})for(unsigned width:{32u,64u}) {
+        const uint32_t negative[]{(width==64 ? 0xf85f80a0u:0xb85fc0a0u),0x91000402u,
+            (width==64 ? 0xf94000a1u:0xb94000a1u),0x17fffffdu};
+        std::vector<uint32_t> program(std::begin(negative),std::end(negative));
+        if(reverse) {std::swap(program[0],program[2]);program[0]=(program[0]&~31u)|0u;program[2]=(program[2]&~31u)|1u;}
+        Memory memory(1<<20);map(memory,program.data(),program.size());memory.map(0x20000,page_size,read_perm|write_perm);
+        memory.store<8>(0x20000,0xfedcba9876543210ull);memory.store<8>(0x20008,0x123456789abcdef0ull);
+        CpuState actual;actual.pc=0x10000;actual.x[5]=0x20008;auto expected=actual;ExecutionEngine engine;
+        for(unsigned n=0;n<40;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        engine.run(actual,memory,40);same(actual,expected);
+    }
+#if OPERIT_ARM64_GLOBAL_VALUES && OPERIT_ARM64_MEMORY_SCHEDULING
+    // CSE may introduce a copy source absent from the original read set.
+    // The scheduler must account for that dependency too.
+    const uint32_t copy_dependency[]{0x8b040061,0xf94000a0,0x8b040062,0xf94004a1,0x14000000};
+    Memory copied(1<<20);map(copied,copy_dependency,std::size(copy_dependency));auto cg=build_graph(0x10000,copied);
+    require(cg->cse_copies && !cg->scheduled_loads,"scheduler ignored a CSE copy dependency");
+#endif
+    // A second load that supplies an intervening operation, changes the base,
+    // or crosses a store must not be moved before it.
+    for(auto middle:{0x91000422u,0x910020a5u,0xf90004a2u}) {
+        const uint32_t dependent[]{0xf94000a0,middle,0xf94004a1,0x14000000};
+        Memory memory(1<<20);map(memory,dependent,std::size(dependent));auto graph=build_graph(0x10000,memory);
+        require(!graph->scheduled_loads,"dependent load was reordered");
+    }
+}
+
+void scheduled_file_loads() {
+    std::unique_ptr<FILE,decltype(&std::fclose)> file(std::tmpfile(),&std::fclose);
+    require(bool(file) && !ftruncate(fileno(file.get()),page_size),"scheduled file fixture");
+    const uint32_t words[]{0xf94004a0,0x91000402,0xf94000a1,0x17fffffd};
+    Memory reader(4*page_size),writer(2*page_size);map(reader,words,std::size(words));
+    Memory::Backing private_backing,shared_backing;shared_backing.shared=true;
+    reader.map_file(0x40000,page_size,read_perm,fileno(file.get()),private_backing);
+    writer.map_file(0x50000,page_size,read_perm|write_perm,fileno(file.get()),shared_backing);
+    for(bool parallel:{false,true}) {
+        reader.set_parallel_access(parallel);ExecutionEngine engine;
+        for(unsigned iteration=0;iteration<3;++iteration) {
+            writer.store<8>(0x50000,11+iteration);writer.store<8>(0x50008,17+iteration);
+            CpuState cpu;cpu.pc=0x10000;cpu.x[5]=0x40000;engine.run(cpu,reader,400);
+            require(cpu.x[0]==17+iteration && cpu.x[1]==11+iteration && cpu.x[2]==18+iteration,
+                "scheduled file load lost synchronized values");
+            require(memory_detail::AccessSynchronization::read_depth()==0,"scheduled file guard leaked reader gate");
+        }
+    }
 }
 void prefixes() {
     const uint32_t words[]={0xd28000a0,0x91000c01,0xf100203f,0x54000040,0x91000422,0x8b010040,0x17fffffa};
@@ -197,6 +1787,159 @@ void loops() {
     require(engine.slow_calls<5 && engine.materializations<5,"loop crosses C++ state boundary");
     memory.store<4>(0x10000,0x91000c00);cpu.pc=0x10000;engine.run(cpu,memory,3);require(cpu.x[0]==100003,"modified code executed stale operations");
 }
+void cached_graph_boundaries() {
+    // Two unrelated entries converge on one cached block. The second graph
+    // must link to it rather than re-decode its entire reachable subgraph.
+    const uint32_t words[]{0x14000008,0x14000007,0xd503201f,0xd503201f,
+                           0xd503201f,0xd503201f,0xd503201f,0xd503201f,
+                           0x91000400,0x14000000};
+    for(bool parallel:{false,true}) {
+        Memory memory(1<<20);map(memory,words,std::size(words));memory.set_parallel_access(parallel);
+        ExecutionEngine engine;CpuState cpu;cpu.pc=0x10000;
+        engine.run(cpu,memory,4);
+        require(cpu.x[0]==1,"first cached graph produced wrong result");
+        const auto before=engine.decoded_blocks;
+        cpu.pc=0x10004;engine.run(cpu,memory,4);
+        require(cpu.x[0]==2,"cached successor did not execute");
+        require(engine.decoded_blocks==before+1,"cached successor was compiled again");
+        // Once the target code changes, the cross-graph edge must validate and
+        // rebuild it instead of executing the old cached operations.
+        memory.store<4>(0x10020,0x91000c00);
+        cpu.pc=0x10004;engine.run(cpu,memory,4);
+        require(cpu.x[0]==5,"cached boundary retained stale target code");
+    }
+}
+void deferred_call_targets() {
+    const uint32_t caller[]{0x94000400,0x9100056b,0x14000000}; // bl 0x11000; add x11; b .
+    const uint32_t callee[]{0x9100054a,0xd65f03c0}; // add x10; ret
+    for(bool parallel:{false,true}) {
+        Memory memory(1<<20);map(memory,caller,std::size(caller));
+        memory.map(0x11000,page_size,read_perm|write_perm|exec_perm);
+        memory.copy_in(0x11000,callee,sizeof(callee));memory.set_parallel_access(parallel);
+        const auto eager=build_graph(0x10000,memory);
+        const auto deferred=build_graph(0x10000,memory,nullptr,nullptr,nullptr,GraphDiscoveryPolicy::DeferCallTargets);
+        require(eager->entries.count(0x11000)==1,"eager call target not discovered");
+        require(deferred->entries.count(0x11000)==0 && deferred->entries.count(0x10004)==1,
+                "deferred call discovery lost return continuation or compiled callee");
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<3;++pass) {
+            if(pass==1)memory.store<4>(0x11000,0x9100094a); // add x10,x10,#2
+            if(pass==2)memory.protect(0x11000,page_size,read_perm|write_perm);
+            for(unsigned budget=0;budget<=6;++budget) {
+                CpuState actual;actual.pc=0x10000;actual.x[10]=13;actual.x[11]=17;actual.x[30]=19;
+                auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                catch(const MemoryFault &) {expected_fault=true;}
+                const auto before=engine.executed_instructions;
+                try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                require(actual_fault==expected_fault,"deferred call target fault mismatch");same(actual,expected);
+                require(engine.executed_instructions-before==completed,"deferred call retirement mismatch");
+            }
+        }
+    }
+}
+void loop_call_discovery() {
+    const auto branch=[](uint64_t from,uint64_t to,bool link) {
+        return (link ? 0x94000000u:0x14000000u)|uint32_t(((to-from)>>2)&0x03ffffff);
+    };
+    const auto conditional=[](uint64_t from,uint64_t to) {
+        return 0xb5000000u|(uint32_t(((to-from)>>2)&0x7ffff)<<5); // cbnz x0
+    };
+    const uint32_t callee[]{0x9100054a,0xd65f03c0};
+    for(bool reverse:{false,true})for(bool parallel:{false,true}) {
+        Memory memory(1<<20);
+        // In the first layout the call is discovered before its backedge; in
+        // the second, a forward jump discovers the backedge before the call.
+        const uint32_t forward[]{branch(0x10000,0x11000,true),0xd1000400, // sub x0,x0,#1
+                                 conditional(0x10008,0x10000),branch(0x1000c,0x12000,true),0xd65f03c0};
+        const uint32_t backward[]{branch(0x10000,0x10010,false),branch(0x10004,0x11000,true),
+                                  branch(0x10008,0x12000,true),branch(0x1000c,0x10010,false),
+                                  conditional(0x10010,0x10004),branch(0x10014,0x13000,true),0xd65f03c0};
+        if(reverse)map(memory,backward,std::size(backward));else map(memory,forward,std::size(forward));
+        for(uint64_t address:{0x11000,0x12000,0x13000}) {
+            memory.map(address,page_size,read_perm|write_perm|exec_perm);
+            memory.copy_in(address,callee,sizeof(callee));
+        }
+        memory.set_parallel_access(parallel);
+        auto graph=build_graph(0x10000,memory,nullptr,nullptr,nullptr,GraphDiscoveryPolicy::DeferNonLoopCalls);
+        require(graph->entries.count(0x11000),"loop call target not retained");
+        require(graph->entries.count(0x12000)==size_t(reverse),"call range incorrectly retained or deferred");
+        require(!graph->entries.count(0x13000),"cold call target unexpectedly retained");
+        if(!reverse) {
+            ExecutionEngine engine;
+            for(unsigned pass=0;pass<3;++pass) {
+                if(pass==1)memory.store<4>(0x11000,0x9100094a);
+                if(pass==2)memory.protect(0x11000,page_size,read_perm|write_perm);
+                for(unsigned budget=0;budget<=20;++budget) {
+                    CpuState actual;actual.pc=0x10000;actual.x[0]=2;actual.x[10]=13;
+                    auto expected=actual;unsigned completed=0;bool expected_fault=false,actual_fault=false;
+                    try {for(;completed<budget;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+                    catch(const MemoryFault &) {expected_fault=true;}
+                    const auto before=engine.executed_instructions;
+                    try {engine.run(actual,memory,budget);}catch(const MemoryFault &) {actual_fault=true;}
+                    require(actual_fault==expected_fault,"loop call fault mismatch");same(actual,expected);
+                    require(engine.executed_instructions-before==completed,"loop call retirement mismatch");
+                }
+            }
+        }
+    }
+}
+#if OPERIT_ARM64_ADAPTIVE_CALLS
+void adaptive_call_paths() {
+    const uint32_t caller[]{0x94000400,0xd1000400,0xb5ffffc0,0x14000000}; // bl; sub; cbnz; b .
+    const uint32_t callee[]{0x9100054a,0xd65f03c0};
+    for(bool parallel:{false,true}) {
+        Memory memory(1<<20);map(memory,caller,std::size(caller));
+        memory.map(0x11000,page_size,read_perm|write_perm|exec_perm);
+        memory.copy_in(0x11000,callee,sizeof(callee));memory.set_parallel_access(parallel);
+        auto graph=build_graph(0x10000,memory,nullptr,[](const void *,uint64_t pc){return pc==0x11000;},nullptr,
+                               GraphDiscoveryPolicy::DeferCallTargets,
+                               [](const void *,uint64_t source,uint64_t target){return source==0x10000 && target==0x11000;},nullptr);
+        require(graph->entries.count(0x11000),"hot call did not override cached target boundary");
+        auto deferred=build_graph(0x10000,memory,nullptr,nullptr,nullptr,GraphDiscoveryPolicy::DeferCallTargets);
+        const unsigned threshold=unsigned(std::min<size_t>(std::max<size_t>(deferred->blocks.size(),1),256)*4096);
+        ExecutionEngine engine;CpuState actual;actual.pc=0x10000;actual.x[0]=threshold+200;actual.x[10]=3;
+        auto expected=actual;
+        for(unsigned budget:{5*threshold+1,1u,37u,500u}) {
+            for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            engine.run(actual,memory,budget);same(actual,expected);
+        }
+        require(engine.adaptive_promotions>0,"hot call did not promote");
+        memory.store<4>(0x11000,0x9100094a); // modify promoted callee
+        for(unsigned n=0;n<50;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        engine.run(actual,memory,50);same(actual,expected);
+        memory.protect(0x11000,page_size,read_perm|write_perm);
+        unsigned completed=0;bool reference_fault=false,actual_fault=false;
+        try {for(;completed<20;++completed)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));}
+        catch(const MemoryFault &) {reference_fault=true;}
+        const auto before=engine.executed_instructions;
+        try {engine.run(actual,memory,20);}catch(const MemoryFault &) {actual_fault=true;}
+        require(reference_fault && actual_fault,"promoted call failed to fault on revoked execute permission");
+        require(engine.executed_instructions-before==completed,"promoted call fault retirement mismatch");same(actual,expected);
+    }
+}
+void adaptive_multiple_calls() {
+    const uint32_t caller[]{0x94000400,0x940007ff,0xd1000400,0xb5ffffa0,0x14000000};
+    const uint32_t targets[][2]{{0x9100054a,0xd65f03c0},{0x9100056b,0xd65f03c0},{0x9100058c,0xd65f03c0}};
+    Memory memory(1<<20);map(memory,caller,std::size(caller));
+    for(unsigned n=0;n<3;++n) {
+        const auto pc=0x11000+n*page_size;memory.map(pc,page_size,read_perm|write_perm|exec_perm);
+        memory.copy_in(pc,targets[n],sizeof(targets[n]));
+    }
+    ExecutionEngine engine;CpuState actual;actual.pc=0x10000;actual.x[0]=160000;auto expected=actual;
+    const auto compare=[&](unsigned budget) {
+        for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        const auto before=engine.executed_instructions;engine.run(actual,memory,budget);
+        require(engine.executed_instructions-before==budget,"multiple hot calls retired wrong instruction count");same(actual,expected);
+    };
+    compare(8*60000);
+    require(engine.adaptive_promotions>=2,"multiple hot calls did not each promote");
+    // A rewritten BL at the same call PC must be eligible for a new target.
+    memory.store<4>(0x10004,0x94000bff);
+    compare(8*60000);
+    require(engine.adaptive_promotions>=3,"modified hot call did not promote its new target");
+}
+#endif
 void memory_and_fault() {
     const uint32_t words[]={0x91000400,0xf9400022,0x91000442,0xf9000022,0x17fffffc};Memory memory(1<<20);map(memory,words,5);
     memory.map(0x20000,page_size,read_perm|write_perm);memory.store<8>(0x20000,4);
@@ -331,6 +2074,184 @@ void compact_operation_prefixes() {
 // Exercise both outcomes, W/X widths, high bits, XZR and every condition.
 // The comparison stays in the independent scalar semantics; short budgets
 // also force a cold exit after every possible instruction in the CFG.
+void local_edge_targets() {
+#if OPERIT_ARM64_DIRECT_CHAINS
+    require(static_entry(StaticCode::Next,64,7,7,7,1)!=static_entry(StaticCode::Jump,64,7,7,7,1),
+            "forward fallthrough must not share a handler with backedges");
+#endif
+    const uint32_t words[]{0x54000060,0x91000631,0x14000002,0x91000a31,0x17fffffc};
+    Memory memory(page_size);map(memory,words,std::size(words));
+    auto graph=build_graph(0x10000,memory);
+    unsigned local_next=0,backedges=0;
+    for(const auto &block:graph->blocks)for(const auto &op:block->code) {
+        const auto info=operation_info(op);
+        if(!op.target)continue;
+        if(info.code==StaticCode::Next && op.entry==static_entry(StaticCode::Next,64,7,7,7,1)) {
+            const auto *target=static_cast<const StaticOperation*>(op.target);
+            require(target->index==1 && operation_info(*target).code==StaticCode::BlockBody,
+                    "local fallthrough does not target a block body");
+            ++local_next;
+        }
+        if(info.code==StaticCode::Jump && info.node && info.node->instruction.immediate>>63) {
+            const auto *target=static_cast<const StaticOperation*>(op.target);
+            require(target->index==0 && operation_info(*target).code==StaticCode::Block,
+                    "local backedge bypasses block guard");
+            ++backedges;
+        }
+    }
+    require(local_next && backedges,"local edge layout fixture was incomplete");
+}
+
+void unordered_instruction_graph() {
+    const std::vector<std::pair<uint64_t,uint32_t>> words{
+        {0x10010,0xd65f03c0}, {0x10008,0x14000002}, {0x10000,0x54000040},
+        {0x1000c,0x91000631}, {0x10004,0x91000631}
+    };
+    const auto graph=build_instruction_graph(words,0x10000);
+    const std::vector<std::vector<uint64_t>> edges{
+        {0x10008,0x10004}, {0x10008}, {0x10010}, {0x10010}, {}
+    };
+    require(graph->blocks.size()==edges.size(),"unordered graph block count");
+    for(size_t i=0;i<edges.size();++i) {
+        const auto &block=*graph->blocks[i];
+        require(block.pc==0x10000+i*4 && block.instructions.size()==1 && block.successors==edges[i],
+                "unordered graph partition or successors");
+        require(graph->entries.at(block.pc)==&block,"unordered graph entry mapping");
+    }
+    const std::vector<std::pair<uint64_t,uint32_t>> multi{
+        {0x10020,0x91000631},{0x10010,0x91000631},{0x10000,0x91000631},
+        {0x10018,0xd65f03c0},{0x10008,0xb4000060},{0x10004,0x91000631},
+        {0x10024,0xd65f03c0},{0x10014,0x91000631},{0x1000c,0x91000631}
+    };
+    const auto partitioned=build_instruction_graph(multi,0x10000);
+    const std::vector<uint64_t> starts{0x10000,0x1000c,0x10014,0x10020};
+    const std::vector<size_t> lengths{3,2,2,2};
+    const std::vector<std::vector<uint64_t>> exits{{0x10014,0x1000c},{0x10014},{},{}};
+    require(partitioned->blocks.size()==starts.size(),"multi-instruction graph block count");
+    for(size_t i=0;i<starts.size();++i) {
+        const auto &block=*partitioned->blocks[i];
+        require(block.pc==starts[i] && block.instructions.size()==lengths[i] &&
+                block.successors==exits[i] && partitioned->entries.at(starts[i])==&block,
+                "multi-instruction graph partition or successors");
+        for(size_t j=0;j<lengths[i];++j)
+            require(block.instructions[j].pc==starts[i]+4*j,"multi-instruction graph order");
+    }
+    for(unsigned mode=0;mode<3;++mode) {
+        auto bad=words;
+        if(mode==0)bad.push_back(words.front());
+        if(mode==1)bad.push_back({0x10001,0xd503201f});
+        bool rejected=false;
+        try { (void)build_instruction_graph(bad,mode==2 ? 0x20000:0x10000); }
+        catch(const Failure &) {rejected=true;}
+        require(rejected,"invalid instruction graph accepted");
+    }
+}
+
+void partition_leader_reference() {
+    uint32_t random=0x6d2b79f5;
+    const auto next=[&]() {random^=random<<13;random^=random>>17;random^=random<<5;return random;};
+    for(unsigned run=0;run<82;++run) {
+        const unsigned count=run==80 ? 600:run==81 ? 1024:16+next()%145;
+        std::vector<std::pair<uint64_t,uint32_t>> words;words.reserve(count);
+        uint64_t address=run==0 ? UINT64_MAX-67:0x10000;
+        for(unsigned i=0;i<count;++i) {
+            uint32_t word=0x91000400;
+            const auto choice=next()%8;
+            const auto displacement=int32_t(next()%65)-32;
+            if(choice==0)word=0x14000000u|(uint32_t(displacement)&0x03ffffffu);
+            else if(choice==1)word=0x54000000u|((uint32_t(displacement)&0x7ffffu)<<5);
+            else if(choice==2)word=0xd65f03c0;
+            words.emplace_back(address,word);
+            address+=4*(1+(next()%9==0));
+        }
+        std::sort(words.begin(),words.end());
+        const uint64_t entry=words[next()%count].first;
+        std::unordered_set<uint64_t> leaders{entry};
+        for(size_t i=0;i<words.size();++i) {
+            const auto [pc,word]=words[i];
+            const auto ends=[](uint32_t raw) {const auto op=decode(raw).op;
+                return op==Op::Branch || op==Op::ConditionalBranch || op==Op::BranchRegister;};
+            const auto *previous=i ? &words[i-1]:nullptr;
+            if(pc==0 && words.back().first==UINT64_MAX-3)previous=&words.back();
+            if(!previous || previous->first!=pc-4 || ends(previous->second))leaders.insert(pc);
+            const auto instruction=decode(word);
+            if(instruction.op==Op::Branch || instruction.op==Op::ConditionalBranch) {
+                leaders.insert(pc+instruction.immediate);
+                if(instruction.op==Op::ConditionalBranch)leaders.insert(pc+4);
+            }
+        }
+        std::reverse(words.begin(),words.end());
+        const auto graph=build_instruction_graph(words,entry);
+        std::reverse(words.begin(),words.end());
+        require(graph->node_storage.size()==words.size(),"partition lost graph-owned instructions");
+        size_t block=0;
+        for(size_t start=0;start<words.size();) {
+            size_t end=start+1;while(end<words.size() && !leaders.count(words[end].first))++end;
+            require(block<graph->blocks.size() && graph->blocks[block]->pc==words[start].first &&
+                    graph->blocks[block]->instructions.size()==end-start,"partition leader reference mismatch");
+            require(graph->blocks[block]->instructions.begin()==graph->node_storage.data()+start,
+                    "partition instruction ownership mismatch");
+            for(size_t n=start;n<end;++n)
+                require(graph->blocks[block]->instructions[n-start].pc==words[n].first,"partition instruction order mismatch");
+            ++block;start=end;
+        }
+        require(block==graph->blocks.size(),"partition unexpected block");
+    }
+}
+
+void discovery_bitmap_boundaries() {
+    // Both branch outcomes converge, and the last instruction loops back.
+    // Exercise bit 63/64 and the final two slots of one page into the next.
+    for(const uint64_t offset:{uint64_t{63*4},uint64_t{page_size-8}}) {
+        const uint64_t start=0x10000+offset;
+        const uint32_t words[]{0x54000040,0x14000001,0x17fffffe};
+        Memory memory(2*page_size);memory.set_parallel_access(false);
+        memory.map(0x10000,2*page_size,read_perm|write_perm|exec_perm);
+        memory.copy_in(start,words,sizeof(words));
+        const auto graph=build_graph(start,memory);
+        size_t count=0;
+        for(const auto &block:graph->blocks)count+=block->instructions.size();
+        require(count==3 && graph->entries.size()==3,"bitmap discovery duplicated or lost an instruction");
+        require(graph->entries.at(start)->successors==std::vector<uint64_t>{start+8,start+4},
+                "bitmap discovery changed conditional edges");
+        require(graph->entries.at(start+8)->successors==std::vector<uint64_t>{start},
+                "bitmap discovery changed backedge");
+        require(graph->dependencies.size()==(offset==page_size-8 ? 2u:1u),
+                "bitmap discovery changed page dependencies");
+    }
+}
+
+void discovery_limit_cross_graph() {
+    constexpr uint64_t base=0x10000;
+    std::vector<uint32_t> words(1200,0x91000400); // add x0,x0,#1
+    words.push_back(0x14000000); // b .
+    for(bool parallel:{false,true}) {
+        Memory memory(1<<20);memory.set_parallel_access(false);
+        memory.map(base,2*page_size,read_perm|write_perm|exec_perm);
+        memory.copy_in(base,words.data(),words.size()*4);
+        memory.set_parallel_access(parallel);
+        const auto graph=build_graph(base,memory);
+        size_t count=0;
+        for(const auto &block:graph->blocks)count+=block->instructions.size();
+        require(count==512 && graph->blocks.back()->successors==std::vector<uint64_t>{base+512*4},
+                "limited discovery lost the undiscovered fallthrough");
+        ExecutionEngine engine;
+        for(unsigned pass=0;pass<3;++pass) {
+            if(pass==1)memory.store<4>(base+512*4,0x91000800); // add x0,x0,#2
+            if(pass==2)memory.store<4>(base+1023*4,0x91000c00); // add x0,x0,#3
+            for(unsigned budget:{0u,1u,511u,512u,513u,1023u,1024u,1025u,1200u,1205u}) {
+                CpuState actual;actual.pc=base;actual.x[0]=17;
+                auto expected=actual;
+                for(unsigned i=0;i<budget;++i)
+                    execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+                const auto result=engine.run(actual,memory,budget);
+                require(result.instructions==budget && equal(actual,expected),
+                        "limited discovery boundary, invalidation or retirement mismatch");
+            }
+        }
+    }
+}
+
 void local_control_prefixes() {
     for(unsigned family=0;family<6;++family)for(unsigned bits:{32u,64u}) {
         if(family==0 && bits==32)continue;
@@ -369,6 +2290,92 @@ void local_control_prefixes() {
     }
 }
 
+void external_conditional_link_targets() {
+    // Warm the destination first so discovery leaves a genuinely external
+    // edge. The first taken branch must resolve through the slow linker.
+    for(bool parallel:{false,true})for(unsigned family=0;family<4;++family)
+    for(bool taken:{false,true}) {
+        const bool fused=family==3;
+        const uint32_t branch=family==0 ? 0x54008000u : // b.eq +4096
+                              family==1 ? 0xb4008000u : // cbz x0,+4096
+                              family==2 ? 0x36008000u : // tbz w0,#0,+4096
+                                          0x54007fe0u;  // b.eq +4092
+        std::vector<uint32_t> source;
+        if(fused)source.push_back(0xf100001fu); // cmp x0,#0
+        source.insert(source.end(),{branch,0x91000484u,0x14000000u});
+        const uint32_t target[]{0x91000463u,0x14000000u};
+        Memory memory(2*page_size);map(memory,source.data(),source.size());
+        memory.map(0x11000,page_size,7);memory.copy_in(0x11000,target,sizeof(target));
+        memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory,nullptr,[](const void *,uint64_t pc) {
+            return pc==0x11000;
+        });
+        const auto expected_code=fused ? StaticCode::CompareImmediateBranch:
+            family==0 ? StaticCode::Branch:family==1 ? StaticCode::CompareBranch:StaticCode::TestBranch;
+        bool selected=false;
+        for(const auto &op:graph->entries.at(0x10000)->code)
+            selected|=operation_info(op).code==expected_code && !op.target;
+        require(selected,"external conditional fixture did not select an unlinked edge");
+        ExecutionEngine engine;CpuState warm;warm.pc=0x11000;engine.run(warm,memory,2);
+        CpuState actual;actual.pc=0x10000;actual.x[0]=taken ? 0:1;
+        actual.nzcv=taken ? 4:0;actual.x[3]=10;actual.x[4]=20;
+        auto expected=actual;const unsigned budget=fused ? 3:2;
+        for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        const auto slow=engine.slow_calls;
+        require(engine.run(actual,memory,budget).instructions==budget && equal(actual,expected),
+                "external conditional linker target or state mismatch");
+        if(taken)require(engine.slow_calls>slow,"external taken edge did not exercise slow linking");
+    }
+}
+
+void deferred_forward_branches() {
+    for(unsigned distance:{256u,260u}) {
+        Memory memory(page_size);memory.set_parallel_access(false);memory.map(0x10000,page_size,7);
+        memory.store<4>(0x10000,0x54000000u|((distance/4)<<5)); // b.eq target
+        memory.store<4>(0x10004,0xd65f03c0);memory.store<4>(0x10000+distance,0xd65f03c0);
+        const auto graph=build_graph(0x10000,memory);
+        require(graph->entries.count(0x10004)==1 && graph->entries.count(0x10000+distance)==size_t(distance==256),
+                "forward branch discovery boundary mismatch");
+    }
+    for(bool parallel:{false,true})for(unsigned family=0;family<3;++family) {
+        const uint32_t branch=family==0 ? 0x54008000u : // b.eq +4096
+                              family==1 ? 0xb4008000u : // cbz x0,+4096
+                                          0x36008000u;  // tbz w0,#0,+4096
+        const uint32_t source[]{branch,0x91000484u,0x14000000u};
+        const uint32_t target[]{0x91000463u,0x14000000u};
+        Memory memory(2*page_size);map(memory,source,std::size(source));
+        memory.map(0x11000,page_size,7);memory.copy_in(0x11000,target,sizeof(target));
+        memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        require(!graph->entries.count(0x11000),"distant forward target was discovered early");
+        ExecutionEngine engine;
+        for(bool taken:{false,true})for(unsigned budget=0;budget<=3;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.x[0]=taken ? 0:1;
+            actual.nzcv=taken ? 4:0;actual.x[3]=10;actual.x[4]=20;auto expected=actual;
+            for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto before=engine.executed_instructions;
+            require(engine.run(actual,memory,budget).instructions==budget && equal(actual,expected),
+                    "deferred forward branch state mismatch");
+            require(engine.executed_instructions-before==budget,"deferred forward branch retirement mismatch");
+        }
+        // A warmed edge must observe both permission changes and new code.
+        memory.protect(0x11000,page_size,read_perm|write_perm);
+        CpuState actual;actual.pc=0x10000;actual.x[0]=0;actual.nzcv=4;actual.x[3]=10;
+        const auto before=engine.executed_instructions;bool faulted=false;
+        try {engine.run(actual,memory,2);} catch(const MemoryFault &fault) {
+            faulted=fault.address==0x11000 && fault.permissions==exec_perm;
+        }
+        require(faulted && actual.pc==0x11000 && actual.x[3]==10 && engine.executed_instructions==before+1,
+                "deferred forward target permission fault mismatch");
+        memory.store<4>(0x11000,0x91000c63u); // add x3,x3,#3
+        memory.protect(0x11000,page_size,7);
+        actual={};actual.pc=0x10000;actual.x[0]=0;actual.nzcv=4;actual.x[3]=10;auto expected=actual;
+        for(unsigned n=0;n<2;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+        require(engine.run(actual,memory,2).instructions==2 && equal(actual,expected),
+                "deferred forward edge retained stale target code");
+    }
+}
+
 void residency_boundaries() {
     // Cross graphs with disjoint working sets, then observe every register at
     // every budget cut and at a fault in the successor (including untouched
@@ -396,6 +2403,32 @@ void residency_boundaries() {
             try {require(engine.run(actual,memory,budget).instructions==retired,"residency budget retirement");}
             catch(const MemoryFault &) {actual_fault=true;}
             require(reference_fault==actual_fault && engine.executed_instructions-before==retired,"residency fault prefix");
+            same(actual,expected);
+        }
+    }
+}
+
+void link_register_residency() {
+    const uint32_t caller[]{
+        0xaa1e03f7, // mov x23,x30
+        0x2a1e03fe, // mov w30,w30: zero the upper half even on a self-copy
+        0x8b1703de, // add x30,x30,x23
+        0xaa0103fe, // mov x30,x1
+        0xd63f03c0, // blr x30: read the old target before writing the link
+        0x910022f7, // add x23,x23,#8
+        0x14000000, // b .
+    };
+    const uint32_t callee[]{0x910007c0,0xd65f03c0}; // add x0,x30,#1; ret
+    for(bool parallel:{false,true}) {
+        Memory memory(4*page_size);map(memory,caller,std::size(caller));
+        memory.map(0x11000,page_size,7);memory.copy_in(0x11000,callee,sizeof(callee));
+        memory.set_parallel_access(parallel);ExecutionEngine engine;
+        for(unsigned budget=0;budget<20;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.x[1]=0x11000;
+            actual.x[30]=0xfedcba9800011000ull;actual.x[23]=0x123456789abcdef0ull;
+            auto expected=actual;
+            for(unsigned n=0;n<budget;++n)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            require(engine.run(actual,memory,budget).instructions==budget,"link-register retirement");
             same(actual,expected);
         }
     }
@@ -785,6 +2818,106 @@ void floating_paths() {
 #endif
 }
 
+void floating_conversion_and_zero_compare() {
+#if defined(__aarch64__)
+    const uint64_t values[]{0,1,UINT64_MAX,0x8000000000000000ull,0x7fffffffffffffffull,
+        0x3ff0000000000000ull,0xbff0000000000000ull,0x7ff0000000000000ull,
+        0x7ff8123456789abcull,0x7ff0123456789abcull};
+    for(bool parallel:{false,true})for(unsigned rn:{0u,7u,8u,30u,31u})
+    for(uint32_t opcode:{0x9e620000u,0x1e602008u,0x1e602018u,0x1e602010u}) {
+        const bool conversion=opcode==0x9e620000u,zero=opcode&8;
+        const uint32_t word=opcode|(rn<<5)|(conversion ? 8u:zero ? 0u:31u<<16);
+        const uint32_t words[]{word,0xd4000001};Memory memory(page_size);
+        map(memory,words,std::size(words));memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        require(operation_info(graph->entries.at(0x10000)->code[2]).code==
+            (conversion ? StaticCode::SignedToDouble:StaticCode::Fcmp),"new FP instruction fell back to helper");
+        ExecutionEngine engine;
+        for(unsigned control=0;control<8;++control)for(uint64_t value:values)for(unsigned budget=0;budget<=2;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.sp=0x20000;actual.nzcv=9;actual.fpsr=0x08000080;
+            actual.fpcr=((control&3u)<<22)|(control&4u ? 1u<<25:0);
+            for(unsigned reg=0;reg<32;++reg) {if(reg<actual.x.size())actual.x[reg]=value;actual.v[reg].fill(0xa5);std::memcpy(actual.v[reg].data(),&value,8);}
+            auto expected=actual;
+            for(unsigned i=0;i<budget;++i)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto retired=engine.executed_instructions;engine.run(actual,memory,budget);same(actual,expected);
+            require(engine.executed_instructions-retired==budget,"new FP instruction retirement mismatch");
+        }
+    }
+#endif
+}
+void native_numeric_conversions() {
+#if defined(__aarch64__)
+    struct Conversion {uint32_t opcode;StaticCode code;};
+    const Conversion conversions[]{
+        {0x1e620000,StaticCode::SignedToDouble},{0x9e620000,StaticCode::SignedToDouble},
+        {0x1e630000,StaticCode::UnsignedToDouble},{0x9e630000,StaticCode::UnsignedToDouble},
+        {0x1e780000,StaticCode::DoubleToSigned},{0x9e780000,StaticCode::DoubleToSigned}};
+    // Include inexact integer conversions, truncation, both saturation limits,
+    // subnormals, infinities and signaling/quiet NaNs. W sources contain dirty
+    // upper halves; W destinations must clear them even for resident registers.
+    const uint64_t values[]{0,1,UINT64_MAX,0x8000000000000000ull,0x7fffffffffffffffull,
+        0xffffffff00000001ull,0x00000000ffffffffull,0x0020000000000001ull,
+        0x3ff8000000000000ull,0xbff8000000000000ull,0x41dfffffffc00000ull,
+        0x41e0000000000000ull,0xc1e0000000200000ull,0x43e0000000000000ull,
+        0xc3e0000000000000ull,0x7ff0000000000000ull,0xfff0000000000000ull,
+        0x7ff8123456789abcull,0x7ff0123456789abcull};
+    for(bool parallel:{false,true})for(unsigned rn:{0u,7u,8u,30u,31u})
+    for(unsigned rd:{0u,7u,8u,30u,31u})for(const auto conversion:conversions) {
+        const uint32_t words[]{conversion.opcode|(rn<<5)|rd,0xd4000001};
+        Memory memory(page_size);map(memory,words,std::size(words));memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);
+        require(operation_info(graph->entries.at(0x10000)->code[2]).code==conversion.code,
+                "numeric conversion fell back to helper");
+        ExecutionEngine engine;
+        for(unsigned control=0;control<8;++control)for(uint64_t value:values)for(unsigned budget=0;budget<=2;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.sp=0x20000;actual.nzcv=9;actual.fpsr=0x08000080;
+            actual.fpcr=((control&3u)<<22)|(control&4u ? (1u<<25)|(1u<<24):0);
+            for(unsigned reg=0;reg<32;++reg) {
+                if(reg<actual.x.size())actual.x[reg]=value;actual.v[reg].fill(0xa5);std::memcpy(actual.v[reg].data(),&value,8);
+            }
+            auto expected=actual;
+            for(unsigned i=0;i<budget;++i)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto retired=engine.executed_instructions;engine.run(actual,memory,budget);same(actual,expected);
+            require(engine.executed_instructions-retired==budget,"numeric conversion retirement mismatch");
+        }
+    }
+#endif
+}
+
+void native_widening_multiply() {
+#if defined(__aarch64__)
+    struct Multiply {uint32_t opcode;StaticCode code;};
+    const Multiply operations[]{
+        {0x9b200000,StaticCode::SmaddLong},{0x9ba00000,StaticCode::UmaddLong},
+        {0x9b208000,StaticCode::SmsubLong},{0x9ba08000,StaticCode::UmsubLong}};
+    const uint64_t values[]{0,1,0x80000000ull,0x7fffffffull,UINT64_MAX,
+        0xabcdef1200000001ull,0x12345678ffffffffull};
+    for(bool parallel:{false,true})for(const auto operation:operations)
+    for(unsigned rn:{0u,7u,30u,31u})for(unsigned rm:{8u,30u,31u})
+    for(unsigned ra:{0u,8u,30u,31u})for(unsigned rd:{rn,rm,ra,6u,30u,31u}) {
+        const uint32_t words[]{0xb100054a,operation.opcode|(rm<<16)|(ra<<10)|(rn<<5)|rd,
+            0x9a0b014c,0xd4000001}; // Live NZCV surrounds the multiplication.
+        Memory memory(page_size);map(memory,words,std::size(words));memory.set_parallel_access(parallel);
+        const auto graph=build_graph(0x10000,memory);bool native=false;
+        for(const auto &op:graph->entries.at(0x10000)->code)
+            native|=operation_info(op).code==operation.code;
+        // ZR inputs can make the optimizer fold the product to a move/copy.
+        // Require the new handler for every nonconstant, retained product.
+        if(rd!=31 && rn!=31 && rm!=31)
+            require(native,"widening multiplication fell back to helper");
+        ExecutionEngine engine;
+        for(uint64_t value:values)for(unsigned budget=0;budget<=4;++budget) {
+            CpuState actual;actual.pc=0x10000;actual.sp=0x20000;actual.nzcv=9;
+            for(unsigned reg=0;reg<actual.x.size();++reg)actual.x[reg]=value^(uint64_t(reg)<<44);
+            auto expected=actual;
+            for(unsigned i=0;i<budget;++i)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto retired=engine.executed_instructions;engine.run(actual,memory,budget);same(actual,expected);
+            require(engine.executed_instructions-retired==budget,"widening multiplication retirement mismatch");
+        }
+    }
+#endif
+}
+
 void floating_host_environment() {
 #if defined(__aarch64__)
     struct Restore {
@@ -870,6 +3003,47 @@ void polymorphic_edges() {
     engine.run(cpu,memory,32*4);
     require(cpu.x[0]==53334,"polymorphic cache retained modified target");
 }
+void indirect_target_replacement() {
+    {
+        IndirectCache cache;
+        std::array<BridgePlan*,128> addresses{};
+        require(cache.bridges.empty(),"indirect cache allocated unused bridges");
+        for(unsigned n=0;n<128;++n) {
+            const auto slot=(n*37)%128;
+            auto &bridge=cache.bridge_for(slot);
+            require(!bridge,"indirect bridge slot was reused");
+            bridge=std::make_unique<BridgePlan>();
+            bridge->expected_generation=slot+1;
+            addresses[slot]=bridge.get();
+        }
+        require(cache.bridges.size()==128,"indirect bridge slots missing");
+        for(unsigned slot=0;slot<128;++slot)
+            require(cache.bridge_for(slot).get()==addresses[slot] &&
+                    cache.bridge_for(slot)->expected_generation==slot+1,"indirect bridge slot lookup mismatch");
+    }
+    for(bool parallel:{false,true}) {
+        Memory memory(8*page_size);memory.set_parallel_access(parallel);
+        memory.map(0x10000,page_size,7);memory.map(0x20000,2*page_size,7);
+        memory.store<4>(0x10000,0xd61f0100); // br x8
+        std::vector<uint64_t> targets;
+        for(uint64_t pc=0x20000;pc<0x22000 && targets.size()<6;pc+=16)
+            if((((pc>>2)^(pc>>9))&31)==0)targets.push_back(pc);
+        require(targets.size()==6,"recent indirect fixture needs colliding targets");
+        for(unsigned n=0;n<targets.size();++n) {
+            const uint32_t words[]{0x91000000u|((n+1)<<10),0xd61f0120u};
+            memory.copy_in(targets[n],words,sizeof(words));
+        }
+        ExecutionEngine engine;
+        for(unsigned round=0;round<8;++round)for(unsigned target:{0u,0u,1u,2u,3u,0u,4u,0u,5u,0u})
+        for(unsigned budget:{3u,30u}) {
+            CpuState actual;actual.pc=0x10000;actual.x[8]=targets[target];actual.x[9]=0x10000;
+            actual.x[0]=round*100;actual.nzcv=9;auto expected=actual;
+            for(unsigned i=0;i<budget;++i)execute_one(expected,memory,decode(memory.load<4>(expected.pc,exec_perm)));
+            const auto retired=engine.executed_instructions;engine.run(actual,memory,budget);same(actual,expected);
+            require(engine.executed_instructions-retired==budget,"recent indirect replacement retirement mismatch");
+        }
+    }
+}
 void file_bridge_proofs() {
     std::unique_ptr<FILE,decltype(&std::fclose)> file(std::tmpfile(),&std::fclose);
     require(bool(file) && !ftruncate(fileno(file.get()),page_size),"file bridge fixture");
@@ -932,9 +3106,9 @@ void file_bridge_proofs() {
             engine.executed_instructions==retired+1,"native code proof lost truncation fault state");
 }
 void bridge_reclamation() {
-    constexpr unsigned targets=4100;
+    constexpr unsigned targets=graph_cache_capacity+4;
     Memory memory(32*page_size);memory.set_parallel_access(false);
-    memory.map(0x10000,page_size,7);memory.map(0x20000,17*page_size,7);
+    memory.map(0x10000,page_size,7);memory.map(0x20000,((targets*16+page_size-1)/page_size)*page_size,7);
     memory.store<4>(0x10000,0xd61f0100); // br x8
     const uint32_t target[]{0x91000400,0xd61f0120};
     for(unsigned n=0;n<targets;++n)memory.copy_in(0x20000+n*16,target,sizeof(target));
@@ -944,20 +3118,42 @@ void bridge_reclamation() {
     cpu.x[8]=0x20000;engine.run(cpu,memory,3);require(cpu.x[0]==targets+1,"reclaimed target did not recompile");
     ExecutionEngine refresh;cpu={};cpu.pc=0x20000+(targets-1)*16;cpu.x[9]=0x10000;refresh.run(cpu,memory,1);
     cpu.pc=0x10000;cpu.x[8]=0x20000;refresh.run(cpu,memory,300);
-    for(unsigned n=1;n<=4094;++n){cpu.pc=0x20000+n*16;refresh.run(cpu,memory,1);}
+    for(unsigned n=1;n<=graph_cache_capacity-2;++n){cpu.pc=0x20000+n*16;refresh.run(cpu,memory,1);}
     cpu.pc=0x10000;const auto slow=refresh.slow_calls;refresh.run(cpu,memory,3000);
     require(refresh.slow_calls-slow<10,"generation change left existing bridges permanently cold");
     // Reclaim unrelated older graphs while the source, its PIC and target
     // remain alive. Their warmed native edges must survive that eviction.
     ExecutionEngine stable;cpu={};cpu.x[9]=0x10000;
-    for(unsigned n=0;n<4090;++n){cpu.pc=0x20000+n*16;stable.run(cpu,memory,1);}
-    cpu.pc=0x10000;cpu.x[8]=0x20000+4090*16;stable.run(cpu,memory,300);
+    for(unsigned n=0;n<graph_cache_capacity-6;++n){cpu.pc=0x20000+n*16;stable.run(cpu,memory,1);}
+    cpu.pc=0x10000;cpu.x[8]=0x20000+(graph_cache_capacity-6)*16;stable.run(cpu,memory,300);
     const auto warmed=stable.slow_calls;stable.run(cpu,memory,300);
     const auto steady=stable.slow_calls-warmed;
-    for(unsigned n=4091;n<=4096;++n){cpu.pc=0x20000+n*16;stable.run(cpu,memory,1);}
+    for(unsigned n=graph_cache_capacity-5;n<=graph_cache_capacity;++n){cpu.pc=0x20000+n*16;stable.run(cpu,memory,1);}
     cpu.pc=0x10000;const auto before=stable.slow_calls;stable.run(cpu,memory,300);
     require(stable.slow_calls-before<=steady+1,"unrelated eviction discarded warmed native edges");
 }
 
 }
-int main(){try{prefixes();native_prefixes();forward_regions();compact_operation_prefixes();local_control_prefixes();residency_boundaries();quantum_continuations();native_system_and_conditions();native_scalar_moves();native_writebacks();native_file_reads();native_file_page_lock();loops();memory_and_fault();native_pairs();pair_faults();shared_code_snapshots();file_code_proofs();code_validation_spans();batched_code_lines();fast_memory_guards();native_page_cache();associative_tlb();vector_code_write();vector_memory_paths();floating_paths();floating_host_environment();graph_bridges();polymorphic_edges();file_bridge_proofs();bridge_reclamation();std::puts("static execution backend passed");return 0;}catch(const std::exception &e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
+int main(){try{
+gp_operand_mapping_paths();
+decoded_node_consistency();
+shifted_add_sub_paths();
+vector_logical_paths();
+load_acquire_paths();
+#if OPERIT_EXECUTION_DIAGNOSTICS
+diagnostic_recipe_paths();
+#endif
+#if OPERIT_ARM64_GUEST_AOT
+guest_aot_paths();
+#endif
+#if OPERIT_ARM64_PROFILE_SUPERBLOCKS
+#if OPERIT_ARM64_GUEST_AOT
+combined_aot_superblock_paths();
+#endif
+profile_superblock_paths();
+#endif
+global_value_paths();randomized_value_paths();scheduled_load_paths();scheduled_file_loads();prefixes();native_prefixes();forward_regions();compact_operation_prefixes();local_edge_targets();unordered_instruction_graph();partition_leader_reference();discovery_bitmap_boundaries();discovery_limit_cross_graph();local_control_prefixes();external_conditional_link_targets();deferred_forward_branches();residency_boundaries();link_register_residency();quantum_continuations();native_system_and_conditions();native_scalar_moves();native_writebacks();native_file_reads();native_file_page_lock();loops();cached_graph_boundaries();deferred_call_targets();loop_call_discovery();
+#if OPERIT_ARM64_ADAPTIVE_CALLS
+adaptive_call_paths();adaptive_multiple_calls();
+#endif
+lowering_address_independence();memory_and_fault();native_pairs();pair_faults();shared_code_snapshots();file_code_proofs();code_validation_spans();batched_code_lines();fast_memory_guards();native_page_cache();associative_tlb();vector_code_write();vector_memory_paths();floating_paths();floating_conversion_and_zero_compare();native_numeric_conversions();native_widening_multiply();floating_host_environment();graph_bridges();polymorphic_edges();indirect_target_replacement();file_bridge_proofs();bridge_reclamation();std::puts("static execution backend passed");return 0;}catch(const std::exception &e){std::fprintf(stderr,"%s\n",e.what());return 1;}}

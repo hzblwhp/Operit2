@@ -31,6 +31,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String get fullscreenInput => 'Fullscreen input';
 
   @override
+  String get noticeExpand => 'Expand';
+
+  @override
+  String get noticeCollapse => 'Collapse';
+
+  @override
   String get expandInput => 'Expand input';
 
   @override
@@ -175,6 +181,29 @@ class AppLocalizationsEn extends AppLocalizations {
   String get summaryGenerating => 'Generating summary...';
 
   @override
+  String get summaryStageCore => 'Summarizing the core task...';
+
+  @override
+  String get summaryStageConstraints =>
+      'Summarizing user requests and constraints...';
+
+  @override
+  String get summaryStageFiles => 'Summarizing key files and code...';
+
+  @override
+  String get summaryStageErrors => 'Summarizing errors and fixes...';
+
+  @override
+  String get summaryStageInteraction =>
+      'Summarizing interaction and context...';
+
+  @override
+  String get summaryStageNext => 'Summarizing next steps...';
+
+  @override
+  String get summaryStageFormatting => 'Formatting the summary...';
+
+  @override
   String get chatCompressingHistory => 'Compressing history records...';
 
   @override
@@ -214,6 +243,19 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get workspaceCloseOtherTabs => 'Close Others';
+
+  @override
+  String get workspaceDockDropTarget => 'Drop into workspace';
+
+  @override
+  String get workspaceOpenWith => 'Open with';
+
+  @override
+  String get workspaceBuiltInPreview => 'Built-in preview';
+
+  @override
+  String get workspacePluginUnsavedChanges =>
+      'Save in the editor first, or discard the unsaved changes.';
 
   @override
   String get workspaceCloseTabsToRight => 'Close to the Right';
@@ -342,6 +384,11 @@ class AppLocalizationsEn extends AppLocalizations {
       'Could not load messages. Please try again.';
 
   @override
+  String messageTransformFailed(String error) {
+    return 'Failed to process message display: $error';
+  }
+
+  @override
   String get messageLocatorFavoriteFailed =>
       'Could not update favorite. Please try again.';
 
@@ -408,6 +455,9 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get hiddenUserMessage => 'Hidden user message';
+
+  @override
+  String get autoTriggeredUserMessage => 'AUTO';
 
   @override
   String get workspaceSetupTitle => 'Set up workspace';
@@ -771,6 +821,13 @@ class AppLocalizationsEn extends AppLocalizations {
   String get openFile => 'Open file';
 
   @override
+  String get workspaceFileOpening => 'Opening file…';
+
+  @override
+  String get workspaceFileOpenTimedOut =>
+      'Opening the file timed out. Please try again.';
+
+  @override
   String get openLocation => 'Open location';
 
   @override
@@ -1040,11 +1097,17 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsCategoryDataTitle => 'Data & Backup';
 
   @override
-  String get settingsCategoryDataSubtitle => 'Backup, restore, stats';
+  String get settingsCategoryDataSubtitle => 'Backup, restore, storage';
 
   @override
   String get settingsCategoryDataDescription =>
-      'Back up chats, plugin data, and model settings, restore backup content, and view data statistics.';
+      'Back up and restore chats, plugin data, and model settings, and manage storage.';
+
+  @override
+  String get settingsUsageReportTitle => 'Token Usage Report';
+
+  @override
+  String get settingsUsageReportSubtitle => 'Model usage, cache, and cost';
 
   @override
   String get settingsCategoryAccessLinksTitle => 'Device Space';
@@ -1332,6 +1395,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsModelApiKey => 'API key';
 
   @override
+  String get settingsModelShowApiKey => 'Show API key';
+
+  @override
+  String get settingsModelHideApiKey => 'Hide API key';
+
+  @override
   String get settingsModelCodexLogin => 'ChatGPT login';
 
   @override
@@ -1378,7 +1447,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsModelApiKeyPoolDescription =>
-      'Prepare multiple keys for one model profile so runtime can rotate between them.';
+      'Keep using a healthy key. Switch on authentication, quota, rate limit, or temporary failures; cooling keys are skipped.';
 
   @override
   String settingsModelApiKeyPoolCount(int count) {
@@ -1387,7 +1456,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsModelApiKeyPoolEmpty =>
-      'No keys yet. Add keys and this profile will use the key pool.';
+      'No keys yet. Add a key before enabling this pool.';
 
   @override
   String get settingsModelAddApiKey => 'Add key';
@@ -1400,6 +1469,36 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsModelApiKeyEnabled => 'Enable this key';
+
+  @override
+  String get settingsModelPoolAddSingle => 'Add current single key';
+
+  @override
+  String get settingsModelPoolPaste =>
+      'Paste one key per line to add several at once.';
+
+  @override
+  String get settingsModelPoolNoEligible =>
+      'Enable at least one nonempty key that is not marked unavailable.';
+
+  @override
+  String get settingsModelPoolUntested => 'Untested';
+
+  @override
+  String get settingsModelPoolAvailable => 'Available';
+
+  @override
+  String get settingsModelPoolUnavailable => 'Unavailable';
+
+  @override
+  String get settingsModelPoolClearMarks => 'Reset key health';
+
+  @override
+  String get settingsModelPoolTest => 'Test untested keys';
+
+  @override
+  String get settingsModelPoolNeedsModel =>
+      'Save the provider and add a model before testing keys.';
 
   @override
   String get settingsModelProviderId => 'Provider ID';
@@ -1805,11 +1904,11 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get settingsModelCatalogNotDownloaded =>
-      'Model details have not been downloaded yet';
+  String get settingsModelCatalogBundled =>
+      'Using bundled model details; online updates replace them automatically';
 
   @override
-  String get settingsModelCatalogRetry => 'Retry';
+  String get settingsModelCatalogRetry => 'Update';
 
   @override
   String get settingsModelCustomModel => 'Custom model';
@@ -1892,12 +1991,6 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsModelSummaryThreshold => 'Summarize at';
-
-  @override
-  String get settingsModelSummaryByMessageCount => 'Summarize by message count';
-
-  @override
-  String get settingsModelSummaryMessageCount => 'Summary message threshold';
 
   @override
   String get settingsModelCustomHeaders => 'Custom headers';
@@ -2090,6 +2183,15 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String settingsModelTestSummaryWithRestricted(
+    int passed,
+    int failed,
+    int restricted,
+  ) {
+    return '$passed passed, $failed failed, $restricted restricted';
+  }
+
+  @override
   String settingsModelTestAllPassed(int count) {
     return 'All $count passed';
   }
@@ -2147,6 +2249,17 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsModelConnectionTestFailed => 'Some checks failed';
+
+  @override
+  String get settingsModelConnectionTestRestricted => 'Test restricted';
+
+  @override
+  String get settingsModelTestCreditRestricted =>
+      'Credit or output budget limit';
+
+  @override
+  String get settingsModelTestRateRestricted =>
+      'Upstream rate limit or cooldown';
 
   @override
   String get settingsModelCapabilitiesApplied =>
@@ -3147,7 +3260,21 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsAppearanceBubbleImagePreviewText =>
-      'Bubble preview with 9-slice guides';
+      'This is a bubble preview message.\nCheck the corners, edges, and center at their rendered size.';
+
+  @override
+  String get settingsAppearanceBubbleImageSourceHint =>
+      'Original · White: crop boundary. Blue: nine-slice grid. Pinch to zoom and drag to inspect.';
+
+  @override
+  String get settingsAppearanceBubbleImageFitSource => 'Fit original image';
+
+  @override
+  String get settingsAppearanceBubbleImageGrid => '9-slice';
+
+  @override
+  String get settingsAppearanceBubbleImageGridHint =>
+      'Two horizontal and two vertical cuts form nine regions. Corners stay fixed; edges tile along one axis and the center tiles along both. Stretch mode stretches those regions instead. Boundaries are relative to the cropped image.';
 
   @override
   String settingsAppearanceBubbleImageImportFailed(String error) {
@@ -3378,29 +3505,17 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get settingsDataTokenSection => 'Usage statistics';
-
-  @override
   String get settingsDataInputTokens => 'Input';
 
   @override
   String get settingsDataOutputTokens => 'Output';
 
   @override
-  String get settingsDataOpenDetailedStats => 'View detailed statistics';
-
-  @override
-  String get settingsDataOpenDetailedStatsDescription =>
-      'View the usage heatmap and model usage timeline with minute-level zoom.';
-
-  @override
-  String get settingsDataRefreshTokenStats => 'Refresh statistics';
-
-  @override
   String get settingsDataResetTokenStats => 'Reset statistics';
 
   @override
-  String get settingsDataDetailedStatsTitle => 'Detailed statistics';
+  String get settingsUsageReportResetConfirmation =>
+      'This permanently deletes all saved model usage records. Your conversations are kept.';
 
   @override
   String get settingsDataDetailedStatsDescription =>
@@ -4145,6 +4260,33 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsPeerPortModeAutomatic => 'Automatic port';
 
   @override
+  String get settingsPeerNetworkDiscoveryHelp =>
+      'For discovery across routed networks, configure a shared directory and group key. To host the directory, leave the address empty and set a group key.';
+
+  @override
+  String get settingsPeerDiscoveryDirectory => 'Discovery directory (optional)';
+
+  @override
+  String get settingsPeerDiscoveryGroup => 'Discovery group key';
+
+  @override
+  String get settingsPeerDiscoveryGenerateKey => 'Generate new group key';
+
+  @override
+  String get settingsPeerDiscoveryCopyKey => 'Copy group key';
+
+  @override
+  String get settingsPeerDiscoveryPort => 'Directory listener port';
+
+  @override
+  String get settingsPeerDiscoveryPortHelp =>
+      'Only used on the directory host. Other devices use the port in the directory URL.';
+
+  @override
+  String get settingsPeerNetworkDiscoveryInvalid =>
+      'Check the discovery settings: use an HTTP(S) origin without a path, a shared key of 16–128 bytes, and a nonzero port when hosting the directory.';
+
+  @override
   String get settingsPeerAdvanced => 'Advanced options';
 
   @override
@@ -4421,11 +4563,11 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsAppearanceThemeConfigCustomHint =>
-      'Click + to create and manage independent theme configurations.';
+      'Create a theme to save your appearance. Tap a card to switch; choose Edit to customize.';
 
   @override
   String get settingsAppearanceThemeConfigEditingHint =>
-      'Appearance changes are saved to the selected theme configuration.';
+      'Tap a card to switch themes. Mode shortcuts change only the current theme. Edits save automatically.';
 
   @override
   String settingsAppearanceThemeConfigFailed(String detail) {
@@ -4492,6 +4634,38 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get settingsAppearanceRepairHint =>
       'Your saved appearance has not been replaced. Retry after repairing its resources, or reset appearance explicitly. Reset keeps your avatar and saved configurations and selects custom appearance.';
+
+  @override
+  String settingsAppearanceAssetBackgroundFailed(String reference) {
+    return 'The background image could not be loaded. Using the default background ($reference).';
+  }
+
+  @override
+  String settingsAppearanceAssetVideoFailed(String reference) {
+    return 'The background video could not be played. Using the default background ($reference).';
+  }
+
+  @override
+  String settingsAppearanceAssetBubbleFailed(String reference) {
+    return 'The bubble image could not be loaded. Using the default bubble color ($reference).';
+  }
+
+  @override
+  String settingsAppearanceAssetPreviousRetained(String reference) {
+    return 'This theme resource could not be loaded. Keeping the previous image or media ($reference); your other theme settings still apply.';
+  }
+
+  @override
+  String get settingsAppearanceAssetRetry => 'Retry';
+
+  @override
+  String get settingsAppearanceAssetReimportHint =>
+      'If retrying does not help, choose and import a readable image or playable video again.';
+
+  @override
+  String settingsAppearanceAssetImportFailed(String reason) {
+    return 'The background resource was not applied: $reason. Please choose a readable image or playable video.';
+  }
 
   @override
   String get settingsAppearanceRetry => 'Retry';
@@ -4649,8 +4823,7 @@ class AppLocalizationsEn extends AppLocalizations {
       'Sync interrupted. Retrying automatically.';
 
   @override
-  String get deviceSpaceSyncPending =>
-      'Some data is still pending. Retrying automatically.';
+  String get deviceSpaceSyncPending => 'Some data is still pending.';
 
   @override
   String deviceSpaceSyncCurrentFile(String done, String total) {
@@ -4734,6 +4907,10 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get peerQrWrongDevice =>
       'This code belongs to a different device. Scan the code for the selected device.';
+
+  @override
+  String get peerPairTimeoutHint =>
+      'Connection timed out: could not reach the other device. A common cause is the other device’s firewall blocking incoming connections. Try initiating the connection from the other device, or allow Operit through the other device’s firewall (especially on public networks).';
 
   @override
   String get peerQrImageInvalid =>
@@ -4901,5 +5078,195 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String settingsDataTimelineUnknownSavings(int count) {
     return 'Savings unknown for $count requests';
+  }
+
+  @override
+  String get contextStatsSummaryLoadFailed =>
+      'Unable to load context statistics';
+
+  @override
+  String get contextStatsDevicesLoadFailed =>
+      'Unable to load device information';
+
+  @override
+  String get settingsAppearanceThemeLibrary => 'Your themes';
+
+  @override
+  String get settingsAppearanceThemeLibraryHint =>
+      'Choose a look. Make it yours.';
+
+  @override
+  String get settingsAppearanceThemeActive => 'In use';
+
+  @override
+  String get settingsAppearanceThemeApply => 'Use this theme';
+
+  @override
+  String get settingsAppearanceThemeMore => 'More theme actions';
+
+  @override
+  String get settingsAppearanceThemeDuplicate => 'Create a copy';
+
+  @override
+  String get settingsAppearanceThemeUnboundHint =>
+      'Keep the current look and edit without binding a saved theme.';
+
+  @override
+  String get settingsAppearanceThemeDeleteTitle => 'Delete theme';
+
+  @override
+  String settingsAppearanceThemeDeleteConfirm(String name) {
+    return 'Delete “$name”? This cannot be undone.';
+  }
+
+  @override
+  String get settingsAppearancePreviewCollapse => 'Collapse';
+
+  @override
+  String get settingsAppearancePreviewExpand => 'Expand';
+
+  @override
+  String get settingsAppearanceThemeNew => 'New theme';
+
+  @override
+  String get settingsAppearanceDeviceFonts => 'Device fonts';
+
+  @override
+  String get settingsAppearanceChooseDeviceFont => 'Choose device font';
+
+  @override
+  String get settingsAppearanceNoDeviceFonts => 'No matching device fonts';
+
+  @override
+  String get settingsAppearanceDeviceFontPreview =>
+      'The quick brown fox · 0123456789\n字体预览：你好，世界';
+
+  @override
+  String get workspaceFileRename => 'Rename';
+
+  @override
+  String get workspaceFileCopy => 'Copy';
+
+  @override
+  String get workspaceFileCut => 'Cut';
+
+  @override
+  String get workspaceFilePaste => 'Paste';
+
+  @override
+  String get workspaceFileName => 'Name';
+
+  @override
+  String get workspaceFileInvalidName =>
+      'Enter a valid name without path separators.';
+
+  @override
+  String get workspaceDeleteFolderTitle => 'Delete folder?';
+
+  @override
+  String workspaceDeleteFolderMessage(String name) {
+    return 'Delete “$name” and all its contents? This cannot be undone.';
+  }
+
+  @override
+  String workspaceFileOperationFailed(String error) {
+    return 'File operation failed: $error';
+  }
+
+  @override
+  String workspaceFileCopyName(String name, int index) {
+    return '$name (copy $index)';
+  }
+
+  @override
+  String get workspaceFileSaving =>
+      'This file is being saved. Please try again when saving finishes.';
+
+  @override
+  String get chatBackupChooseTitle => 'Choose your backup directory';
+
+  @override
+  String get chatBackupTitle => 'Daily chat backup';
+
+  @override
+  String get chatBackupDescription =>
+      'Save a SQLite chat database snapshot daily while the app is running and keep the latest 10 automatic backups. Includes conversations and messages only, excluding attachment files, workspaces, characters, memories and app settings.';
+
+  @override
+  String get chatRestoreTitle => 'Restore chat records';
+
+  @override
+  String get chatRestoreDescription =>
+      'Select the external folder containing your previous backups, then choose a dated chat database snapshot. After reinstalling, select the original backup folder again to recover your chats.';
+
+  @override
+  String get chatRestoreChooseFolder => 'Choose existing backup folder';
+
+  @override
+  String get chatRestoreRefresh => 'Refresh snapshots';
+
+  @override
+  String get chatRestoreAction => 'Restore';
+
+  @override
+  String get chatRestoreCancel => 'Cancel';
+
+  @override
+  String get chatRestoreEmpty =>
+      'This folder contains no restorable chat database snapshots.';
+
+  @override
+  String chatRestoreCounts(int chats, int messages) {
+    return '$chats conversations · $messages messages';
+  }
+
+  @override
+  String get chatRestoreConfirmTitle => 'Restore this chat snapshot?';
+
+  @override
+  String chatRestoreConfirmDescription(String name) {
+    return 'Replace all current chat records with $name. Current chats will first be saved as a separate snapshot; restoration stops if that save fails. Stop running conversations first. Other settings are preserved.';
+  }
+
+  @override
+  String get chatRestoreSuccess => 'Chat records restored.';
+
+  @override
+  String get chatRestoreOnboardingTitle => 'Restore from a previous backup';
+
+  @override
+  String get chatRestoreOnboardingDescription =>
+      'Recover chats saved in an external folder before reinstalling or uninstalling';
+
+  @override
+  String get chatBackupExternalDescription =>
+      'Choose a folder outside the app so backups remain after uninstall. On iPhone and iPad, choose iCloud Drive or another external file provider.';
+
+  @override
+  String get chatBackupChoose => 'Choose backup directory';
+
+  @override
+  String get chatBackupLater => 'Set up later';
+
+  @override
+  String get chatBackupChange => 'Change backup directory';
+
+  @override
+  String get chatBackupMissing =>
+      'The backup directory is not configured, no longer exists or cannot be accessed. Select a directory to enable daily chat backups.';
+
+  @override
+  String get chatBackupReady =>
+      'The backup directory is ready. Daily backups are checked at startup, on resume and while the app is running.';
+
+  @override
+  String get chatBackupNow => 'Back up chats now';
+
+  @override
+  String get chatBackupNever => 'No successful backup yet';
+
+  @override
+  String chatBackupLastSuccess(String time) {
+    return 'Last successful backup: $time';
   }
 }

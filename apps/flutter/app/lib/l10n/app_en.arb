@@ -7,6 +7,8 @@
   "askOperitHint": "Ask PengSong",
   "aiChat": "AI Chat",
   "fullscreenInput": "Fullscreen input",
+  "noticeExpand": "Expand",
+  "noticeCollapse": "Collapse",
   "expandInput": "Expand input",
   "collapseInput": "Collapse input",
   "settings": "Settings",
@@ -59,6 +61,13 @@
   "receivingToolResultAiResponse": "Receiving AI response after tool execution...",
   "summarizingMemories": "Summarizing memories...",
   "summaryGenerating": "Generating summary...",
+  "summaryStageCore": "Summarizing the core task...",
+  "summaryStageConstraints": "Summarizing user requests and constraints...",
+  "summaryStageFiles": "Summarizing key files and code...",
+  "summaryStageErrors": "Summarizing errors and fixes...",
+  "summaryStageInteraction": "Summarizing interaction and context...",
+  "summaryStageNext": "Summarizing next steps...",
+  "summaryStageFormatting": "Formatting the summary...",
   "chatCompressingHistory": "Compressing history records...",
   "executingPlan": "Executing plan...",
   "executingTool": "Executing tool: {toolName}",
@@ -101,6 +110,10 @@
   },
   "close": "Close",
   "workspaceCloseOtherTabs": "Close Others",
+  "workspaceDockDropTarget": "Drop into workspace",
+  "workspaceOpenWith": "Open with",
+  "workspaceBuiltInPreview": "Built-in preview",
+  "workspacePluginUnsavedChanges": "Save in the editor first, or discard the unsaved changes.",
   "workspaceCloseTabsToRight": "Close to the Right",
   "workspaceCloseAllTabs": "Close All",
   "commonExpand": "Expand",
@@ -164,6 +177,8 @@
   "messageLocatorFavorites": "Favorites",
   "messageLocatorNoFavorites": "No favorite messages yet",
   "messageLocatorLoadFailed": "Could not load messages. Please try again.",
+  "messageTransformFailed": "Failed to process message display: {error}",
+  "@messageTransformFailed": { "placeholders": { "error": { "type": "String" } } },
   "messageLocatorFavoriteFailed": "Could not update favorite. Please try again.",
   "messageLocatorAddFavorite": "Favorite message",
   "messageLocatorRemoveFavorite": "Remove favorite",
@@ -205,6 +220,7 @@
   },
   "messageSenderOther": "Other",
   "hiddenUserMessage": "Hidden user message",
+  "autoTriggeredUserMessage": "AUTO",
   "workspaceSetupTitle": "Set up workspace",
   "workspaceSetupSubtitle": "Provide a dedicated file environment for your AI projects",
   "workspaceCreateTitle": "Create workspace",
@@ -389,6 +405,8 @@
   "searchHistory": "Search history",
   "noDownloadTasks": "No download tasks yet",
   "openFile": "Open file",
+  "workspaceFileOpening": "Opening file…",
+  "workspaceFileOpenTimedOut": "Opening the file timed out. Please try again.",
   "openLocation": "Open location",
   "retry": "Retry",
   "removeRecord": "Remove record",
@@ -480,8 +498,10 @@
   "settingsCategoryAppearanceSubtitle": "Theme, bubbles, and interaction",
   "settingsCategoryAppearanceDescription": "Customize global theme, background media, message bubbles, and chat interaction.",
   "settingsCategoryDataTitle": "Data & Backup",
-  "settingsCategoryDataSubtitle": "Backup, restore, stats",
-  "settingsCategoryDataDescription": "Back up chats, plugin data, and model settings, restore backup content, and view data statistics.",
+  "settingsCategoryDataSubtitle": "Backup, restore, storage",
+  "settingsCategoryDataDescription": "Back up and restore chats, plugin data, and model settings, and manage storage.",
+  "settingsUsageReportTitle": "Token Usage Report",
+  "settingsUsageReportSubtitle": "Model usage, cache, and cost",
   "settingsCategoryAccessLinksTitle": "Device Space",
   "settingsCategoryAccessLinksSubtitle": "Connect, sync, collaborate",
   "settingsCategoryAccessLinksDescription": "Manage this device space, connect devices, and share data and routes.",
@@ -642,6 +662,8 @@
   "settingsModelApiEndpoint": "API endpoint",
   "settingsModelModelNames": "Model names",
   "settingsModelApiKey": "API key",
+  "settingsModelShowApiKey": "Show API key",
+  "settingsModelHideApiKey": "Hide API key",
   "settingsModelCodexLogin": "ChatGPT login",
   "settingsModelCodexLoginTitle": "Sign in to ChatGPT Codex",
   "settingsModelCodexLoginDescription": "OpenAI Codex uses a ChatGPT subscription sign-in instead of an API key.",
@@ -669,7 +691,7 @@
     }
   },
   "settingsModelApiKeyPool": "API key pool",
-  "settingsModelApiKeyPoolDescription": "Prepare multiple keys for one model profile so runtime can rotate between them.",
+  "settingsModelApiKeyPoolDescription": "Keep using a healthy key. Switch on authentication, quota, rate limit, or temporary failures; cooling keys are skipped.",
   "settingsModelApiKeyPoolCount": "{count} keys",
   "@settingsModelApiKeyPoolCount": {
     "placeholders": {
@@ -678,11 +700,20 @@
       }
     }
   },
-  "settingsModelApiKeyPoolEmpty": "No keys yet. Add keys and this profile will use the key pool.",
+  "settingsModelApiKeyPoolEmpty": "No keys yet. Add a key before enabling this pool.",
   "settingsModelAddApiKey": "Add key",
   "settingsModelEditApiKey": "Edit key",
   "settingsModelApiKeyName": "Key name",
   "settingsModelApiKeyEnabled": "Enable this key",
+  "settingsModelPoolAddSingle": "Add current single key",
+  "settingsModelPoolPaste": "Paste one key per line to add several at once.",
+  "settingsModelPoolNoEligible": "Enable at least one nonempty key that is not marked unavailable.",
+  "settingsModelPoolUntested": "Untested",
+  "settingsModelPoolAvailable": "Available",
+  "settingsModelPoolUnavailable": "Unavailable",
+  "settingsModelPoolClearMarks": "Reset key health",
+  "settingsModelPoolTest": "Test untested keys",
+  "settingsModelPoolNeedsModel": "Save the provider and add a model before testing keys.",
   "settingsModelProviderId": "Provider ID",
   "settingsModelProvidersSection": "LLM providers",
   "settingsModelProviderType": "Provider type",
@@ -883,8 +914,8 @@
       }
     }
   },
-  "settingsModelCatalogNotDownloaded": "Model details have not been downloaded yet",
-  "settingsModelCatalogRetry": "Retry",
+  "settingsModelCatalogBundled": "Using bundled model details; online updates replace them automatically",
+  "settingsModelCatalogRetry": "Update",
   "settingsModelCustomModel": "Custom model",
   "settingsModelModelId": "Model ID",
   "settingsModelDuplicateModelId": "This model has already been added to this provider.",
@@ -909,8 +940,6 @@
   "settingsModelMaxContextLength": "Max context length",
   "settingsModelMaxContextLengthInvalid": "Enter a max context length greater than 0",
   "settingsModelSummaryThreshold": "Summarize at",
-  "settingsModelSummaryByMessageCount": "Summarize by message count",
-  "settingsModelSummaryMessageCount": "Summary message threshold",
   "settingsModelCustomHeaders": "Custom headers",
   "settingsModelCustomParameters": "Custom parameters JSON",
   "settingsModelToolCall": "Tool calling",
@@ -995,6 +1024,20 @@
       }
     }
   },
+  "settingsModelTestSummaryWithRestricted": "{passed} passed, {failed} failed, {restricted} restricted",
+  "@settingsModelTestSummaryWithRestricted": {
+    "placeholders": {
+      "passed": {
+        "type": "int"
+      },
+      "failed": {
+        "type": "int"
+      },
+      "restricted": {
+        "type": "int"
+      }
+    }
+  },
   "settingsModelTestAllPassed": "All {count} passed",
   "@settingsModelTestAllPassed": {
     "placeholders": {
@@ -1055,6 +1098,9 @@
   "settingsModelTestedModel": "Tested model",
   "settingsModelConnectionTestPassed": "All checks passed",
   "settingsModelConnectionTestFailed": "Some checks failed",
+  "settingsModelConnectionTestRestricted": "Test restricted",
+  "settingsModelTestCreditRestricted": "Credit or output budget limit",
+  "settingsModelTestRateRestricted": "Upstream rate limit or cooldown",
   "settingsModelCapabilitiesApplied": "Model capability switches were updated from the test result.",
   "settingsModelCapabilitiesNeedChat": "Chat test did not pass, so model capability switches were not updated.",
   "settingsModelConnectionTestError": "Connection test failed: {error}",
@@ -1545,7 +1591,11 @@
   "settingsAppearanceBubbleImageAdjustUser": "Adjust user bubble image",
   "settingsAppearanceBubbleImageAdjustAi": "Adjust AI bubble image",
   "settingsAppearanceBubbleImagePreview": "Preview",
-  "settingsAppearanceBubbleImagePreviewText": "Bubble preview with 9-slice guides",
+  "settingsAppearanceBubbleImagePreviewText": "This is a bubble preview message.\nCheck the corners, edges, and center at their rendered size.",
+  "settingsAppearanceBubbleImageSourceHint": "Original · White: crop boundary. Blue: nine-slice grid. Pinch to zoom and drag to inspect.",
+  "settingsAppearanceBubbleImageFitSource": "Fit original image",
+  "settingsAppearanceBubbleImageGrid": "9-slice",
+  "settingsAppearanceBubbleImageGridHint": "Two horizontal and two vertical cuts form nine regions. Corners stay fixed; edges tile along one axis and the center tiles along both. Stretch mode stretches those regions instead. Boundaries are relative to the cropped image.",
   "settingsAppearanceBubbleImageImportFailed": "Bubble image was not applied: {error}",
   "@settingsAppearanceBubbleImageImportFailed": {
     "placeholders": {
@@ -1656,14 +1706,10 @@
       }
     }
   },
-  "settingsDataTokenSection": "Usage statistics",
   "settingsDataInputTokens": "Input",
   "settingsDataOutputTokens": "Output",
-  "settingsDataOpenDetailedStats": "View detailed statistics",
-  "settingsDataOpenDetailedStatsDescription": "View the usage heatmap and model usage timeline with minute-level zoom.",
-  "settingsDataRefreshTokenStats": "Refresh statistics",
   "settingsDataResetTokenStats": "Reset statistics",
-  "settingsDataDetailedStatsTitle": "Detailed statistics",
+  "settingsUsageReportResetConfirmation": "This permanently deletes all saved model usage records. Your conversations are kept.",
   "settingsDataDetailedStatsDescription": "Statistics are calculated from dedicated model request records.",
   "settingsDataDetailedStatsEmpty": "No detailed usage records yet",
   "settingsDataDetailedStatsDateRange": "{start} to {end}",
@@ -2214,6 +2260,14 @@
   "settingsPeerPortMode": "Port allocation",
   "settingsPeerPortModeFixed": "Fixed listen address and port",
   "settingsPeerPortModeAutomatic": "Automatic port",
+  "settingsPeerNetworkDiscoveryHelp": "For discovery across routed networks, configure a shared directory and group key. To host the directory, leave the address empty and set a group key.",
+  "settingsPeerDiscoveryDirectory": "Discovery directory (optional)",
+  "settingsPeerDiscoveryGroup": "Discovery group key",
+  "settingsPeerDiscoveryGenerateKey": "Generate new group key",
+  "settingsPeerDiscoveryCopyKey": "Copy group key",
+  "settingsPeerDiscoveryPort": "Directory listener port",
+  "settingsPeerDiscoveryPortHelp": "Only used on the directory host. Other devices use the port in the directory URL.",
+  "settingsPeerNetworkDiscoveryInvalid": "Check the discovery settings: use an HTTP(S) origin without a path, a shared key of 16–128 bytes, and a nonzero port when hosting the directory.",
   "settingsPeerAdvanced": "Advanced options",
   "settingsPeerDiscoveryUnavailable": "This Host cannot advertise listeners on the local network. Direct connections remain available for supported transports.",
   "settingsPeerTransportUnavailable": "{transport} listening is not supported by this Host.",
@@ -2347,8 +2401,8 @@
   "settingsAppearanceThemeConfigDelete": "Delete an inactive theme configuration",
   "settingsAppearanceThemeConfigName": "Theme name",
   "settingsAppearanceThemeConfigNameRequired": "Enter a theme name",
-  "settingsAppearanceThemeConfigCustomHint": "Click + to create and manage independent theme configurations.",
-  "settingsAppearanceThemeConfigEditingHint": "Appearance changes are saved to the selected theme configuration.",
+  "settingsAppearanceThemeConfigCustomHint": "Create a theme to save your appearance. Tap a card to switch; choose Edit to customize.",
+  "settingsAppearanceThemeConfigEditingHint": "Tap a card to switch themes. Mode shortcuts change only the current theme. Edits save automatically.",
   "settingsAppearanceThemeConfigFailed": "Theme operation failed: {detail}",
   "@settingsAppearanceThemeConfigFailed": {
     "placeholders": {
@@ -2394,6 +2448,48 @@
   "settingsAppearanceThemeConfigSourceHint": "Templates come from installed plugins. New configurations can be edited independently and use existing appearance sync.",
   "settingsAppearanceLoadFailed": "Unable to load appearance",
   "settingsAppearanceRepairHint": "Your saved appearance has not been replaced. Retry after repairing its resources, or reset appearance explicitly. Reset keeps your avatar and saved configurations and selects custom appearance.",
+  "settingsAppearanceAssetBackgroundFailed": "The background image could not be loaded. Using the default background ({reference}).",
+  "@settingsAppearanceAssetBackgroundFailed": {
+    "placeholders": {
+      "reference": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsAppearanceAssetVideoFailed": "The background video could not be played. Using the default background ({reference}).",
+  "@settingsAppearanceAssetVideoFailed": {
+    "placeholders": {
+      "reference": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsAppearanceAssetBubbleFailed": "The bubble image could not be loaded. Using the default bubble color ({reference}).",
+  "@settingsAppearanceAssetBubbleFailed": {
+    "placeholders": {
+      "reference": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsAppearanceAssetPreviousRetained": "This theme resource could not be loaded. Keeping the previous image or media ({reference}); your other theme settings still apply.",
+  "@settingsAppearanceAssetPreviousRetained": {
+    "placeholders": {
+      "reference": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsAppearanceAssetRetry": "Retry",
+  "settingsAppearanceAssetReimportHint": "If retrying does not help, choose and import a readable image or playable video again.",
+  "settingsAppearanceAssetImportFailed": "The background resource was not applied: {reason}. Please choose a readable image or playable video.",
+  "@settingsAppearanceAssetImportFailed": {
+    "placeholders": {
+      "reason": {
+        "type": "String"
+      }
+    }
+  },
   "settingsAppearanceRetry": "Retry",
   "settingsAppearanceResetAfterError": "Reset appearance",
   "backgroundWorkIdle": "No work is running",
@@ -2458,7 +2554,7 @@
   "@deviceSpaceSyncCounting": {"placeholders": {"count": {"type": "int"}}},
   "deviceSpaceSyncFiles": "Transferring and verifying files",
   "deviceSpaceSyncRetrying": "Sync interrupted. Retrying automatically.",
-  "deviceSpaceSyncPending": "Some data is still pending. Retrying automatically.",
+  "deviceSpaceSyncPending": "Some data is still pending.",
   "deviceSpaceSyncCurrentFile": "Current file: {done} / {total}",
   "@deviceSpaceSyncCurrentFile": {
     "placeholders": {
@@ -2503,6 +2599,7 @@
   "peerQrPaste": "Or paste connection info",
   "peerQrRead": "Read connection info",
   "peerQrWrongDevice": "This code belongs to a different device. Scan the code for the selected device.",
+  "peerPairTimeoutHint": "Connection timed out: could not reach the other device. A common cause is the other device’s firewall blocking incoming connections. Try initiating the connection from the other device, or allow Operit through the other device’s firewall (especially on public networks).",
   "peerQrImageInvalid": "No QR code could be read. Choose a clear QR image smaller than 16 MB.",
   "peerQrCameraUnavailable": "Camera scanning is unavailable. Import a QR image or paste connection info instead.",
   "peerQrCameraPermission": "Camera access is required. Allow it in system settings, or import a QR image.",
@@ -2590,5 +2687,87 @@
         "type": "int"
       }
     }
-  }
+  },
+  "contextStatsSummaryLoadFailed": "Unable to load context statistics",
+  "contextStatsDevicesLoadFailed": "Unable to load device information",
+  "settingsAppearanceThemeLibrary": "Your themes",
+  "settingsAppearanceThemeLibraryHint": "Choose a look. Make it yours.",
+  "settingsAppearanceThemeActive": "In use",
+  "settingsAppearanceThemeApply": "Use this theme",
+  "settingsAppearanceThemeMore": "More theme actions",
+  "settingsAppearanceThemeDuplicate": "Create a copy",
+  "settingsAppearanceThemeUnboundHint": "Keep the current look and edit without binding a saved theme.",
+  "settingsAppearanceThemeDeleteTitle": "Delete theme",
+  "settingsAppearanceThemeDeleteConfirm": "Delete “{name}”? This cannot be undone.",
+  "settingsAppearancePreviewCollapse": "Collapse",
+  "settingsAppearancePreviewExpand": "Expand",
+  "@settingsAppearanceThemeDeleteConfirm": {"placeholders": {"name": {"type": "String"}}},
+  "settingsAppearanceThemeNew": "New theme",
+  "settingsAppearanceDeviceFonts": "Device fonts",
+  "settingsAppearanceChooseDeviceFont": "Choose device font",
+  "settingsAppearanceNoDeviceFonts": "No matching device fonts",
+  "settingsAppearanceDeviceFontPreview": "The quick brown fox · 0123456789\n字体预览：你好，世界",
+  "workspaceFileRename": "Rename",
+  "workspaceFileCopy": "Copy",
+  "workspaceFileCut": "Cut",
+  "workspaceFilePaste": "Paste",
+  "workspaceFileName": "Name",
+  "workspaceFileInvalidName": "Enter a valid name without path separators.",
+  "workspaceDeleteFolderTitle": "Delete folder?",
+  "workspaceDeleteFolderMessage": "Delete “{name}” and all its contents? This cannot be undone.",
+  "@workspaceDeleteFolderMessage": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceFileOperationFailed": "File operation failed: {error}",
+  "@workspaceFileOperationFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceFileCopyName": "{name} (copy {index})",
+  "@workspaceFileCopyName": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      },
+      "index": {
+        "type": "int"
+      }
+    }
+  },
+  "workspaceFileSaving": "This file is being saved. Please try again when saving finishes.",
+  "chatBackupChooseTitle": "Choose your backup directory",
+  "chatBackupTitle": "Daily chat backup",
+  "chatBackupDescription": "Save a SQLite chat database snapshot daily while the app is running and keep the latest 10 automatic backups. Includes conversations and messages only, excluding attachment files, workspaces, characters, memories and app settings.",
+  "chatRestoreTitle": "Restore chat records",
+  "chatRestoreDescription": "Select the external folder containing your previous backups, then choose a dated chat database snapshot. After reinstalling, select the original backup folder again to recover your chats.",
+  "chatRestoreChooseFolder": "Choose existing backup folder",
+  "chatRestoreRefresh": "Refresh snapshots",
+  "chatRestoreAction": "Restore",
+  "chatRestoreCancel": "Cancel",
+  "chatRestoreEmpty": "This folder contains no restorable chat database snapshots.",
+  "chatRestoreCounts": "{chats} conversations · {messages} messages",
+  "@chatRestoreCounts": {"placeholders": {"chats": {"type": "int"}, "messages": {"type": "int"}}},
+  "chatRestoreConfirmTitle": "Restore this chat snapshot?",
+  "chatRestoreConfirmDescription": "Replace all current chat records with {name}. Current chats will first be saved as a separate snapshot; restoration stops if that save fails. Stop running conversations first. Other settings are preserved.",
+  "@chatRestoreConfirmDescription": {"placeholders": {"name": {"type": "String"}}},
+  "chatRestoreSuccess": "Chat records restored.",
+  "chatRestoreOnboardingTitle": "Restore from a previous backup",
+  "chatRestoreOnboardingDescription": "Recover chats saved in an external folder before reinstalling or uninstalling",
+  "chatBackupExternalDescription": "Choose a folder outside the app so backups remain after uninstall. On iPhone and iPad, choose iCloud Drive or another external file provider.",
+  "chatBackupChoose": "Choose backup directory",
+  "chatBackupLater": "Set up later",
+  "chatBackupChange": "Change backup directory",
+  "chatBackupMissing": "The backup directory is not configured, no longer exists or cannot be accessed. Select a directory to enable daily chat backups.",
+  "chatBackupReady": "The backup directory is ready. Daily backups are checked at startup, on resume and while the app is running.",
+  "chatBackupNow": "Back up chats now",
+  "chatBackupNever": "No successful backup yet",
+  "chatBackupLastSuccess": "Last successful backup: {time}",
+  "@chatBackupLastSuccess": {"placeholders": {"time": {"type": "String"}}}
 }

@@ -69,6 +69,7 @@ export async function enqueueCandidate(input: CandidateRequest, repository: Char
   const owners = new Set<string>();
   if (input.sourceType === "reply_finalized_auto") {
     const access = await currentMessageMemoryAccess(input.chatId, message, repository);
+    if (access.authorMissing) return { owners: [], candidateIds: [] };
     const ownerKey = input.ownerKey === null ? access.primaryOwnerKey : input.ownerKey;
     if (ownerKey === "") return { owners: [], candidateIds: [] };
     if (!access.resources.some(
@@ -103,28 +104,6 @@ export async function enqueueCandidate(input: CandidateRequest, repository: Char
     await repository.writeMemoryJobState(ownerKey, space); result.candidateIds.push(id);
   }
   return result;
-}
-
-/** Returns genuine terminal failures to the pending queue so a later interval can retry them. */
-export async function retryFailedCandidates(ownerKey: string, repository: CharacterRepository): Promise<{ retried: number }> {
-  const space = await repository.readMemoryJobState(ownerKey), now = Date.now(), producerNodeId = await memoryJobProducer();
-  let retried = 0;
-  for (const candidate of space.candidates) if (candidate.status === "failed") {
-    candidate.producerNodeId = producerNodeId; candidate.status = "pending"; candidate.lastError = ""; candidate.updatedAt = now; retried += 1;
-  }
-  if (retried !== 0) await repository.writeMemoryJobState(ownerKey, space);
-  return { retried };
-}
-
-/** Removes only terminal failed records so the queue stops reporting permanent failures. */
-export async function clearFailedCandidates(ownerKey: string, repository: CharacterRepository): Promise<{ cleared: number }> {
-  const space = await repository.readMemoryJobState(ownerKey);
-  const remaining = space.candidates.filter(
-    /** Retains pending and processing records for their real owners. */
-    candidate => candidate.status !== "failed",
-  ), cleared = space.candidates.length - remaining.length;
-  if (cleared !== 0) { space.candidates = remaining; await repository.writeMemoryJobState(ownerKey, space); }
-  return { cleared };
 }
 
 /** Plans and persists a genuine requested rebuild for later existing host interval execution. */

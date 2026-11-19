@@ -1,6 +1,8 @@
+use super::ApiKeyProvider::KeyGetter;
+use super::ProviderHttp::KeyAuthentication;
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use http::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex};
 
@@ -285,7 +287,8 @@ impl DeepseekResponsesPayloadAdapter {
 #[derive(Clone)]
 pub struct DeepseekProvider {
     pub api_endpoint: String,
-    pub api_key: String,
+    pub key_getter: KeyGetter,
+
     pub model_name: String,
     pub provider_type: String,
     pub supports_vision: bool,
@@ -313,7 +316,7 @@ impl DeepseekProvider {
     /// Creates a DeepSeek provider bound to one provider runtime context.
     pub fn new(
         api_endpoint: String,
-        api_key: String,
+        key_getter: KeyGetter,
         model_name: String,
         provider_type: String,
         custom_headers: Vec<(String, String)>,
@@ -326,7 +329,7 @@ impl DeepseekProvider {
     ) -> Self {
         Self {
             api_endpoint,
-            api_key,
+            key_getter,
             model_name,
             provider_type,
             supports_vision,
@@ -359,6 +362,23 @@ impl DeepseekProvider {
         }
     }
 
+    /// Uses the live transport's counters until its settled totals are copied into this provider.
+    fn currentTokenCounts(&self) -> TokenCounts {
+        let state = self.state.lock().expect("DeepseekProvider state mutex poisoned");
+        match state.activeParent.as_ref() {
+            Some(parent) => TokenCounts {
+                input: parent.input_token_count(),
+                cached_input: parent.cached_input_token_count(),
+                output: parent.output_token_count(),
+            },
+            None => TokenCounts {
+                input: state.tokenCacheManager.total_input_token_count(),
+                cached_input: state.tokenCacheManager.cached_input_token_count(),
+                output: state.tokenCacheManager.output_token_count(),
+            },
+        }
+    }
+
     fn setActiveParent(&self, parent: OpenAIProvider) -> u64 {
         let mut state = self
             .state
@@ -376,12 +396,18 @@ impl DeepseekProvider {
             .cancelled
     }
 
-    fn clearActiveParent(&self, generation: u64) {
+    /// Commits only this transport's usage; a paused request cannot overwrite a newer request.
+    fn finishActiveParent(&self, generation: u64, counts: TokenCounts) {
         let mut state = self
             .state
             .lock()
             .expect("DeepseekProvider state mutex poisoned");
         if state.activeParentGeneration == generation {
+            state.tokenCacheManager.update_actual_tokens(counts.input, counts.cached_input);
+            state.tokenCacheManager.set_output_tokens(counts.output);
+            state.inputTokenCount = state.tokenCacheManager.total_input_token_count();
+            state.cachedInputTokenCount = state.tokenCacheManager.cached_input_token_count();
+            state.outputTokenCount = state.tokenCacheManager.output_token_count();
             state.activeParent = None;
         }
     }
@@ -390,7 +416,7 @@ impl DeepseekProvider {
     fn open_ai_parent(&self, use_responses_api: bool) -> OpenAIProvider {
         OpenAIProvider::new_with_capabilities(
             self.api_endpoint.clone(),
-            self.api_key.clone(),
+            self.key_getter.clone(),
             self.model_name.clone(),
             self.provider_type.clone(),
             self.custom_headers.clone(),
@@ -399,6 +425,7 @@ impl DeepseekProvider {
             self.supports_video,
             self.enable_tool_call,
         )
+
         .with_responses_api(use_responses_api)
         .with_responses_stream_protocol(if use_responses_api {
             ResponsesStreamProtocol::Deepseek
@@ -655,11 +682,6 @@ impl DeepseekProvider {
     fn headers(&self) -> Result<HeaderMap, AiServiceError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        if !self.api_key.trim().is_empty() {
-            let value = HeaderValue::from_str(&format!("Bearer {}", self.api_key.trim()))
-                .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?;
-            headers.insert(AUTHORIZATION, value);
-        }
         for (name, value) in &self.custom_headers {
             let header_name = HeaderName::from_bytes(name.as_bytes())
                 .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?;
@@ -689,24 +711,15 @@ mod responses_tests;
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl AIService for DeepseekProvider {
     fn input_token_count(&self) -> i64 {
-        self.state
-            .lock()
-            .map(|state| state.tokenCacheManager.total_input_token_count())
-            .unwrap_or(0)
+        self.currentTokenCounts().input
     }
 
     fn cached_input_token_count(&self) -> i64 {
-        self.state
-            .lock()
-            .map(|state| state.tokenCacheManager.cached_input_token_count())
-            .unwrap_or(0)
+        self.currentTokenCounts().cached_input
     }
 
     fn output_token_count(&self) -> i64 {
-        self.state
-            .lock()
-            .map(|state| state.tokenCacheManager.output_token_count())
-            .unwrap_or(0)
+        self.currentTokenCounts().output
     }
 
     fn provider_model(&self) -> String {
@@ -715,6 +728,8 @@ impl AIService for DeepseekProvider {
 
     fn reset_token_counts(&mut self) {
         if let Ok(mut state) = self.state.lock() {
+            state.activeParentGeneration = state.activeParentGeneration.wrapping_add(1);
+            state.activeParent = None;
             state.inputTokenCount = 0;
             state.cachedInputTokenCount = 0;
             state.outputTokenCount = 0;
@@ -755,6 +770,11 @@ impl AIService for DeepseekProvider {
                 operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
             let mut parent = self.open_ai_parent(self.uses_responses_protocol()?);
+            parent.apply_token_counts(TokenCounts {
+                input: (self.input_token_count() - self.cached_input_token_count()).max(0),
+                cached_input: self.cached_input_token_count(),
+                output: 0,
+            });
             let mut result = parent.send_prepared_request(request, request_body).await?;
             AppLogger::v_with_level(
                 PROVIDER_TRANSPORT_LOG_TAG,
@@ -802,12 +822,11 @@ impl AIService for DeepseekProvider {
                         ),
                         operit_util::AppLogger::VERBOSE_LEVEL_3,
                     );
-                    provider.apply_token_counts(TokenCounts {
+                    provider.finishActiveParent(activeParentGeneration, TokenCounts {
                         input: (parent.input_token_count() - parent.cached_input_token_count()).max(0),
                         cached_input: parent.cached_input_token_count(),
                         output: parent.output_token_count(),
                     });
-                    provider.clearActiveParent(activeParentGeneration);
                 })
             });
             return Ok(Box::new(with_event_channel_and_failure(
@@ -818,6 +837,7 @@ impl AIService for DeepseekProvider {
         }
 
         let response = super::ProviderHttp::post(&self.api_endpoint)
+            .key_getter(self.key_getter.clone(), KeyAuthentication::Bearer)
             .headers(self.headers()?)
             .json(&request_body)
             .send()
@@ -911,6 +931,7 @@ impl AIService for DeepseekProvider {
             })
         };
         let response = super::ProviderHttp::post(&self.api_endpoint)
+            .key_getter(self.key_getter.clone(), KeyAuthentication::Bearer)
             .headers(self.headers()?)
             .json(&request_body)
             .send()

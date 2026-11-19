@@ -140,6 +140,18 @@ abstract class AppLocalizations {
   /// **'Fullscreen input'**
   String get fullscreenInput;
 
+  /// No description provided for @noticeExpand.
+  ///
+  /// In en, this message translates to:
+  /// **'Expand'**
+  String get noticeExpand;
+
+  /// No description provided for @noticeCollapse.
+  ///
+  /// In en, this message translates to:
+  /// **'Collapse'**
+  String get noticeCollapse;
+
   /// No description provided for @expandInput.
   ///
   /// In en, this message translates to:
@@ -410,6 +422,48 @@ abstract class AppLocalizations {
   /// **'Generating summary...'**
   String get summaryGenerating;
 
+  /// No description provided for @summaryStageCore.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing the core task...'**
+  String get summaryStageCore;
+
+  /// No description provided for @summaryStageConstraints.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing user requests and constraints...'**
+  String get summaryStageConstraints;
+
+  /// No description provided for @summaryStageFiles.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing key files and code...'**
+  String get summaryStageFiles;
+
+  /// No description provided for @summaryStageErrors.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing errors and fixes...'**
+  String get summaryStageErrors;
+
+  /// No description provided for @summaryStageInteraction.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing interaction and context...'**
+  String get summaryStageInteraction;
+
+  /// No description provided for @summaryStageNext.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing next steps...'**
+  String get summaryStageNext;
+
+  /// No description provided for @summaryStageFormatting.
+  ///
+  /// In en, this message translates to:
+  /// **'Formatting the summary...'**
+  String get summaryStageFormatting;
+
   /// No description provided for @chatCompressingHistory.
   ///
   /// In en, this message translates to:
@@ -475,6 +529,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Close Others'**
   String get workspaceCloseOtherTabs;
+
+  /// No description provided for @workspaceDockDropTarget.
+  ///
+  /// In en, this message translates to:
+  /// **'Drop into workspace'**
+  String get workspaceDockDropTarget;
+
+  /// No description provided for @workspaceOpenWith.
+  ///
+  /// In en, this message translates to:
+  /// **'Open with'**
+  String get workspaceOpenWith;
+
+  /// No description provided for @workspaceBuiltInPreview.
+  ///
+  /// In en, this message translates to:
+  /// **'Built-in preview'**
+  String get workspaceBuiltInPreview;
+
+  /// No description provided for @workspacePluginUnsavedChanges.
+  ///
+  /// In en, this message translates to:
+  /// **'Save in the editor first, or discard the unsaved changes.'**
+  String get workspacePluginUnsavedChanges;
 
   /// No description provided for @workspaceCloseTabsToRight.
   ///
@@ -710,6 +788,12 @@ abstract class AppLocalizations {
   /// **'Could not load messages. Please try again.'**
   String get messageLocatorLoadFailed;
 
+  /// No description provided for @messageTransformFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed to process message display: {error}'**
+  String messageTransformFailed(String error);
+
   /// No description provided for @messageLocatorFavoriteFailed.
   ///
   /// In en, this message translates to:
@@ -829,6 +913,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Hidden user message'**
   String get hiddenUserMessage;
+
+  /// No description provided for @autoTriggeredUserMessage.
+  ///
+  /// In en, this message translates to:
+  /// **'AUTO'**
+  String get autoTriggeredUserMessage;
 
   /// No description provided for @workspaceSetupTitle.
   ///
@@ -1472,6 +1562,18 @@ abstract class AppLocalizations {
   /// **'Open file'**
   String get openFile;
 
+  /// No description provided for @workspaceFileOpening.
+  ///
+  /// In en, this message translates to:
+  /// **'Opening file…'**
+  String get workspaceFileOpening;
+
+  /// No description provided for @workspaceFileOpenTimedOut.
+  ///
+  /// In en, this message translates to:
+  /// **'Opening the file timed out. Please try again.'**
+  String get workspaceFileOpenTimedOut;
+
   /// No description provided for @openLocation.
   ///
   /// In en, this message translates to:
@@ -1979,14 +2081,26 @@ abstract class AppLocalizations {
   /// No description provided for @settingsCategoryDataSubtitle.
   ///
   /// In en, this message translates to:
-  /// **'Backup, restore, stats'**
+  /// **'Backup, restore, storage'**
   String get settingsCategoryDataSubtitle;
 
   /// No description provided for @settingsCategoryDataDescription.
   ///
   /// In en, this message translates to:
-  /// **'Back up chats, plugin data, and model settings, restore backup content, and view data statistics.'**
+  /// **'Back up and restore chats, plugin data, and model settings, and manage storage.'**
   String get settingsCategoryDataDescription;
+
+  /// No description provided for @settingsUsageReportTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Token Usage Report'**
+  String get settingsUsageReportTitle;
+
+  /// No description provided for @settingsUsageReportSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Model usage, cache, and cost'**
+  String get settingsUsageReportSubtitle;
 
   /// No description provided for @settingsCategoryAccessLinksTitle.
   ///
@@ -2462,6 +2576,18 @@ abstract class AppLocalizations {
   /// **'API key'**
   String get settingsModelApiKey;
 
+  /// No description provided for @settingsModelShowApiKey.
+  ///
+  /// In en, this message translates to:
+  /// **'Show API key'**
+  String get settingsModelShowApiKey;
+
+  /// No description provided for @settingsModelHideApiKey.
+  ///
+  /// In en, this message translates to:
+  /// **'Hide API key'**
+  String get settingsModelHideApiKey;
+
   /// No description provided for @settingsModelCodexLogin.
   ///
   /// In en, this message translates to:
@@ -2543,7 +2669,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsModelApiKeyPoolDescription.
   ///
   /// In en, this message translates to:
-  /// **'Prepare multiple keys for one model profile so runtime can rotate between them.'**
+  /// **'Keep using a healthy key. Switch on authentication, quota, rate limit, or temporary failures; cooling keys are skipped.'**
   String get settingsModelApiKeyPoolDescription;
 
   /// No description provided for @settingsModelApiKeyPoolCount.
@@ -2555,7 +2681,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsModelApiKeyPoolEmpty.
   ///
   /// In en, this message translates to:
-  /// **'No keys yet. Add keys and this profile will use the key pool.'**
+  /// **'No keys yet. Add a key before enabling this pool.'**
   String get settingsModelApiKeyPoolEmpty;
 
   /// No description provided for @settingsModelAddApiKey.
@@ -2581,6 +2707,60 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Enable this key'**
   String get settingsModelApiKeyEnabled;
+
+  /// No description provided for @settingsModelPoolAddSingle.
+  ///
+  /// In en, this message translates to:
+  /// **'Add current single key'**
+  String get settingsModelPoolAddSingle;
+
+  /// No description provided for @settingsModelPoolPaste.
+  ///
+  /// In en, this message translates to:
+  /// **'Paste one key per line to add several at once.'**
+  String get settingsModelPoolPaste;
+
+  /// No description provided for @settingsModelPoolNoEligible.
+  ///
+  /// In en, this message translates to:
+  /// **'Enable at least one nonempty key that is not marked unavailable.'**
+  String get settingsModelPoolNoEligible;
+
+  /// No description provided for @settingsModelPoolUntested.
+  ///
+  /// In en, this message translates to:
+  /// **'Untested'**
+  String get settingsModelPoolUntested;
+
+  /// No description provided for @settingsModelPoolAvailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Available'**
+  String get settingsModelPoolAvailable;
+
+  /// No description provided for @settingsModelPoolUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Unavailable'**
+  String get settingsModelPoolUnavailable;
+
+  /// No description provided for @settingsModelPoolClearMarks.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset key health'**
+  String get settingsModelPoolClearMarks;
+
+  /// No description provided for @settingsModelPoolTest.
+  ///
+  /// In en, this message translates to:
+  /// **'Test untested keys'**
+  String get settingsModelPoolTest;
+
+  /// No description provided for @settingsModelPoolNeedsModel.
+  ///
+  /// In en, this message translates to:
+  /// **'Save the provider and add a model before testing keys.'**
+  String get settingsModelPoolNeedsModel;
 
   /// No description provided for @settingsModelProviderId.
   ///
@@ -3314,16 +3494,16 @@ abstract class AppLocalizations {
   /// **'Could not update model details, using those from {time}: {error}'**
   String settingsModelCatalogUpdateFailedUsing(String time, String error);
 
-  /// No description provided for @settingsModelCatalogNotDownloaded.
+  /// No description provided for @settingsModelCatalogBundled.
   ///
   /// In en, this message translates to:
-  /// **'Model details have not been downloaded yet'**
-  String get settingsModelCatalogNotDownloaded;
+  /// **'Using bundled model details; online updates replace them automatically'**
+  String get settingsModelCatalogBundled;
 
   /// No description provided for @settingsModelCatalogRetry.
   ///
   /// In en, this message translates to:
-  /// **'Retry'**
+  /// **'Update'**
   String get settingsModelCatalogRetry;
 
   /// No description provided for @settingsModelCustomModel.
@@ -3469,18 +3649,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Summarize at'**
   String get settingsModelSummaryThreshold;
-
-  /// No description provided for @settingsModelSummaryByMessageCount.
-  ///
-  /// In en, this message translates to:
-  /// **'Summarize by message count'**
-  String get settingsModelSummaryByMessageCount;
-
-  /// No description provided for @settingsModelSummaryMessageCount.
-  ///
-  /// In en, this message translates to:
-  /// **'Summary message threshold'**
-  String get settingsModelSummaryMessageCount;
 
   /// No description provided for @settingsModelCustomHeaders.
   ///
@@ -3824,6 +3992,16 @@ abstract class AppLocalizations {
   /// **'{passed} passed, {failed} failed'**
   String settingsModelTestSummary(int passed, int failed);
 
+  /// No description provided for @settingsModelTestSummaryWithRestricted.
+  ///
+  /// In en, this message translates to:
+  /// **'{passed} passed, {failed} failed, {restricted} restricted'**
+  String settingsModelTestSummaryWithRestricted(
+    int passed,
+    int failed,
+    int restricted,
+  );
+
   /// No description provided for @settingsModelTestAllPassed.
   ///
   /// In en, this message translates to:
@@ -3913,6 +4091,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Some checks failed'**
   String get settingsModelConnectionTestFailed;
+
+  /// No description provided for @settingsModelConnectionTestRestricted.
+  ///
+  /// In en, this message translates to:
+  /// **'Test restricted'**
+  String get settingsModelConnectionTestRestricted;
+
+  /// No description provided for @settingsModelTestCreditRestricted.
+  ///
+  /// In en, this message translates to:
+  /// **'Credit or output budget limit'**
+  String get settingsModelTestCreditRestricted;
+
+  /// No description provided for @settingsModelTestRateRestricted.
+  ///
+  /// In en, this message translates to:
+  /// **'Upstream rate limit or cooldown'**
+  String get settingsModelTestRateRestricted;
 
   /// No description provided for @settingsModelCapabilitiesApplied.
   ///
@@ -5699,8 +5895,32 @@ abstract class AppLocalizations {
   /// No description provided for @settingsAppearanceBubbleImagePreviewText.
   ///
   /// In en, this message translates to:
-  /// **'Bubble preview with 9-slice guides'**
+  /// **'This is a bubble preview message.\nCheck the corners, edges, and center at their rendered size.'**
   String get settingsAppearanceBubbleImagePreviewText;
+
+  /// No description provided for @settingsAppearanceBubbleImageSourceHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Original · White: crop boundary. Blue: nine-slice grid. Pinch to zoom and drag to inspect.'**
+  String get settingsAppearanceBubbleImageSourceHint;
+
+  /// No description provided for @settingsAppearanceBubbleImageFitSource.
+  ///
+  /// In en, this message translates to:
+  /// **'Fit original image'**
+  String get settingsAppearanceBubbleImageFitSource;
+
+  /// No description provided for @settingsAppearanceBubbleImageGrid.
+  ///
+  /// In en, this message translates to:
+  /// **'9-slice'**
+  String get settingsAppearanceBubbleImageGrid;
+
+  /// No description provided for @settingsAppearanceBubbleImageGridHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Two horizontal and two vertical cuts form nine regions. Corners stay fixed; edges tile along one axis and the center tiles along both. Stretch mode stretches those regions instead. Boundaries are relative to the cropped image.'**
+  String get settingsAppearanceBubbleImageGridHint;
 
   /// No description provided for @settingsAppearanceBubbleImageImportFailed.
   ///
@@ -6110,12 +6330,6 @@ abstract class AppLocalizations {
   /// **'Storage location change failed: {error}'**
   String settingsDataStorageChangeError(String error);
 
-  /// No description provided for @settingsDataTokenSection.
-  ///
-  /// In en, this message translates to:
-  /// **'Usage statistics'**
-  String get settingsDataTokenSection;
-
   /// No description provided for @settingsDataInputTokens.
   ///
   /// In en, this message translates to:
@@ -6128,35 +6342,17 @@ abstract class AppLocalizations {
   /// **'Output'**
   String get settingsDataOutputTokens;
 
-  /// No description provided for @settingsDataOpenDetailedStats.
-  ///
-  /// In en, this message translates to:
-  /// **'View detailed statistics'**
-  String get settingsDataOpenDetailedStats;
-
-  /// No description provided for @settingsDataOpenDetailedStatsDescription.
-  ///
-  /// In en, this message translates to:
-  /// **'View the usage heatmap and model usage timeline with minute-level zoom.'**
-  String get settingsDataOpenDetailedStatsDescription;
-
-  /// No description provided for @settingsDataRefreshTokenStats.
-  ///
-  /// In en, this message translates to:
-  /// **'Refresh statistics'**
-  String get settingsDataRefreshTokenStats;
-
   /// No description provided for @settingsDataResetTokenStats.
   ///
   /// In en, this message translates to:
   /// **'Reset statistics'**
   String get settingsDataResetTokenStats;
 
-  /// No description provided for @settingsDataDetailedStatsTitle.
+  /// No description provided for @settingsUsageReportResetConfirmation.
   ///
   /// In en, this message translates to:
-  /// **'Detailed statistics'**
-  String get settingsDataDetailedStatsTitle;
+  /// **'This permanently deletes all saved model usage records. Your conversations are kept.'**
+  String get settingsUsageReportResetConfirmation;
 
   /// No description provided for @settingsDataDetailedStatsDescription.
   ///
@@ -7358,6 +7554,54 @@ abstract class AppLocalizations {
   /// **'Automatic port'**
   String get settingsPeerPortModeAutomatic;
 
+  /// No description provided for @settingsPeerNetworkDiscoveryHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'For discovery across routed networks, configure a shared directory and group key. To host the directory, leave the address empty and set a group key.'**
+  String get settingsPeerNetworkDiscoveryHelp;
+
+  /// No description provided for @settingsPeerDiscoveryDirectory.
+  ///
+  /// In en, this message translates to:
+  /// **'Discovery directory (optional)'**
+  String get settingsPeerDiscoveryDirectory;
+
+  /// No description provided for @settingsPeerDiscoveryGroup.
+  ///
+  /// In en, this message translates to:
+  /// **'Discovery group key'**
+  String get settingsPeerDiscoveryGroup;
+
+  /// No description provided for @settingsPeerDiscoveryGenerateKey.
+  ///
+  /// In en, this message translates to:
+  /// **'Generate new group key'**
+  String get settingsPeerDiscoveryGenerateKey;
+
+  /// No description provided for @settingsPeerDiscoveryCopyKey.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy group key'**
+  String get settingsPeerDiscoveryCopyKey;
+
+  /// No description provided for @settingsPeerDiscoveryPort.
+  ///
+  /// In en, this message translates to:
+  /// **'Directory listener port'**
+  String get settingsPeerDiscoveryPort;
+
+  /// No description provided for @settingsPeerDiscoveryPortHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'Only used on the directory host. Other devices use the port in the directory URL.'**
+  String get settingsPeerDiscoveryPortHelp;
+
+  /// No description provided for @settingsPeerNetworkDiscoveryInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'Check the discovery settings: use an HTTP(S) origin without a path, a shared key of 16–128 bytes, and a nonzero port when hosting the directory.'**
+  String get settingsPeerNetworkDiscoveryInvalid;
+
   /// No description provided for @settingsPeerAdvanced.
   ///
   /// In en, this message translates to:
@@ -7841,13 +8085,13 @@ abstract class AppLocalizations {
   /// No description provided for @settingsAppearanceThemeConfigCustomHint.
   ///
   /// In en, this message translates to:
-  /// **'Click + to create and manage independent theme configurations.'**
+  /// **'Create a theme to save your appearance. Tap a card to switch; choose Edit to customize.'**
   String get settingsAppearanceThemeConfigCustomHint;
 
   /// No description provided for @settingsAppearanceThemeConfigEditingHint.
   ///
   /// In en, this message translates to:
-  /// **'Appearance changes are saved to the selected theme configuration.'**
+  /// **'Tap a card to switch themes. Mode shortcuts change only the current theme. Edits save automatically.'**
   String get settingsAppearanceThemeConfigEditingHint;
 
   /// No description provided for @settingsAppearanceThemeConfigFailed.
@@ -7951,6 +8195,48 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Your saved appearance has not been replaced. Retry after repairing its resources, or reset appearance explicitly. Reset keeps your avatar and saved configurations and selects custom appearance.'**
   String get settingsAppearanceRepairHint;
+
+  /// No description provided for @settingsAppearanceAssetBackgroundFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'The background image could not be loaded. Using the default background ({reference}).'**
+  String settingsAppearanceAssetBackgroundFailed(String reference);
+
+  /// No description provided for @settingsAppearanceAssetVideoFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'The background video could not be played. Using the default background ({reference}).'**
+  String settingsAppearanceAssetVideoFailed(String reference);
+
+  /// No description provided for @settingsAppearanceAssetBubbleFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'The bubble image could not be loaded. Using the default bubble color ({reference}).'**
+  String settingsAppearanceAssetBubbleFailed(String reference);
+
+  /// No description provided for @settingsAppearanceAssetPreviousRetained.
+  ///
+  /// In en, this message translates to:
+  /// **'This theme resource could not be loaded. Keeping the previous image or media ({reference}); your other theme settings still apply.'**
+  String settingsAppearanceAssetPreviousRetained(String reference);
+
+  /// No description provided for @settingsAppearanceAssetRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Retry'**
+  String get settingsAppearanceAssetRetry;
+
+  /// No description provided for @settingsAppearanceAssetReimportHint.
+  ///
+  /// In en, this message translates to:
+  /// **'If retrying does not help, choose and import a readable image or playable video again.'**
+  String get settingsAppearanceAssetReimportHint;
+
+  /// No description provided for @settingsAppearanceAssetImportFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'The background resource was not applied: {reason}. Please choose a readable image or playable video.'**
+  String settingsAppearanceAssetImportFailed(String reason);
 
   /// No description provided for @settingsAppearanceRetry.
   ///
@@ -8237,7 +8523,7 @@ abstract class AppLocalizations {
   /// No description provided for @deviceSpaceSyncPending.
   ///
   /// In en, this message translates to:
-  /// **'Some data is still pending. Retrying automatically.'**
+  /// **'Some data is still pending.'**
   String get deviceSpaceSyncPending;
 
   /// No description provided for @deviceSpaceSyncCurrentFile.
@@ -8383,6 +8669,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'This code belongs to a different device. Scan the code for the selected device.'**
   String get peerQrWrongDevice;
+
+  /// No description provided for @peerPairTimeoutHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Connection timed out: could not reach the other device. A common cause is the other device’s firewall blocking incoming connections. Try initiating the connection from the other device, or allow Operit through the other device’s firewall (especially on public networks).'**
+  String get peerPairTimeoutHint;
 
   /// No description provided for @peerQrImageInvalid.
   ///
@@ -8629,6 +8921,330 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Savings unknown for {count} requests'**
   String settingsDataTimelineUnknownSavings(int count);
+
+  /// No description provided for @contextStatsSummaryLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to load context statistics'**
+  String get contextStatsSummaryLoadFailed;
+
+  /// No description provided for @contextStatsDevicesLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to load device information'**
+  String get contextStatsDevicesLoadFailed;
+
+  /// No description provided for @settingsAppearanceThemeLibrary.
+  ///
+  /// In en, this message translates to:
+  /// **'Your themes'**
+  String get settingsAppearanceThemeLibrary;
+
+  /// No description provided for @settingsAppearanceThemeLibraryHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose a look. Make it yours.'**
+  String get settingsAppearanceThemeLibraryHint;
+
+  /// No description provided for @settingsAppearanceThemeActive.
+  ///
+  /// In en, this message translates to:
+  /// **'In use'**
+  String get settingsAppearanceThemeActive;
+
+  /// No description provided for @settingsAppearanceThemeApply.
+  ///
+  /// In en, this message translates to:
+  /// **'Use this theme'**
+  String get settingsAppearanceThemeApply;
+
+  /// No description provided for @settingsAppearanceThemeMore.
+  ///
+  /// In en, this message translates to:
+  /// **'More theme actions'**
+  String get settingsAppearanceThemeMore;
+
+  /// No description provided for @settingsAppearanceThemeDuplicate.
+  ///
+  /// In en, this message translates to:
+  /// **'Create a copy'**
+  String get settingsAppearanceThemeDuplicate;
+
+  /// No description provided for @settingsAppearanceThemeUnboundHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep the current look and edit without binding a saved theme.'**
+  String get settingsAppearanceThemeUnboundHint;
+
+  /// No description provided for @settingsAppearanceThemeDeleteTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete theme'**
+  String get settingsAppearanceThemeDeleteTitle;
+
+  /// No description provided for @settingsAppearanceThemeDeleteConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete “{name}”? This cannot be undone.'**
+  String settingsAppearanceThemeDeleteConfirm(String name);
+
+  /// No description provided for @settingsAppearancePreviewCollapse.
+  ///
+  /// In en, this message translates to:
+  /// **'Collapse'**
+  String get settingsAppearancePreviewCollapse;
+
+  /// No description provided for @settingsAppearancePreviewExpand.
+  ///
+  /// In en, this message translates to:
+  /// **'Expand'**
+  String get settingsAppearancePreviewExpand;
+
+  /// No description provided for @settingsAppearanceThemeNew.
+  ///
+  /// In en, this message translates to:
+  /// **'New theme'**
+  String get settingsAppearanceThemeNew;
+
+  /// No description provided for @settingsAppearanceDeviceFonts.
+  ///
+  /// In en, this message translates to:
+  /// **'Device fonts'**
+  String get settingsAppearanceDeviceFonts;
+
+  /// No description provided for @settingsAppearanceChooseDeviceFont.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose device font'**
+  String get settingsAppearanceChooseDeviceFont;
+
+  /// No description provided for @settingsAppearanceNoDeviceFonts.
+  ///
+  /// In en, this message translates to:
+  /// **'No matching device fonts'**
+  String get settingsAppearanceNoDeviceFonts;
+
+  /// No description provided for @settingsAppearanceDeviceFontPreview.
+  ///
+  /// In en, this message translates to:
+  /// **'The quick brown fox · 0123456789\n字体预览：你好，世界'**
+  String get settingsAppearanceDeviceFontPreview;
+
+  /// No description provided for @workspaceFileRename.
+  ///
+  /// In en, this message translates to:
+  /// **'Rename'**
+  String get workspaceFileRename;
+
+  /// No description provided for @workspaceFileCopy.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy'**
+  String get workspaceFileCopy;
+
+  /// No description provided for @workspaceFileCut.
+  ///
+  /// In en, this message translates to:
+  /// **'Cut'**
+  String get workspaceFileCut;
+
+  /// No description provided for @workspaceFilePaste.
+  ///
+  /// In en, this message translates to:
+  /// **'Paste'**
+  String get workspaceFilePaste;
+
+  /// No description provided for @workspaceFileName.
+  ///
+  /// In en, this message translates to:
+  /// **'Name'**
+  String get workspaceFileName;
+
+  /// No description provided for @workspaceFileInvalidName.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a valid name without path separators.'**
+  String get workspaceFileInvalidName;
+
+  /// No description provided for @workspaceDeleteFolderTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete folder?'**
+  String get workspaceDeleteFolderTitle;
+
+  /// No description provided for @workspaceDeleteFolderMessage.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete “{name}” and all its contents? This cannot be undone.'**
+  String workspaceDeleteFolderMessage(String name);
+
+  /// No description provided for @workspaceFileOperationFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'File operation failed: {error}'**
+  String workspaceFileOperationFailed(String error);
+
+  /// No description provided for @workspaceFileCopyName.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} (copy {index})'**
+  String workspaceFileCopyName(String name, int index);
+
+  /// No description provided for @workspaceFileSaving.
+  ///
+  /// In en, this message translates to:
+  /// **'This file is being saved. Please try again when saving finishes.'**
+  String get workspaceFileSaving;
+
+  /// No description provided for @chatBackupChooseTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose your backup directory'**
+  String get chatBackupChooseTitle;
+
+  /// No description provided for @chatBackupTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Daily chat backup'**
+  String get chatBackupTitle;
+
+  /// No description provided for @chatBackupDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Save a SQLite chat database snapshot daily while the app is running and keep the latest 10 automatic backups. Includes conversations and messages only, excluding attachment files, workspaces, characters, memories and app settings.'**
+  String get chatBackupDescription;
+
+  /// No description provided for @chatRestoreTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Restore chat records'**
+  String get chatRestoreTitle;
+
+  /// No description provided for @chatRestoreDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Select the external folder containing your previous backups, then choose a dated chat database snapshot. After reinstalling, select the original backup folder again to recover your chats.'**
+  String get chatRestoreDescription;
+
+  /// No description provided for @chatRestoreChooseFolder.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose existing backup folder'**
+  String get chatRestoreChooseFolder;
+
+  /// No description provided for @chatRestoreRefresh.
+  ///
+  /// In en, this message translates to:
+  /// **'Refresh snapshots'**
+  String get chatRestoreRefresh;
+
+  /// No description provided for @chatRestoreAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Restore'**
+  String get chatRestoreAction;
+
+  /// No description provided for @chatRestoreCancel.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel'**
+  String get chatRestoreCancel;
+
+  /// No description provided for @chatRestoreEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'This folder contains no restorable chat database snapshots.'**
+  String get chatRestoreEmpty;
+
+  /// No description provided for @chatRestoreCounts.
+  ///
+  /// In en, this message translates to:
+  /// **'{chats} conversations · {messages} messages'**
+  String chatRestoreCounts(int chats, int messages);
+
+  /// No description provided for @chatRestoreConfirmTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Restore this chat snapshot?'**
+  String get chatRestoreConfirmTitle;
+
+  /// No description provided for @chatRestoreConfirmDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Replace all current chat records with {name}. Current chats will first be saved as a separate snapshot; restoration stops if that save fails. Stop running conversations first. Other settings are preserved.'**
+  String chatRestoreConfirmDescription(String name);
+
+  /// No description provided for @chatRestoreSuccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Chat records restored.'**
+  String get chatRestoreSuccess;
+
+  /// No description provided for @chatRestoreOnboardingTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Restore from a previous backup'**
+  String get chatRestoreOnboardingTitle;
+
+  /// No description provided for @chatRestoreOnboardingDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Recover chats saved in an external folder before reinstalling or uninstalling'**
+  String get chatRestoreOnboardingDescription;
+
+  /// No description provided for @chatBackupExternalDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose a folder outside the app so backups remain after uninstall. On iPhone and iPad, choose iCloud Drive or another external file provider.'**
+  String get chatBackupExternalDescription;
+
+  /// No description provided for @chatBackupChoose.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose backup directory'**
+  String get chatBackupChoose;
+
+  /// No description provided for @chatBackupLater.
+  ///
+  /// In en, this message translates to:
+  /// **'Set up later'**
+  String get chatBackupLater;
+
+  /// No description provided for @chatBackupChange.
+  ///
+  /// In en, this message translates to:
+  /// **'Change backup directory'**
+  String get chatBackupChange;
+
+  /// No description provided for @chatBackupMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'The backup directory is not configured, no longer exists or cannot be accessed. Select a directory to enable daily chat backups.'**
+  String get chatBackupMissing;
+
+  /// No description provided for @chatBackupReady.
+  ///
+  /// In en, this message translates to:
+  /// **'The backup directory is ready. Daily backups are checked at startup, on resume and while the app is running.'**
+  String get chatBackupReady;
+
+  /// No description provided for @chatBackupNow.
+  ///
+  /// In en, this message translates to:
+  /// **'Back up chats now'**
+  String get chatBackupNow;
+
+  /// No description provided for @chatBackupNever.
+  ///
+  /// In en, this message translates to:
+  /// **'No successful backup yet'**
+  String get chatBackupNever;
+
+  /// No description provided for @chatBackupLastSuccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Last successful backup: {time}'**
+  String chatBackupLastSuccess(String time);
 }
 
 class _AppLocalizationsDelegate

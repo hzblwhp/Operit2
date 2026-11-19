@@ -16,11 +16,13 @@ class InputProcessingStatusLane extends StatelessWidget {
     required this.visible,
     required this.status,
     required this.textStyle,
+    this.isSummarizing = false,
   });
 
   final bool visible;
   final String status;
   final TextStyle? textStyle;
+  final bool isSummarizing;
 
   /// Builds the always-reserved status lane and its optional floating label.
   @override
@@ -38,7 +40,21 @@ class InputProcessingStatusLane extends StatelessWidget {
               child: IgnorePointer(
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Text(status, style: textStyle),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (isSummarizing) ...[
+                        const SizedBox(
+                          key: ValueKey('summary-processing-indicator'),
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        const SizedBox(width: 8),
+                      ],
+                      Flexible(child: Text(status, style: textStyle)),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -104,7 +120,27 @@ String _inputProcessingMessageText(AppLocalizations l10n, String key) {
     'message_processing' => l10n.processingMessage,
     'message_summarizing' => l10n.summarizingMemories,
     'chat_summarizing_generating' => l10n.summaryGenerating,
+    'summary_preparing' => l10n.summaryGenerating,
+    'summary_core_task' => l10n.summaryStageCore,
+    'summary_user_constraints' => l10n.summaryStageConstraints,
+    'summary_key_files' => l10n.summaryStageFiles,
+    'summary_errors' => l10n.summaryStageErrors,
+    'summary_interaction' => l10n.summaryStageInteraction,
+    'summary_next_steps' => l10n.summaryStageNext,
+    'summary_formatting' => l10n.summaryStageFormatting,
     'chat_compressing_history' => l10n.chatCompressingHistory,
     _ => key.trim(),
   };
 }
+
+/// Estimated stage within a streamed summary, not a percentage of model work.
+double summaryStageProgress(String message) => switch (message) {
+  'summary_core_task' => 0.2,
+  'summary_user_constraints' => 0.32,
+  'summary_key_files' => 0.44,
+  'summary_errors' => 0.56,
+  'summary_interaction' => 0.68,
+  'summary_next_steps' => 0.8,
+  'summary_formatting' => 0.9,
+  _ => 0.05,
+};

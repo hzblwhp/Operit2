@@ -1,6 +1,8 @@
+use super::ApiKeyProvider::KeyGetter;
+use super::ProviderHttp::KeyAuthentication;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use http::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
@@ -29,7 +31,8 @@ pub(crate) const RESPONSES_OUTPUT_ITEM_META_PROVIDER: &str = "openai:responses_o
 #[derive(Clone)]
 pub struct OpenAIResponsesProvider {
     pub responsesApiEndpoint: String,
-    pub api_key: String,
+    pub key_getter: KeyGetter,
+
     pub modelName: String,
     pub responsesProviderType: String,
     pub supportsVision: bool,
@@ -85,7 +88,7 @@ impl OpenAIResponsesProvider {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         responsesApiEndpoint: String,
-        api_key: String,
+        key_getter: KeyGetter,
         modelName: String,
         responsesProviderType: String,
         customHeaders: Vec<(String, String)>,
@@ -98,7 +101,7 @@ impl OpenAIResponsesProvider {
     ) -> Self {
         Self {
             responsesApiEndpoint,
-            api_key,
+            key_getter,
             modelName,
             responsesProviderType,
             supportsVision,
@@ -120,6 +123,23 @@ impl OpenAIResponsesProvider {
         }
     }
 
+    /// Reads the active transport's live counters until its final usage is committed locally.
+    fn currentTokenCounts(&self) -> TokenCounts {
+        let state = self.state.lock().expect("OpenAIResponsesProvider state mutex poisoned");
+        match state.activeParent.as_ref() {
+            Some(parent) => TokenCounts {
+                input: parent.input_token_count(),
+                cached_input: parent.cached_input_token_count(),
+                output: parent.output_token_count(),
+            },
+            None => TokenCounts {
+                input: state.inputTokenCount,
+                cached_input: state.cachedInputTokenCount,
+                output: state.outputTokenCount,
+            },
+        }
+    }
+
     fn setActiveParent(&self, parent: OpenAIProvider) -> u64 {
         let mut state = self
             .state
@@ -137,32 +157,48 @@ impl OpenAIResponsesProvider {
             .cancelled
     }
 
-    fn clearActiveParent(&self, generation: u64) {
+    /// Commits only this transport's usage; a paused request cannot overwrite a newer request.
+    fn finishActiveParent(&self, generation: u64, usage: &UsageCounts) {
         let mut state = self
             .state
             .lock()
             .expect("OpenAIResponsesProvider state mutex poisoned");
         if state.activeParentGeneration == generation {
+            state.inputTokenCount = usage.actualInputTokens;
+            state.cachedInputTokenCount = usage.cachedInputTokens;
+            state.outputTokenCount = usage.outputTokens;
             state.activeParent = None;
         }
     }
 
-    pub fn create_request_body(
-        &self,
-        request: &SendMessageRequest,
-    ) -> Result<Value, AiServiceError> {
-        let parent = OpenAIProvider::new_with_capabilities(
+    /// Creates the transport that owns both request token counting and live response usage.
+    fn parentProvider(&self) -> OpenAIProvider {
+        OpenAIProvider::new_with_capabilities(
             self.responsesApiEndpoint.clone(),
-            self.api_key.clone(),
+            self.key_getter.clone(),
             self.modelName.clone(),
-            "OPENAI_RESPONSES_PARENT".to_string(),
+            self.responsesProviderType.clone(),
             self.customHeaders.clone(),
             self.supportsVision,
             self.supportsAudio,
             self.supportsVideo,
             self.enableToolCall,
         )
-        .with_responses_api(true);
+
+        .with_responses_api(true)
+    }
+
+    /// Encodes a Responses payload with the same provider serializer used for transmission.
+    pub fn create_request_body(&self, request: &SendMessageRequest) -> Result<Value, AiServiceError> {
+        self.createRequestBodyWithParent(request, &self.parentProvider())
+    }
+
+    /// Retains preflight token counters on the parent that will send this request.
+    fn createRequestBodyWithParent(
+        &self,
+        request: &SendMessageRequest,
+        parent: &OpenAIProvider,
+    ) -> Result<Value, AiServiceError> {
         let request_history = if request.thinking.is_on() {
             request.chat_history.clone()
         } else {
@@ -213,7 +249,7 @@ impl OpenAIResponsesProvider {
             .saveCodexTokens(tokens.clone())
             .map_err(AiServiceError::RequestFailed)?;
         let account_id = crate::chat::llmprovider::CodexOAuth::account_id_from_tokens(&tokens)?;
-        self.api_key = tokens.accessToken;
+        self.key_getter = tokens.accessToken.into();
         self.customHeaders
             .retain(|(name, _)| !name.eq_ignore_ascii_case("ChatGPT-Account-Id"));
         self.customHeaders
@@ -351,14 +387,6 @@ impl OpenAIResponsesProvider {
     fn headers(&self) -> Result<HeaderMap, AiServiceError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        if !self.api_key.trim().is_empty() {
-            let value = format!("Bearer {}", self.api_key);
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&value)
-                    .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?,
-            );
-        }
         if self.responsesProviderType == "OPENAI_CODEX" {
             apply_codex_headers(&mut headers, &self.customHeaders)?;
         }
@@ -1211,24 +1239,15 @@ fn commentary_to_reasoning_content(content: &[Value]) -> Vec<Value> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl AIService for OpenAIResponsesProvider {
     fn input_token_count(&self) -> i64 {
-        self.state
-            .lock()
-            .map(|state| state.inputTokenCount)
-            .unwrap_or(0)
+        self.currentTokenCounts().input
     }
 
     fn cached_input_token_count(&self) -> i64 {
-        self.state
-            .lock()
-            .map(|state| state.cachedInputTokenCount)
-            .unwrap_or(0)
+        self.currentTokenCounts().cached_input
     }
 
     fn output_token_count(&self) -> i64 {
-        self.state
-            .lock()
-            .map(|state| state.outputTokenCount)
-            .unwrap_or(0)
+        self.currentTokenCounts().output
     }
 
     fn provider_model(&self) -> String {
@@ -1237,6 +1256,8 @@ impl AIService for OpenAIResponsesProvider {
 
     fn reset_token_counts(&mut self) {
         if let Ok(mut state) = self.state.lock() {
+            state.activeParentGeneration = state.activeParentGeneration.wrapping_add(1);
+            state.activeParent = None;
             state.inputTokenCount = 0;
             state.cachedInputTokenCount = 0;
             state.outputTokenCount = 0;
@@ -1266,7 +1287,7 @@ impl AIService for OpenAIResponsesProvider {
         // ProviderNotImplemented implementation.
         let parent = OpenAIProvider::new_with_capabilities(
             self.responsesApiEndpoint.clone(),
-            self.api_key.clone(),
+            self.key_getter.clone(),
             self.modelName.clone(),
             "OPENAI_RESPONSES_PARENT".to_string(),
             self.customHeaders.clone(),
@@ -1275,6 +1296,7 @@ impl AIService for OpenAIResponsesProvider {
             self.supportsVideo,
             self.enableToolCall,
         )
+
         .with_responses_api(true);
         AIService::calculate_input_tokens(&parent, chat_history, available_tools).await
     }
@@ -1293,20 +1315,9 @@ impl AIService for OpenAIResponsesProvider {
         if self.responsesProviderType == "OPENAI_CODEX" {
             request.stream = true;
         }
-        let requestBody = self.create_request_body(&request)?;
+        let mut parent = self.parentProvider();
+        let requestBody = self.createRequestBodyWithParent(&request, &parent)?;
         if request.stream {
-            let mut parent = OpenAIProvider::new_with_capabilities(
-                self.responsesApiEndpoint.clone(),
-                self.api_key.clone(),
-                self.modelName.clone(),
-                self.responsesProviderType.clone(),
-                self.customHeaders.clone(),
-                self.supportsVision,
-                self.supportsAudio,
-                self.supportsVideo,
-                self.enableToolCall,
-            )
-            .with_responses_api(true);
             let mut parent_stream = parent.send_prepared_request(request, requestBody).await?;
             let event_channel = parent_stream.event_channel().clone();
             let terminalFailure = TerminalFailureState::new();
@@ -1335,14 +1346,13 @@ impl AIService for OpenAIResponsesProvider {
                     if let Some(error) = parentStream.terminal_failure() {
                         producerTerminalFailure.set(error);
                     }
-                    provider.apply_usage_counts(&UsageCounts {
+                    provider.finishActiveParent(activeParentGeneration, &UsageCounts {
                         totalInputTokens: parent.input_token_count()
                             + parent.cached_input_token_count(),
                         actualInputTokens: parent.input_token_count(),
                         cachedInputTokens: parent.cached_input_token_count(),
                         outputTokens: parent.output_token_count(),
                     });
-                    provider.clearActiveParent(activeParentGeneration);
                 })
             });
             return Ok(Box::new(with_event_channel_and_failure(
@@ -1353,6 +1363,7 @@ impl AIService for OpenAIResponsesProvider {
         }
 
         let response = super::ProviderHttp::post(&self.responsesApiEndpoint)
+            .key_getter(self.key_getter.clone(), KeyAuthentication::Bearer)
             .headers(self.headers()?)
             .json(&requestBody)
             .send()

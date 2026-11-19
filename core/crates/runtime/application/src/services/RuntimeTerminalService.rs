@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use base64::engine::general_purpose::STANDARD;
@@ -14,8 +15,8 @@ use operit_store::{
 use serde::{Deserialize, Serialize};
 
 use operit_host_api::HostManager::HostManager;
-use operit_tools::files::PathMapper::PathMapper;
-use operit_tools::files::VisualFileSystem::VisualFileSystem;
+use operit_vfs::VfsPath;
+use operit_vfs::VisualFileSystem::VisualFileSystem;
 use operit_util::stream::HotStream::MutableSharedStreamImpl;
 use operit_util::stream::Stream::{CollectFuture, Stream};
 
@@ -297,8 +298,37 @@ impl RuntimeTerminalService {
     }
 
     #[allow(non_snake_case)]
-    /// Starts a PTY terminal session and attaches its output stream.
+    /// Starts a PTY on the host's blocking pool without holding the Core proxy lock.
     pub fn startTerminalPty(
+        &self,
+        sessionName: String,
+        terminal: String,
+        terminalType: String,
+        workingDir: String,
+        rows: i32,
+        cols: i32,
+    ) -> impl Future<Output = Result<String, String>> + 'static {
+        let service = Self {
+            terminalHost: self.terminalHost.clone(),
+            context: self.context.clone(),
+        };
+        async move {
+            let scheduler = service.context.hostRuntimeTaskSchedulerHost.clone()
+                .ok_or_else(|| "Starting a terminal requires a runtime task scheduler".to_string())?;
+            let (send, receive) = tokio::sync::oneshot::channel();
+            scheduler.scheduleHostRuntimeTask("start-terminal-pty", Box::new(move || {
+                let result = service.start_terminal_pty(sessionName, terminal, terminalType, workingDir, rows, cols);
+                if let Err(Ok(session_id)) = send.send(result) {
+                    let _ = service.closeTerminalPty(session_id);
+                }
+            })).map_err(|error| error.message)?;
+            receive.await.map_err(|_| "Terminal startup worker stopped".to_string())?
+        }
+    }
+
+    #[allow(non_snake_case)]
+    /// Resolves the working directory, starts the host PTY, and publishes it.
+    fn start_terminal_pty(
         &self,
         sessionName: String,
         terminal: String,
@@ -313,7 +343,7 @@ impl RuntimeTerminalService {
                 &terminal,
                 &terminalType,
                 &workingDir,
-                &|path| resolve_terminal_working_dir(&self.context, path)
+                &|path| resolve_terminal_working_dir(&self.context, self.terminalHost.as_ref(), path)
                     .map_err(operit_host_api::HostError::new),
             )
             .map_err(|error| format!(
@@ -448,38 +478,19 @@ impl RuntimeTerminalService {
 }
 
 /// Resolves host-owned directories after the selected terminal has dispatched its namespace.
-fn resolve_terminal_working_dir(context: &HostManager, workingDir: &str) -> Result<String, String> {
-    let trimmed = workingDir.trim();
-    if ["/app", "/operitapp", "/mnt", "/virtual"].iter().any(|root| {
-        trimmed == *root || trimmed.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
-    })
-    {
-        return terminal_vfs(context)?
-            .resolvePath(trimmed)
-            .and_then(|path| path.nativePath());
-    }
-    Ok(trimmed.to_string())
+fn resolve_terminal_working_dir(
+    context: &HostManager,
+    terminalHost: &dyn TerminalHost,
+    workingDir: &str,
+) -> Result<String, String> {
+    let filesystem = terminal_vfs(context)?;
+    let path = filesystem.resolveResourcePath(None, workingDir.trim())?;
+    filesystem.terminalDirectory(terminalHost, &path)
 }
 
 /// Builds the host VFS used only for directories owned by the current runtime.
 fn terminal_vfs(context: &HostManager) -> Result<VisualFileSystem, String> {
-    let runtimeStorageHost = context.runtimeStorageHost.as_ref().ok_or_else(|| {
-        "RuntimeStorageHost is not configured for terminal working directory".to_string()
-    })?;
-    let runtimeStoreRoot = runtimeStorageHost.runtimeRootDir().ok_or_else(|| {
-        "RuntimeStorageHost runtime root is not configured for terminal working directory"
-            .to_string()
-    })?;
-    let workspaceCollectionRoot = runtimeStorageHost.workspaceRootDir().ok_or_else(|| {
-        "RuntimeStorageHost workspace root is not configured for terminal working directory"
-            .to_string()
-    })?;
-    Ok(VisualFileSystem::new(
-        context.fileSystemHost.clone().ok_or_else(|| {
-            "FileSystemHost is not registered for terminal working directory".to_string()
-        })?,
-        PathMapper::new(runtimeStoreRoot, workspaceCollectionRoot, runtimeStorageHost.clone()),
-    ))
+    context.vfs()
 }
 
 #[cfg(test)]

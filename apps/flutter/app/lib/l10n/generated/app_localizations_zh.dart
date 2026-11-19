@@ -30,6 +30,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String get fullscreenInput => '全屏输入';
 
   @override
+  String get noticeExpand => '展开全文';
+
+  @override
+  String get noticeCollapse => '收起';
+
+  @override
   String get expandInput => '展开输入框';
 
   @override
@@ -167,6 +173,27 @@ class AppLocalizationsZh extends AppLocalizations {
   String get summaryGenerating => '正在生成总结...';
 
   @override
+  String get summaryStageCore => '正在整理核心任务...';
+
+  @override
+  String get summaryStageConstraints => '正在整理用户需求与约束...';
+
+  @override
+  String get summaryStageFiles => '正在整理关键文件与代码...';
+
+  @override
+  String get summaryStageErrors => '正在整理错误与修复...';
+
+  @override
+  String get summaryStageInteraction => '正在整理互动与设定...';
+
+  @override
+  String get summaryStageNext => '正在整理下一步...';
+
+  @override
+  String get summaryStageFormatting => '正在调整总结格式...';
+
+  @override
   String get chatCompressingHistory => '正在压缩历史记录...';
 
   @override
@@ -206,6 +233,18 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get workspaceCloseOtherTabs => '关闭其他';
+
+  @override
+  String get workspaceDockDropTarget => '拖到工作区';
+
+  @override
+  String get workspaceOpenWith => '打开方式';
+
+  @override
+  String get workspaceBuiltInPreview => '内置预览';
+
+  @override
+  String get workspacePluginUnsavedChanges => '请先在编辑器中保存，或放弃未保存的修改。';
 
   @override
   String get workspaceCloseTabsToRight => '关闭右侧';
@@ -331,6 +370,11 @@ class AppLocalizationsZh extends AppLocalizations {
   String get messageLocatorLoadFailed => '暂时无法加载消息，请重试';
 
   @override
+  String messageTransformFailed(String error) {
+    return '消息显示处理失败：$error';
+  }
+
+  @override
   String get messageLocatorFavoriteFailed => '收藏更新失败，请重试';
 
   @override
@@ -395,6 +439,9 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get hiddenUserMessage => '隐藏的用户消息';
+
+  @override
+  String get autoTriggeredUserMessage => '自动触发';
 
   @override
   String get workspaceSetupTitle => '设置工作区';
@@ -747,6 +794,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String get openFile => '打开文件';
 
   @override
+  String get workspaceFileOpening => '正在打开文件…';
+
+  @override
+  String get workspaceFileOpenTimedOut => '打开文件超时，请重试。';
+
+  @override
   String get openLocation => '打开位置';
 
   @override
@@ -1005,11 +1058,16 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsCategoryDataTitle => '数据与备份';
 
   @override
-  String get settingsCategoryDataSubtitle => '备份、恢复、统计';
+  String get settingsCategoryDataSubtitle => '备份、恢复、存储';
 
   @override
-  String get settingsCategoryDataDescription =>
-      '备份聊天、插件数据和模型配置，恢复备份内容，并查看数据统计。';
+  String get settingsCategoryDataDescription => '备份和恢复聊天、插件数据及模型配置，并管理存储位置。';
+
+  @override
+  String get settingsUsageReportTitle => 'Token 用量报告';
+
+  @override
+  String get settingsUsageReportSubtitle => '模型用量、缓存与费用';
 
   @override
   String get settingsCategoryAccessLinksTitle => '设备空间';
@@ -1280,6 +1338,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsModelApiKey => 'API Key';
 
   @override
+  String get settingsModelShowApiKey => '显示 API Key';
+
+  @override
+  String get settingsModelHideApiKey => '隐藏 API Key';
+
+  @override
   String get settingsModelCodexLogin => 'ChatGPT 登录';
 
   @override
@@ -1326,7 +1390,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsModelApiKeyPoolDescription =>
-      '给同一个模型配置准备多个 Key，用于多 Key 轮换。';
+      '持续使用健康的 Key；遇到鉴权、额度、限流或临时故障时切换，并跳过冷却中的 Key。';
 
   @override
   String settingsModelApiKeyPoolCount(int count) {
@@ -1334,7 +1398,7 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get settingsModelApiKeyPoolEmpty => '还没有 Key。添加后，运行时会按当前配置使用 Key 池。';
+  String get settingsModelApiKeyPoolEmpty => 'Key 池为空，请添加 Key 后再启用。';
 
   @override
   String get settingsModelAddApiKey => '添加 Key';
@@ -1347,6 +1411,33 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsModelApiKeyEnabled => '启用这个 Key';
+
+  @override
+  String get settingsModelPoolAddSingle => '添加当前单 Key';
+
+  @override
+  String get settingsModelPoolPaste => '每行粘贴一个 Key，可批量添加。';
+
+  @override
+  String get settingsModelPoolNoEligible => '请至少启用一个非空且未标记为不可用的 Key。';
+
+  @override
+  String get settingsModelPoolUntested => '未测试';
+
+  @override
+  String get settingsModelPoolAvailable => '可用';
+
+  @override
+  String get settingsModelPoolUnavailable => '不可用';
+
+  @override
+  String get settingsModelPoolClearMarks => '重置 Key 状态';
+
+  @override
+  String get settingsModelPoolTest => '测试未检测的 Key';
+
+  @override
+  String get settingsModelPoolNeedsModel => '保存供应商并添加模型后，即可测试 Key。';
 
   @override
   String get settingsModelProviderId => '供应商 ID';
@@ -1746,10 +1837,10 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get settingsModelCatalogNotDownloaded => '模型信息还没有下载';
+  String get settingsModelCatalogBundled => '使用内置模型信息，联网更新成功后自动替换';
 
   @override
-  String get settingsModelCatalogRetry => '重试';
+  String get settingsModelCatalogRetry => '更新';
 
   @override
   String get settingsModelCustomModel => '自定义模型';
@@ -1822,12 +1913,6 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsModelSummaryThreshold => '总结阈值';
-
-  @override
-  String get settingsModelSummaryByMessageCount => '按消息数总结';
-
-  @override
-  String get settingsModelSummaryMessageCount => '总结消息数阈值';
 
   @override
   String get settingsModelCustomHeaders => '自定义 Headers';
@@ -2010,6 +2095,15 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
+  String settingsModelTestSummaryWithRestricted(
+    int passed,
+    int failed,
+    int restricted,
+  ) {
+    return '$passed 个通过，$failed 个失败，$restricted 个受限';
+  }
+
+  @override
   String settingsModelTestAllPassed(int count) {
     return '$count 个全部通过';
   }
@@ -2065,6 +2159,15 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsModelConnectionTestFailed => '存在失败项';
+
+  @override
+  String get settingsModelConnectionTestRestricted => '检测受限';
+
+  @override
+  String get settingsModelTestCreditRestricted => '账户额度或输出预算受限';
+
+  @override
+  String get settingsModelTestRateRestricted => '上游限流或冷却中';
 
   @override
   String get settingsModelCapabilitiesApplied => '已按测试结果更新模型能力开关。';
@@ -3026,7 +3129,22 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceBubbleImagePreview => '预览';
 
   @override
-  String get settingsAppearanceBubbleImagePreviewText => '这是一条气泡预览，切线展示九宫格区域';
+  String get settingsAppearanceBubbleImagePreviewText =>
+      '这是一条气泡预览消息。\n可以查看边角和中间区域的实际效果。';
+
+  @override
+  String get settingsAppearanceBubbleImageSourceHint =>
+      '原图 · 白框为裁切边界，蓝线分出九宫格；可双指缩放、拖动查看';
+
+  @override
+  String get settingsAppearanceBubbleImageFitSource => '完整显示原图';
+
+  @override
+  String get settingsAppearanceBubbleImageGrid => '九宫格';
+
+  @override
+  String get settingsAppearanceBubbleImageGridHint =>
+      '两横两竖分出九块：四角保留，上下边横向重复、左右边纵向重复，中间双向重复；拉伸模式则拉伸对应区域。起点和终点相对于裁切后的图片。';
 
   @override
   String settingsAppearanceBubbleImageImportFailed(String error) {
@@ -3251,29 +3369,17 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get settingsDataTokenSection => '使用统计';
-
-  @override
   String get settingsDataInputTokens => '输入';
 
   @override
   String get settingsDataOutputTokens => '输出';
 
   @override
-  String get settingsDataOpenDetailedStats => '查看详细统计';
-
-  @override
-  String get settingsDataOpenDetailedStatsDescription =>
-      '查看使用热力图，以及可按分钟缩放的各模型用量时间线。';
-
-  @override
-  String get settingsDataRefreshTokenStats => '刷新统计';
-
-  @override
   String get settingsDataResetTokenStats => '重置统计';
 
   @override
-  String get settingsDataDetailedStatsTitle => '详细统计';
+  String get settingsUsageReportResetConfirmation =>
+      '这将永久删除所有已保存的模型用量记录，聊天记录会保留。';
 
   @override
   String get settingsDataDetailedStatsDescription => '统计基于独立保存的模型请求明细计算。';
@@ -3983,6 +4089,32 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsPeerPortModeAutomatic => '自动分配端口';
 
   @override
+  String get settingsPeerNetworkDiscoveryHelp =>
+      '跨网络发现需要共同的目录地址和组密钥。要由本机提供目录，请留空目录地址并设置组密钥。';
+
+  @override
+  String get settingsPeerDiscoveryDirectory => '发现目录地址（可选）';
+
+  @override
+  String get settingsPeerDiscoveryGroup => '发现组密钥';
+
+  @override
+  String get settingsPeerDiscoveryGenerateKey => '生成新的发现组密钥';
+
+  @override
+  String get settingsPeerDiscoveryCopyKey => '复制发现组密钥';
+
+  @override
+  String get settingsPeerDiscoveryPort => '目录监听端口';
+
+  @override
+  String get settingsPeerDiscoveryPortHelp => '仅目录设备使用此端口；其他设备使用目录地址中的端口。';
+
+  @override
+  String get settingsPeerNetworkDiscoveryInvalid =>
+      '请检查发现设置：目录为不含路径的 HTTP(S) 地址，密钥为 16–128 字节；本机提供目录时，监听端口应为 1–65535。';
+
+  @override
   String get settingsPeerAdvanced => '高级选项';
 
   @override
@@ -4126,7 +4258,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get deviceSpaceMemberNotPaired => '空间成员 · 未直连';
 
   @override
-  String get deviceSpaceMemberPaired => '空间成员 · 已直连';
+  String get deviceSpaceMemberPaired => '空间成员 · 已配对';
 
   @override
   String get deviceSpacePairedOnly => '已配对';
@@ -4244,10 +4376,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceThemeConfigNameRequired => '请输入主题名称';
 
   @override
-  String get settingsAppearanceThemeConfigCustomHint => '点击 + 创建和管理独立的主题配置。';
+  String get settingsAppearanceThemeConfigCustomHint =>
+      '创建主题保存你的外观。点击卡片切换，点击编辑调整细节。';
 
   @override
-  String get settingsAppearanceThemeConfigEditingHint => '修改外观会自动保存到当前主题配置。';
+  String get settingsAppearanceThemeConfigEditingHint =>
+      '点击卡片切换主题；上方明暗切换仅修改当前主题。编辑后自动保存。';
 
   @override
   String settingsAppearanceThemeConfigFailed(String detail) {
@@ -4310,6 +4444,38 @@ class AppLocalizationsZh extends AppLocalizations {
   @override
   String get settingsAppearanceRepairHint =>
       '已保存的外观没有被替换。修复资源后可以重试，也可以主动重置外观。重置会保留头像和已保存的配置，并切换到自定义外观。';
+
+  @override
+  String settingsAppearanceAssetBackgroundFailed(String reference) {
+    return '背景图片无法加载，已使用默认背景（$reference）。';
+  }
+
+  @override
+  String settingsAppearanceAssetVideoFailed(String reference) {
+    return '背景视频无法播放，已使用默认背景（$reference）。';
+  }
+
+  @override
+  String settingsAppearanceAssetBubbleFailed(String reference) {
+    return '气泡图片无法加载，已使用默认气泡颜色（$reference）。';
+  }
+
+  @override
+  String settingsAppearanceAssetPreviousRetained(String reference) {
+    return '此主题资源无法加载，暂用上一张图片或媒体（$reference），其他主题设置仍有效。';
+  }
+
+  @override
+  String get settingsAppearanceAssetRetry => '重试';
+
+  @override
+  String get settingsAppearanceAssetReimportHint =>
+      '重试后仍无法加载时，请重新选择并导入可读取的图片或可播放的视频。';
+
+  @override
+  String settingsAppearanceAssetImportFailed(String reason) {
+    return '背景资源没有生效：$reason。请选择可读取的图片或可播放的视频。';
+  }
 
   @override
   String get settingsAppearanceRetry => '重试';
@@ -4465,7 +4631,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get deviceSpaceSyncRetrying => '同步暂时中断，稍后自动重试';
 
   @override
-  String get deviceSpaceSyncPending => '部分数据尚未处理完成，稍后自动重试';
+  String get deviceSpaceSyncPending => '部分数据尚未处理完成';
 
   @override
   String deviceSpaceSyncCurrentFile(String done, String total) {
@@ -4543,6 +4709,10 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get peerQrWrongDevice => '此连接码属于其他设备，请扫描当前所选设备的连接码。';
+
+  @override
+  String get peerPairTimeoutHint =>
+      '连接超时：未能与对方设备建立连接。常见原因是对方设备的防火墙拦截了入站连接。可改由对方设备发起连接，或在对方设备的防火墙中放行 Operit（公用网络尤其需要）。';
 
   @override
   String get peerQrImageInvalid => '未能从图片中识别二维码。请选择清晰的二维码图片（不超过 16 MB）。';
@@ -4689,5 +4859,185 @@ class AppLocalizationsZh extends AppLocalizations {
   @override
   String settingsDataTimelineUnknownSavings(int count) {
     return '$count 次请求无法估算节省金额';
+  }
+
+  @override
+  String get contextStatsSummaryLoadFailed => '无法加载上下文信息';
+
+  @override
+  String get contextStatsDevicesLoadFailed => '无法加载设备信息';
+
+  @override
+  String get settingsAppearanceThemeLibrary => '我的主题';
+
+  @override
+  String get settingsAppearanceThemeLibraryHint => '选一个喜欢的外观，再把它调成你的样子。';
+
+  @override
+  String get settingsAppearanceThemeActive => '使用中';
+
+  @override
+  String get settingsAppearanceThemeApply => '使用此主题';
+
+  @override
+  String get settingsAppearanceThemeMore => '更多主题操作';
+
+  @override
+  String get settingsAppearanceThemeDuplicate => '创建副本';
+
+  @override
+  String get settingsAppearanceThemeUnboundHint => '保留当前外观，自由调整，不绑定已保存的主题。';
+
+  @override
+  String get settingsAppearanceThemeDeleteTitle => '删除主题';
+
+  @override
+  String settingsAppearanceThemeDeleteConfirm(String name) {
+    return '确定删除「$name」？删除后无法恢复。';
+  }
+
+  @override
+  String get settingsAppearancePreviewCollapse => '收起';
+
+  @override
+  String get settingsAppearancePreviewExpand => '展开';
+
+  @override
+  String get settingsAppearanceThemeNew => '新建主题';
+
+  @override
+  String get settingsAppearanceDeviceFonts => '设备字体';
+
+  @override
+  String get settingsAppearanceChooseDeviceFont => '选择设备字体';
+
+  @override
+  String get settingsAppearanceNoDeviceFonts => '没有匹配的设备字体';
+
+  @override
+  String get settingsAppearanceDeviceFontPreview =>
+      '字体预览：你好，世界\nThe quick brown fox · 0123456789';
+
+  @override
+  String get workspaceFileRename => '重命名';
+
+  @override
+  String get workspaceFileCopy => '复制';
+
+  @override
+  String get workspaceFileCut => '剪切';
+
+  @override
+  String get workspaceFilePaste => '粘贴';
+
+  @override
+  String get workspaceFileName => '名称';
+
+  @override
+  String get workspaceFileInvalidName => '请输入有效名称，不能包含路径分隔符。';
+
+  @override
+  String get workspaceDeleteFolderTitle => '删除文件夹？';
+
+  @override
+  String workspaceDeleteFolderMessage(String name) {
+    return '确定删除“$name”及其全部内容？此操作无法撤销。';
+  }
+
+  @override
+  String workspaceFileOperationFailed(String error) {
+    return '文件操作失败：$error';
+  }
+
+  @override
+  String workspaceFileCopyName(String name, int index) {
+    return '$name（副本 $index）';
+  }
+
+  @override
+  String get workspaceFileSaving => '文件正在保存，请保存完成后重试。';
+
+  @override
+  String get chatBackupChooseTitle => '选择你的备份目录';
+
+  @override
+  String get chatBackupTitle => '每日聊天备份';
+
+  @override
+  String get chatBackupDescription =>
+      '应用运行时每天自动保存聊天数据库的 SQLite 快照，保留最近 10 份自动备份。只包含对话和消息，不包含附件文件、工作区、角色、记忆和应用配置。';
+
+  @override
+  String get chatRestoreTitle => '恢复聊天记录';
+
+  @override
+  String get chatRestoreDescription =>
+      '选择以前保存备份的外部文件夹，按日期选择聊天数据库快照进行恢复。重装或卸载后也可重新选择原备份目录。';
+
+  @override
+  String get chatRestoreChooseFolder => '选择已有备份目录';
+
+  @override
+  String get chatRestoreRefresh => '刷新快照';
+
+  @override
+  String get chatRestoreAction => '恢复';
+
+  @override
+  String get chatRestoreCancel => '取消';
+
+  @override
+  String get chatRestoreEmpty => '此目录中没有可恢复的聊天数据库快照。';
+
+  @override
+  String chatRestoreCounts(int chats, int messages) {
+    return '$chats 个对话 · $messages 条消息';
+  }
+
+  @override
+  String get chatRestoreConfirmTitle => '恢复这份聊天快照？';
+
+  @override
+  String chatRestoreConfirmDescription(String name) {
+    return '将用 $name 替换当前所有聊天记录。恢复前会先将当前聊天保存为独立快照；保存失败则停止恢复。请先停止正在运行的对话。其他设置不受影响。';
+  }
+
+  @override
+  String get chatRestoreSuccess => '聊天记录已恢复。';
+
+  @override
+  String get chatRestoreOnboardingTitle => '从以前的备份恢复';
+
+  @override
+  String get chatRestoreOnboardingDescription => '找回重装前或卸载前保存在外部目录的聊天记录';
+
+  @override
+  String get chatBackupExternalDescription =>
+      '请选择应用外的文件夹，确保卸载后备份仍保留。iPhone 和 iPad 请在 iCloud Drive 或其他外部文件提供者中选择目录。';
+
+  @override
+  String get chatBackupChoose => '选择备份目录';
+
+  @override
+  String get chatBackupLater => '稍后设置';
+
+  @override
+  String get chatBackupChange => '更改备份目录';
+
+  @override
+  String get chatBackupMissing => '尚未设置备份目录，或原目录已不存在、无法访问。请选择目录以开启每日聊天备份。';
+
+  @override
+  String get chatBackupReady => '备份目录已就绪。应用启动、回到前台及运行期间会检查每日备份。';
+
+  @override
+  String get chatBackupNow => '立即备份聊天';
+
+  @override
+  String get chatBackupNever => '尚无成功备份';
+
+  @override
+  String chatBackupLastSuccess(String time) {
+    return '最近成功备份：$time';
   }
 }

@@ -13,12 +13,13 @@ import '../components/ExtensionAvatar.dart';
 import '../components/ExtensionMotion.dart';
 import '../components/ExtensionNavigation.dart';
 import '../components/StoreCards.dart';
+import '../components/StoreOfficialExtensionRow.dart';
 import '../components/StoreDetailKit.dart';
 import '../components/StoreVisuals.dart';
 import '../market/MarketInstallStateStore.dart';
 import '../market/ArtifactMarketSupport.dart';
 import '../market/MarketRecommendations.dart';
-import '../market/MarketStatsSupport.dart';
+import '../market/MarketFilters.dart';
 import '../model/ExtensionCatalogController.dart';
 import '../model/GitHubAccountState.dart';
 import 'StoreBrowseScreen.dart';
@@ -42,7 +43,7 @@ class _MarketPaneState extends State<MarketPane> {
   late final MarketInstallStateStore _installState;
   late final GitHubAccountState _account = GitHubAccountState.of(_clients);
   StoreKind? _kind;
-  MarketSortOption _kindSort = MarketSortOption.updated;
+  MarketFilters _kindFilters = const MarketFilters();
   int _homeGeneration = 0;
   bool _homeLoading = true;
   String? _homeError;
@@ -209,28 +210,6 @@ class _MarketPaneState extends State<MarketPane> {
     }
   }
 
-  bool _candidateInstalled(core_proxy.ExtensionCatalogCandidate candidate) {
-    return _controller.findCandidate(candidate.kind, candidate.id) == null &&
-        _controller.findEntry(candidate.kind, candidate.id) != null;
-  }
-
-  Future<void> _installCandidate(
-    core_proxy.ExtensionCatalogCandidate candidate,
-  ) async {
-    try {
-      await _controller.installCandidate(
-        candidate,
-        candidate.requiredScope ?? defaultExtensionInstallScope,
-      );
-    } catch (error, stackTrace) {
-      debugPrint('Failed to install official extension: $error\n$stackTrace');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$error'), behavior: SnackBarBehavior.floating),
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     _syncOfficial();
@@ -245,7 +224,9 @@ class _MarketPaneState extends State<MarketPane> {
     } else if (kind != null) {
       body = StoreMarketListing(
         clients: _clients,
-        sort: _kindSort,
+        sort: _kindFilters.sort,
+        timeRange: _kindFilters.timeRange,
+        categoryId: _kindFilters.categoryId,
         type: kind.marketType,
       );
       bodyKey = 'kind:${kind.id}';
@@ -324,9 +305,12 @@ class _MarketPaneState extends State<MarketPane> {
               ),
               if (showSort)
                 MarketSortMenu(
-                  sort: _kindSort,
+                  clients: _clients,
+                  categories: _categories.isEmpty ? null : _categories,
+                  filters: _kindFilters,
                   compact: compactActions,
-                  onChanged: (sort) => setState(() => _kindSort = sort),
+                  onChanged: (filters) =>
+                      setState(() => _kindFilters = filters),
                 ),
               const SizedBox(width: 4),
               _CreatorEntry(account: _account, compact: compactActions),
@@ -374,6 +358,7 @@ class _MarketPaneState extends State<MarketPane> {
                   padding: padding,
                   title: '官方扩展',
                   subtitle: '随 Operit2 一起提供，不联网也能安装',
+                  onSeeAll: openOfficialExtensions,
                   child: _rowShelf<core_proxy.ExtensionCatalogCandidate>(
                     items: _official,
                     contentWidth: contentWidth,
@@ -534,29 +519,9 @@ class _MarketPaneState extends State<MarketPane> {
   }
 
   Widget _candidateRow(core_proxy.ExtensionCatalogCandidate candidate) {
-    final kind = StoreKind.of(candidate.kind);
-    final installed = _candidateInstalled(candidate);
-    void open() => openExtensionDetail(kind: candidate.kind, id: candidate.id);
-    return StoreAppRow(
-      icon: ExtensionAvatar(
-        seed: '${candidate.kind}:${candidate.id}',
-        label: candidate.displayName,
-        kind: kind,
-        size: 44,
-      ),
-      title: candidate.displayName,
-      subtitle: candidate.description.trim().isEmpty
-          ? kind.label
-          : '${kind.label} · ${candidate.description}',
-      action: StoreGetButton(
-        label: '获取',
-        busy: _controller.isBusy(
-          ExtensionCatalogController.candidateKey(candidate),
-        ),
-        done: installed,
-        onPressed: installed ? open : () => _installCandidate(candidate),
-      ),
-      onTap: open,
+    return StoreOfficialExtensionRow(
+      candidate: candidate,
+      controller: _controller,
     );
   }
 

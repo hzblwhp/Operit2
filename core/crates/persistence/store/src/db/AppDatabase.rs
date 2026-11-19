@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
 
 use crate::RuntimeStorePaths::RuntimeStorePaths;
 use crate::SqliteStore::{SqliteRowGet, SqliteStore, SqliteStoreError};
@@ -14,7 +15,7 @@ use operit_model::MessagePartCodec::MessagePartCodec;
 use operit_model::MessagePartEntity::MessagePartEntity;
 
 /// Current SQLite schema version expected by the runtime.
-pub const DATABASE_VERSION: i32 = 29;
+pub const DATABASE_VERSION: i32 = 30;
 
 #[derive(Debug, Error)]
 /// Error surface for opening and migrating the application database.
@@ -91,6 +92,13 @@ impl AppDatabase {
         &self.store
     }
 
+    /// Opens and migrates an isolated snapshot without changing the live database singleton.
+    pub fn openSnapshot(path: PathBuf) -> Result<Self, AppDatabaseError> {
+        let database = Self { store: SqliteStore::open(path)? };
+        database.openWithMigrations()?;
+        Ok(database)
+    }
+
     /// Opens the canonical schema and applies each required physical migration before publishing the database.
     fn openWithMigrations(&self) -> Result<(), AppDatabaseError> {
         let currentVersion = self.store.getUserVersion()?;
@@ -138,6 +146,7 @@ impl AppDatabase {
             26 => MIGRATION_26_27(self)?,
             27 => MIGRATION_27_28(self)?,
             28 => MIGRATION_28_29(self)?,
+            29 => MIGRATION_29_30(self)?,
             version => {
                 return Err(AppDatabaseError::MissingMigration {
                     from: version,
@@ -1338,6 +1347,26 @@ fn MIGRATION_28_29(database: &AppDatabase) -> Result<(), SqliteStoreError> {
         transaction.execute("CREATE INDEX IF NOT EXISTS index_sync_sql_deletions_chat_lifecycle\n            ON sync_sql_deletions(tableName, chatId)", Vec::new())?;
         transaction.execute("DELETE FROM chats WHERE id IN (SELECT chatId FROM sync_sql_deletions WHERE tableName='chats')", Vec::new())?;
         transaction.execute("PRAGMA user_version = 29", Vec::new())?;
+        Ok(())
+    })
+}
+
+/// Some version-29 databases omitted the optional sidebar
+/// group on both live and synchronized chat rows. Restore the nullable columns
+/// without overwriting group values in databases that already have them.
+fn MIGRATION_29_30(database: &AppDatabase) -> Result<(), SqliteStoreError> {
+    database.store.transaction(|transaction| {
+        for table in ["chats", "sync_sql_chat_rows"] {
+            let rows = transaction.queryRows(&format!("PRAGMA table_info(\"{table}\")"), Vec::new())?;
+            let mut has_group = false;
+            for row in rows {
+                if row.get::<_, String>("name")? == "group" { has_group = true; break; }
+            }
+            if !has_group {
+                transaction.execute(&format!("ALTER TABLE \"{table}\" ADD COLUMN \"group\" TEXT"), Vec::new())?;
+            }
+        }
+        transaction.execute("PRAGMA user_version = 30", Vec::new())?;
         Ok(())
     })
 }

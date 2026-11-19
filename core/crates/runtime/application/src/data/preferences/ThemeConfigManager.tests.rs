@@ -228,6 +228,29 @@ fn invalid_types_enums_and_ranges_are_rejected() {
     }
 }
 
+/// Requires complete device face metadata for global, user, and AI typography.
+#[test]
+fn device_fonts_require_the_selected_family_and_persisted_face() {
+    for (font_type, name, path) in [
+        ("fontType", "systemFontName", "customFontPath"),
+        ("bubbleUserFontType", "bubbleUserSystemFontName", "bubbleUserCustomFontPath"),
+        ("bubbleAiFontType", "bubbleAiSystemFontName", "bubbleAiCustomFontPath"),
+    ] {
+        let mut value = snapshot();
+        value.insert(font_type.to_string(), json!("device"));
+        value.insert(name.to_string(), json!("Microsoft YaHei UI"));
+        value.insert(path.to_string(), json!("runtime/data/user_assets/theme/font.ttf"));
+        validateThemePreferenceSnapshot(&value).unwrap();
+        for key in [name, path] {
+            for invalid in [Value::Null, json!(""), json!("  ")] {
+                let mut incomplete = value.clone();
+                incomplete.insert(key.to_string(), invalid);
+                assert!(validateThemePreferenceSnapshot(&incomplete).is_err(), "{key}");
+            }
+        }
+    }
+}
+
 /// Checks all four repeat intervals and allows nullable u32 color boundaries.
 #[test]
 fn repeat_ordering_and_nullable_colors_are_strict() {
@@ -515,28 +538,56 @@ fn invalid_saved_records_and_selections_are_not_repaired() {
     }
 }
 
-/// Rejects an externally divergent active ordinary preference without overwriting either source.
+/// Keeps catalog reads available during appearance divergence and permits an explicit synchronized save.
 #[test]
-fn active_ordinary_divergence_is_reported() {
+fn active_ordinary_divergence_allows_catalog_reads_and_appearance_save() {
     for (key, value) in [
-        ("theme_mode", "dark"),
-        ("custom_primary_color", "null"),
-        ("custom_user_avatar_uri", "null"),
+        ("use_custom_colors", json!(true)),
+        ("theme_mode", json!("dark")),
+        ("custom_primary_color", json!(null)),
+        ("custom_user_avatar_uri", json!(null)),
     ] {
         let fixture = StoreFixture::new();
         let manager = fixture.manager();
         let named = manager.create("Named".to_string(), snapshot()).unwrap();
-        manager.apply(named.id).unwrap();
+        manager.apply(named.id.clone()).unwrap();
         fixture
             .preferences()
             .edit(|preferences| preferences.set(&stringPreferencesKey(key), value.clone()))
             .unwrap();
         let before = fixture.bytes();
-        assert!(manager.getActive().is_err(), "{key}");
-        assert!(manager.watch().first().is_err(), "{key}");
-        assert!(manager.saveAppearance(snapshot()).is_err(), "{key}");
+        assert_eq!(manager.list().unwrap(), vec![named.clone()], "{key}");
+        assert_eq!(manager.get(named.id.clone()).unwrap(), named, "{key}");
+        assert_eq!(manager.getActive().unwrap(), Some(named.clone()), "{key}");
+        let state = manager.watch().first().unwrap();
+        assert_eq!(state.configs, vec![named.clone()], "{key}");
+        assert_eq!(state.activeThemeConfigId, Some(named.id), "{key}");
         assert_eq!(fixture.bytes(), before);
+        let saved = manager.saveAppearance(snapshot()).unwrap().unwrap();
+        assertThemePreferenceSnapshot(&fixture.preferences().data().unwrap(), &saved.snapshot)
+            .unwrap();
     }
+}
+
+/// Allows selecting another saved theme even when the previously active appearance differs.
+#[test]
+fn apply_replaces_divergent_active_appearance() {
+    let fixture = StoreFixture::new();
+    let manager = fixture.manager();
+    let first = manager.create("First".into(), snapshot()).unwrap();
+    let second = manager
+        .create("Second".into(), changedSnapshot("fontScale", json!(1.2)))
+        .unwrap();
+    manager.apply(first.id).unwrap();
+    fixture.preferences().edit(|preferences| {
+        preferences.set(&stringPreferencesKey("use_custom_colors"), json!(true));
+    }).unwrap();
+
+    let writes = fixture.writes();
+    assert_eq!(manager.apply(second.id.clone()).unwrap(), second);
+    assert_eq!(fixture.writes(), writes + 1);
+    assert_eq!(manager.getActive().unwrap(), Some(second.clone()));
+    assertThemePreferenceSnapshot(&fixture.preferences().data().unwrap(), &second.snapshot).unwrap();
 }
 
 /// Propagates the original write error and keeps both real bytes and the observed state unchanged.
@@ -903,7 +954,7 @@ fn api_schema_one_migration_preserves_declared_native_types() {
     })).unwrap()).unwrap();
     let store = super::super::ApiPreferences::ApiPreferences::store(fixture.host.clone());
     let values = store.data().unwrap();
-    assert_eq!(store.schemaVersion().unwrap(), 2);
+    assert_eq!(store.schemaVersion().unwrap(), 3);
     assert_eq!(
         values.get(&stringPreferencesKey("enable_tools")),
         Some(&json!(false))
@@ -973,7 +1024,6 @@ fn released_named_theme_clears_previous_template_input_preferences() {
             FieldKind::OptionalPalette => json!(serde_json::to_string(&visual["palette"]).unwrap()),
             FieldKind::Enum(values) => json!(values[0]),
             FieldKind::Number { min, .. } => json!(min),
-            FieldKind::OptionalEnum(values) => json!(values[0]),
         };
         extended_values.insert(field.preference_key.to_owned(), value);
     }
@@ -1036,7 +1086,7 @@ fn explicit_custom_appearance_repairs_invalid_preferences_and_preserves_catalog(
     fixture.preferences().edit(|preferences| {
         preferences.set(&stringPreferencesKey("font_scale"), json!("invalid"));
     }).unwrap();
-    assert!(manager.list().is_err());
+    assert_eq!(manager.list().unwrap(), vec![saved.clone()]);
     let writes = fixture.writes();
     manager.useCustomAppearance(snapshot()).unwrap();
     assert_eq!(fixture.writes(), writes + 1);
@@ -1533,5 +1583,255 @@ fn october_eighth_preferences_migrate_all_released_field_types() {
         preferences.data().unwrap();
         assert_eq!(fixture.bytes(), committed);
         assert_eq!(fixture.writes(), initial_writes + 1);
+    }
+}
+
+/// The mode shortcut updates only the selected theme, and switching restores each theme's mode.
+#[test]
+fn mode_shortcut_edits_only_the_selected_theme() {
+    let fixture = StoreFixture::new();
+    let manager = fixture.manager();
+    let light = manager
+        .create("Light".into(), changedSnapshot("themeMode", json!("light")))
+        .unwrap();
+    let dark = manager
+        .create("Dark".into(), changedSnapshot("themeMode", json!("dark")))
+        .unwrap();
+    manager.apply(light.id.clone()).unwrap();
+    let edited = manager
+        .patchAppearance(
+            snapshot(),
+            BTreeMap::from([("theme_mode".into(), json!("system"))]),
+            vec![],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(edited.id, light.id);
+    assert_eq!(edited.snapshot["themeMode"], json!("system"));
+    assert_eq!(manager.get(dark.id.clone()).unwrap(), dark);
+    manager.apply(dark.id.clone()).unwrap();
+    assert_eq!(
+        manager.getActive().unwrap().unwrap().snapshot["themeMode"],
+        json!("dark")
+    );
+    manager.apply(light.id).unwrap();
+    assert_eq!(
+        manager.getActive().unwrap().unwrap().snapshot["themeMode"],
+        json!("system")
+    );
+}
+
+/// Runs the versioned startup migration against the same real storage host as the owner.
+fn migrateAppearance(fixture: &StoreFixture) -> Result<(), PreferencesDataStoreError> {
+    super::super::ThemeAppearanceMigration::migrate(fixture.host.clone())
+}
+
+/// Startup saves the old appearance and its migration version together; reads never create themes.
+#[test]
+fn startup_appearance_migration_preserves_background_and_runs_once() {
+    let fixture = StoreFixture::new();
+    let preferences = fixture.preferences();
+    preferences
+        .edit(|values| {
+            values.set(&stringPreferencesKey("theme_mode"), "dark");
+            values.set(&stringPreferencesKey("use_background_image"), true);
+            values.set(
+                &stringPreferencesKey("background_image_uri"),
+                "theme-media/forest.png",
+            );
+            values.set(&stringPreferencesKey("background_image_opacity"), 0.8);
+            values.set(&stringPreferencesKey("app_language"), "zh-CN");
+            values.set(&stringPreferencesKey("unrelated_setting"), "keep");
+        })
+        .unwrap();
+    let writes = fixture.writes();
+    assert!(fixture.manager().list().unwrap().is_empty());
+    assert_eq!(fixture.writes(), writes);
+    migrateAppearance(&fixture).unwrap();
+    let manager = fixture.manager();
+    let active = manager.getActive().unwrap().unwrap();
+    assert_eq!(active.name, "默认主题");
+    assert_eq!(active.snapshot["themeMode"], json!("dark"));
+    assert_eq!(
+        active.snapshot["backgroundImageUri"],
+        json!("theme-media/forest.png")
+    );
+    assert_eq!(active.snapshot["backgroundImageOpacity"], json!(0.8));
+    assert_eq!(manager.list().unwrap(), vec![active.clone()]);
+    let values = preferences.data().unwrap();
+    assertThemePreferenceSnapshot(&values, &active.snapshot).unwrap();
+    assert_eq!(
+        values.get(&stringPreferencesKey("theme_appearance_migration_version")),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("unrelated_setting")),
+        Some(&json!("keep"))
+    );
+    assert_eq!(fixture.writes(), writes + 1);
+    let bytes = fixture.bytes();
+    for _ in 0..2 {
+        migrateAppearance(&fixture).unwrap();
+    }
+    assert_eq!(fixture.manager().getActive().unwrap(), Some(active));
+    assert_eq!(fixture.bytes(), bytes);
+    assert_eq!(fixture.writes(), writes + 1);
+}
+
+/// New installs get an ordinary theme during startup, and concurrent starts cannot duplicate it.
+#[test]
+fn startup_appearance_migration_initializes_fresh_store_once() {
+    let fixture = StoreFixture::new();
+    fixture.preferences().data().unwrap();
+    let writes = fixture.writes();
+    let mut threads = vec![];
+    for _ in 0..4 {
+        let host = fixture.host.clone();
+        threads.push(std::thread::spawn(move || {
+            super::super::ThemeAppearanceMigration::migrate(host).unwrap()
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let active = fixture.manager().getActive().unwrap().unwrap();
+    assert_eq!(active.snapshot["themeMode"], json!("system"));
+    assert_eq!(fixture.manager().list().unwrap(), vec![active]);
+    assert_eq!(fixture.writes(), writes + 1);
+}
+
+/// A selected theme's internal snapshot wins over an obsolete global mode override.
+#[test]
+fn startup_appearance_migration_preserves_selected_theme_and_restores_its_mode() {
+    let fixture = StoreFixture::new();
+    let manager = fixture.manager();
+    let saved = manager
+        .create("Night".into(), changedSnapshot("themeMode", json!("dark")))
+        .unwrap();
+    manager.apply(saved.id.clone()).unwrap();
+    fixture
+        .preferences()
+        .edit(|values| {
+            values.set(&stringPreferencesKey("theme_mode"), "light");
+            values.set(&stringPreferencesKey("use_system_theme"), true);
+        })
+        .unwrap();
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(manager.getActive().unwrap(), Some(saved.clone()));
+    assert_eq!(manager.list().unwrap(), vec![saved.clone()]);
+    let values = fixture.preferences().data().unwrap();
+    assertThemePreferenceSnapshot(&values, &saved.snapshot).unwrap();
+    assert!(!values.contains(&stringPreferencesKey("use_system_theme")));
+}
+
+/// Matching saved appearance is reused without creating a special or duplicate record.
+#[test]
+fn startup_appearance_migration_reuses_a_matching_saved_theme() {
+    let fixture = StoreFixture::new();
+    let manager = fixture.manager();
+    let named = manager
+        .create(
+            "My appearance".into(),
+            changedSnapshot("themeMode", json!("dark")),
+        )
+        .unwrap();
+    manager.useCustomAppearance(named.snapshot.clone()).unwrap();
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(manager.getActive().unwrap(), Some(named.clone()));
+    assert_eq!(manager.list().unwrap(), vec![named]);
+}
+
+/// Failed writes leave the old preferences and version intact; a later startup retries the migration.
+#[test]
+fn startup_appearance_migration_is_atomic_and_retryable() {
+    let fixture = StoreFixture::new();
+    fixture
+        .preferences()
+        .edit(|values| {
+            values.set(&stringPreferencesKey("theme_mode"), "light");
+        })
+        .unwrap();
+    let before = fixture.bytes();
+    fixture
+        .host
+        .failPreferenceWrite
+        .store(true, Ordering::SeqCst);
+    assert!(migrateAppearance(&fixture).is_err());
+    assert_eq!(fixture.bytes(), before);
+    fixture
+        .host
+        .failPreferenceWrite
+        .store(false, Ordering::SeqCst);
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(
+        fixture.manager().getActive().unwrap().unwrap().snapshot["themeMode"],
+        json!("light")
+    );
+}
+
+/// A completed migration is never repurposed as an ensure-on-read or startup repair.
+#[test]
+fn startup_appearance_migration_does_not_repair_after_its_version_is_committed() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    let manager = fixture.manager();
+    let active = manager.getActive().unwrap().unwrap();
+    manager.useCustomAppearance(snapshot()).unwrap();
+    manager.delete(active.id).unwrap();
+    let before = fixture.bytes();
+    let writes = fixture.writes();
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(fixture.bytes(), before);
+    assert_eq!(fixture.writes(), writes);
+    assert!(manager.list().unwrap().is_empty());
+    assert_eq!(manager.getActive().unwrap(), None);
+}
+
+/// The version, new record, selected identity and effective preferences travel in the same sync transaction.
+#[test]
+fn startup_appearance_migration_synchronizes_without_rewriting_old_history() {
+    use operit_store::SyncOperationStore::{SyncClock, SyncOperationStore};
+    use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
+    let source = StoreFixture::new();
+    source
+        .preferences()
+        .edit(|values| {
+            values.set(&stringPreferencesKey("theme_mode"), "dark");
+            values.set(&stringPreferencesKey("use_background_image"), true);
+            values.set(
+                &stringPreferencesKey("background_image_uri"),
+                "theme-media/forest.png",
+            );
+        })
+        .unwrap();
+    let journal = SyncOperationStore::new(source.host.clone(), RUNTIME_SYNC_DIR_PATH);
+    let old = journal
+        .operationsSince(&SyncClock::empty(), &["preferences".into()], 512)
+        .unwrap();
+    migrateAppearance(&source).unwrap();
+    let operations = journal
+        .operationsSince(&SyncClock::empty(), &["preferences".into()], 512)
+        .unwrap();
+    assert_eq!(operations.len(), old.len() + 1);
+    assert_eq!(&operations[..old.len()], old.as_slice());
+    let active = source.manager().getActive().unwrap().unwrap();
+    let target = StoreFixture::new();
+    target.preferences().data().unwrap();
+    for _ in 0..2 {
+        let history = SyncOperationStore::new(target.host.clone(), RUNTIME_SYNC_DIR_PATH)
+            .preferenceHistory()
+            .unwrap();
+        operit_store::PreferenceMerge::applyOperations(
+            target.host.clone(),
+            &super::super::PreferenceSpaceMerge::schema(),
+            &history,
+            &operations,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(target.manager().getActive().unwrap(), Some(active.clone()));
+        let before = target.bytes();
+        migrateAppearance(&target).unwrap();
+        assert_eq!(target.bytes(), before);
     }
 }

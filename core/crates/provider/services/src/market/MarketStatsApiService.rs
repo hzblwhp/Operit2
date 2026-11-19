@@ -694,6 +694,28 @@ impl MarketStatsApiService {
 
     /// Creates a comment on a marketplace entry.
     pub fn create_entry_comment(&self, entry_id: &str, body: &str) -> Result<String, String> {
+        self.create_comment(entry_id, body, None)
+    }
+
+    /// Replies to an existing marketplace comment, preserving its parent relation.
+    pub fn reply_entry_comment(
+        &self,
+        entry_id: &str,
+        body: &str,
+        parent_id: &str,
+    ) -> Result<String, String> {
+        if parent_id.trim().is_empty() {
+            return Err("A reply requires a parent comment".to_string());
+        }
+        self.create_comment(entry_id, body, Some(parent_id))
+    }
+
+    fn create_comment(
+        &self,
+        entry_id: &str,
+        body: &str,
+        parent_id: Option<&str>,
+    ) -> Result<String, String> {
         #[derive(Deserialize)]
         struct Response {
             #[serde(rename = "commentId")]
@@ -703,7 +725,7 @@ impl MarketStatsApiService {
             "POST",
             &["entries", entry_id, "comments"],
             vec![("Content-Type".to_string(), "application/json".to_string())],
-            serde_json::to_vec(&serde_json::json!({"body": body})).map_err(|e| e.to_string())?,
+            serde_json::to_vec(&market_comment_body(body, parent_id)).map_err(|e| e.to_string())?,
             true,
         )?;
         Ok(resp.comment_id)
@@ -1139,152 +1161,31 @@ impl MarketStatsApiService {
     }
 
     /// Streams a marketplace asset to a caller-owned file without buffering it in the UI.
-    ///
-    /// STREAM_RETRY_MARKER: this is the path the marketplace UI really uses
-    /// (`OperitApplication::installMarketArtifact`), so the retry has to live
-    /// here and not only in `download_asset`. Every asset URL redirects to a
-    /// GitHub release host that intermittently resets the connection, and the
-    /// underlying `downloadToFile` reports that as a bare reqwest error with no
-    /// status code, so a failed attempt cannot be classified: retry regardless.
-    /// The host removes its own partial file on failure, so each attempt
-    /// restarts from a clean target path.
-    pub fn download_asset_to_file(&self, asset_id: &str, target_path: &str) -> Result<u64, String> {
+    pub fn download_asset_to_file(
+        &self,
+        asset_id: &str,
+        target_path: &str,
+        file_system: &operit_vfs::VisualFileSystem::VisualFileSystem,
+    ) -> Result<u64, String> {
         let asset_id = asset_id.trim();
         if asset_id.is_empty() {
             return Err("asset id is empty".to_string());
         }
         let url = self.v2_url(&["assets", asset_id, "download"])?;
-        let mut last_error = String::from("download failed without error detail");
-        for attempt in 1..=DOWNLOAD_MAX_ATTEMPTS {
-            let started_at_millis = currentTimeMillis();
-            let outcome = self
-                .http_host
-                .downloadToFile(
-                    HttpRequestData {
-                        url: url.to_string(),
-                        method: "GET".to_string(),
-                        headers: vec![("User-Agent".to_string(), USER_AGENT.to_string())],
-                        body: Vec::new(),
-                        formFields: Vec::new(),
-                        fileParts: Vec::new(),
-                        connectTimeoutSeconds: DOWNLOAD_TIMEOUT_SECONDS,
-                        readTimeoutSeconds: DOWNLOAD_TIMEOUT_SECONDS,
-                        followRedirects: true,
-                        ignoreSsl: false,
-                        proxyHost: String::new(),
-                        proxyPort: 0,
-                    },
-                    target_path.to_string(),
-                )
-                .map_err(|error| error.to_string());
-            match outcome {
-                Ok(result) if result.downloadedBytes > 0 => {
-                    if attempt > 1 {
-                        AppLogger::w(
-                            MARKET_API_LOG_TAG,
-                            &format!(
-                                "download_asset_to_file recovered attempt={} assetId={} elapsedMs={} bytes={}",
-                                attempt,
-                                asset_id,
-                                currentTimeMillis() - started_at_millis,
-                                result.downloadedBytes
-                            ),
-                        );
-                    }
-                    return Ok(result.downloadedBytes);
-                }
-                Ok(_) => {
-                    last_error = "downloaded zero bytes".to_string();
-                }
-                Err(error) => {
-                    last_error = error;
-                }
-            }
-            if attempt < DOWNLOAD_MAX_ATTEMPTS {
-                AppLogger::w(
-                    MARKET_API_LOG_TAG,
-                    &format!(
-                        "download_asset_to_file retry {}/{} assetId={} elapsedMs={} reason={}",
-                        attempt,
-                        DOWNLOAD_MAX_ATTEMPTS,
-                        asset_id,
-                        currentTimeMillis() - started_at_millis,
-                        last_error
-                    ),
-                );
-                std::thread::sleep(std::time::Duration::from_secs(
-                    DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt as u64,
-                ));
-            }
-        }
-        Err(format!(
-            "download failed after {} attempts: {}",
-            DOWNLOAD_MAX_ATTEMPTS, last_error
-        ))
-    }
-
-    /// Downloads one GitHub release asset through mirror prefixes into the target file.
-    /// Only used as a fallback when the market asset endpoint cannot complete the transfer.
-    pub fn download_github_asset_via_mirror(
-        &self,
-        asset_url: &str,
-        target_path: &str,
-    ) -> Result<u64, String> {
-        let asset_url = asset_url.trim();
-        if asset_url.is_empty() {
-            return Err("asset url is empty".to_string());
-        }
-        if !asset_url.starts_with("https://github.com/")
-            && !asset_url.starts_with("http://github.com/")
-        {
-            return Err("asset url is not a GitHub release url".to_string());
-        }
-        let mut last_error = String::from("mirror download failed without error detail");
-        for prefix in GITHUB_ASSET_MIRROR_PREFIXES {
-            let mirrored_url = format!("{prefix}{asset_url}");
-            let started_at_millis = currentTimeMillis();
-            let outcome = self
-                .http_host
-                .downloadToFile(
-                    HttpRequestData {
-                        url: mirrored_url,
-                        method: "GET".to_string(),
-                        headers: vec![("User-Agent".to_string(), USER_AGENT.to_string())],
-                        body: Vec::new(),
-                        formFields: Vec::new(),
-                        fileParts: Vec::new(),
-                        connectTimeoutSeconds: DOWNLOAD_TIMEOUT_SECONDS,
-                        readTimeoutSeconds: DOWNLOAD_TIMEOUT_SECONDS,
-                        followRedirects: true,
-                        ignoreSsl: false,
-                        proxyHost: String::new(),
-                        proxyPort: 0,
-                    },
-                    target_path.to_string(),
-                )
-                .map_err(|error| error.to_string());
-            match outcome {
-                Ok(result) if result.downloadedBytes > 0 => {
-                    AppLogger::w(
-                        MARKET_API_LOG_TAG,
-                        &format!(
-                            "mirror download ok prefix={} bytes={} elapsedMs={}",
-                            prefix,
-                            result.downloadedBytes,
-                            currentTimeMillis() - started_at_millis
-                        ),
-                    );
-                    return Ok(result.downloadedBytes);
-                }
-                Ok(_) => {
-                    last_error = format!("{prefix}: downloaded zero bytes");
-                }
-                Err(error) => {
-                    last_error = format!("{prefix}: {error}");
-                }
-            }
-        }
-        Err(format!("all GitHub mirrors failed: {last_error}"))
+        file_system.downloadFile(self.http_host.as_ref(), HttpRequestData {
+            url: url.to_string(),
+            method: "GET".to_string(),
+            headers: vec![("User-Agent".to_string(), USER_AGENT.to_string())],
+            body: Vec::new(),
+            formFields: Vec::new(),
+            fileParts: Vec::new(),
+            connectTimeoutSeconds: TIMEOUT_SECONDS,
+            readTimeoutSeconds: TIMEOUT_SECONDS,
+            followRedirects: true,
+            ignoreSsl: false,
+            proxyHost: String::new(),
+            proxyPort: 0,
+        }, target_path)
     }
 
     // ── Internal: HTTP helpers ─────────────────────────────
@@ -1652,6 +1553,14 @@ fn market_entry_patch_json(
     serde_json::Value::Object(map)
 }
 
+fn market_comment_body(body: &str, parent_id: Option<&str>) -> serde_json::Value {
+    let mut payload = serde_json::json!({"body": body});
+    if let Some(parent_id) = parent_id {
+        payload["parentId"] = serde_json::Value::String(parent_id.to_string());
+    }
+    payload
+}
+
 fn market_new_version_body(
     entry_patch: Option<serde_json::Value>,
     version: serde_json::Value,
@@ -1708,7 +1617,7 @@ pub use MarketStatsApiService as MarketStatsApiServiceModule;
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_my_entries, MarketStatsApiService};
+    use super::{market_comment_body, parse_my_entries, MarketStatsApiService};
     use operit_host_api::HostManager::setDefaultHttpHost;
     use operit_host_api::{
         HostError, HostResult, HttpHost, HttpRequestData, HttpResponseData,
@@ -1716,6 +1625,15 @@ mod tests {
         HttpStreamOpenedCallback,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn comment_payload_preserves_reply_parent_without_changing_top_level_comments() {
+        assert_eq!(market_comment_body("Hello", None), serde_json::json!({"body": "Hello"}));
+        assert_eq!(
+            market_comment_body("Reply", Some("parent-42")),
+            serde_json::json!({"body": "Reply", "parentId": "parent-42"}),
+        );
+    }
 
     struct ReqwestTestHttpHost;
 

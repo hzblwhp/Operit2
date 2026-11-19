@@ -203,6 +203,7 @@ fn preference_files_use_the_native_journal_instead_of_whole_file_lww() {
     assert!(!operations.iter().any(|operation|operation.entityId==fixture.path));
     assert!(files.writeBytes(&fixture.path,b"{}").is_err());
     assert!(!PluginStorage::ownsFile(fixture.host.clone(),"runtime/config/preferences/model_configs.preferences.json").unwrap());
+    drop(files);
     fixture.dispose();
 }
 
@@ -532,8 +533,8 @@ fn file_correction_provisions_an_empty_preference_owner_with_an_initializer() {
     drop(registry);
     schema.stores.push(schema.owner(&target.path).unwrap().unwrap());
     let registry = PreferenceMerge::registry(target.host.clone(),&schema,[],|_,_|true).unwrap();
-    assert!(registry.repair_file(&snapshot.data.owner,"",&snapshot,Some(&file)).unwrap());
-    assert!(!registry.repair_file(&snapshot.data.owner,"",&snapshot,Some(&file)).unwrap());
+    assert!(registry.repair_file(&snapshot.data.owner,"",&snapshot,Some(&file),None).unwrap());
+    assert!(!registry.repair_file(&snapshot.data.owner,"",&snapshot,Some(&file),None).unwrap());
     assert_eq!(target.host.readBytes(&target.path).unwrap(),file.as_bytes());
     let history = target.history();
     assert_eq!(history.len(), 1);
@@ -543,6 +544,7 @@ fn file_correction_provisions_an_empty_preference_owner_with_an_initializer() {
     let schema = PreferenceMergeSchema::default();
     let registry = PreferenceMerge::registry(target.host.clone(),&schema,[],|_,_|true).unwrap();
     assert_eq!(registry.snapshot(&snapshot.data.owner).unwrap().data,snapshot.data);
+    drop((registry, store));
     source.dispose(); target.dispose();
 }
 
@@ -560,9 +562,10 @@ fn a_file_created_after_inventory_capture_is_preserved_and_discovered() {
     let store = PreferencesDataStore::newWithStorage(target.host.clone(), &target.path);
     store.edit(|values|values.set(&stringPreferencesKey("local"),"keep")).unwrap();
     let bytes = target.host.readBytes(&target.path).unwrap();
-    assert!(!registry.repair_file(&snapshot.data.owner,"",&snapshot,None).unwrap());
+    assert!(!registry.repair_file(&snapshot.data.owner,"",&snapshot,None,None).unwrap());
     assert_eq!(target.host.readBytes(&target.path).unwrap(),bytes);
     assert_eq!(store.data().unwrap().get(&stringPreferencesKey("local")),Some(&json!("keep")));
+    drop((registry, source_store, store));
     source.dispose(); target.dispose();
 }
 
@@ -623,17 +626,17 @@ fn portable_schema_failure_is_atomic_and_callbacks_cannot_advance_the_format() {
     fixture.dispose();
 }
 
-/// Numbered rules append without rewriting released history; engine metadata stays private.
+/// Changed rules resolve automatically without replaying applied steps; metadata stays private.
 #[test]
-fn portable_contracts_are_durable_append_only_and_not_user_editable() {
+fn portable_contracts_resolve_changed_rules_and_remain_not_user_editable() {
     for scope in ["space","device"] {
         let fixture=Fixture::new(scope);let handle=fixture.open();
         fixture.schema(&handle,json!([[]])).unwrap();
         assert_eq!(fixture.data(&handle)["schemaVersion"],1);
         assert!(fixture.data(&handle)["values"].get("__operit_preferences_schema").is_none());
-        let before=fixture.host.readBytes(&fixture.path).unwrap();
-        assert!(fixture.schema(&handle,json!([[{"op":"drop_key","key":"x"}]])).is_err());
-        assert_eq!(fixture.host.readBytes(&fixture.path).unwrap(),before);
+        fixture.edit(&handle,json!([set("x",json!("already migrated"))]));
+        fixture.schema(&handle,json!([[{"op":"drop_key","key":"x"}]])).unwrap();
+        assert_eq!(fixture.data(&handle)["values"]["x"],"already migrated");
         fixture.schema(&handle,json!([[],[]])).unwrap();
         fixture.call(json!({"op":"close","handle":handle})).unwrap();
         let reopened=fixture.open();assert_eq!(fixture.data(&reopened)["schemaVersion"],2);
@@ -641,6 +644,99 @@ fn portable_contracts_are_durable_append_only_and_not_user_editable() {
         assert!(fixture.finish(&reopened,&token,json!([set("__operit_preferences_schema",json!({}))]),2).is_err());
         fixture.dispose();
     }
+}
+
+/// Both released character-card v1 contracts open without rerunning the import flag migration.
+#[test]
+fn character_schema_conflicts_recover_in_both_local_ownership_scopes() {
+    let original = json!([[{"op":"set_object_field","key":"state","field":"legacyImportPending","value":true}]]);
+    let released = serde_json::from_str::<Value>(include_str!("../../../../../plugins/packages/buildin/character_cards/src/storage/meta-schema.json")).unwrap()["steps"].clone();
+    for scope in ["space", "device"] {
+        for first in [&original, &released] {
+            let mut fixture = Fixture::new(scope);
+            let handle = fixture.open();
+            fixture.edit(&handle, json!([set("state", json!({"retained":true}))]));
+            fixture.schema(&handle, first.clone()).unwrap();
+            fixture.edit(&handle, json!([{"op":"set_object_field","key":"state","field":"legacyImportPending","value":false}]));
+            for steps in [&original, &released, &original] {
+                fixture.schema(&handle, steps.clone()).unwrap();
+                assert_eq!(fixture.data(&handle)["values"]["state"], json!({"retained":true,"legacyImportPending":false}));
+            }
+            // A future release can extend a mistakenly rewritten prefix. Older plugins may reopen it.
+            fixture.schema(&handle, json!([[], [{"op":"set_object_field","key":"state","field":"upgraded","value":true}]])).unwrap();
+            fixture.schema(&handle, original.clone()).unwrap();
+            fixture.session = PluginStorageSession::default();
+            fixture.host = Arc::new(NativeRuntimeStorageHost::new(fixture.root.join("runtime"), fixture.root.join("workspaces")));
+            let reopened = fixture.open();
+            assert_eq!(fixture.data(&reopened)["schemaVersion"], 2);
+            assert_eq!(fixture.data(&reopened)["values"]["state"], json!({"retained":true,"legacyImportPending":false,"upgraded":true}));
+            fixture.dispose();
+        }
+    }
+}
+
+/// Divergent contracts converge through the native receipt/replay pipeline, including unopened peers.
+#[test]
+fn conflicting_portable_contracts_sync_without_pending_or_skipped_owners() {
+    let left = Fixture::new("space");
+    let right = Fixture::new("space");
+    let left_handle = left.open();
+    let right_handle = right.open();
+    left.edit(&left_handle, json!([set("state", json!({"retained":true}))]));
+    right.edit(&right_handle, json!([set("state", json!({"retained":true}))]));
+    let original = json!([[{"op":"set_object_field","key":"state","field":"legacyImportPending","value":true}]]);
+    left.schema(&left_handle, original.clone()).unwrap();
+    right.schema(&right_handle, json!([[]])).unwrap();
+    left.edit(&left_handle, json!([{"op":"increment_integer","key":"counter","delta":7}]));
+    right.edit(&right_handle, json!([{"op":"increment_integer","key":"counter","delta":11}]));
+    let left_history = left.history();
+    let right_history = right.history();
+    let schema = PreferenceMergeSchema::default();
+    let unopened = Fixture::new("space");
+    let reverse = Fixture::new("space");
+    let mut expected = None;
+    for (fixture, batches) in [(&left, [&right_history, &left_history]), (&right, [&left_history, &right_history]),
+        (&unopened, [&left_history, &right_history]), (&reverse, [&right_history, &left_history])] {
+        for _ in 0..2 {
+            for batch in batches {
+                let registry = PreferenceMerge::registry(fixture.host.clone(), &schema, batch.iter(), |_,_|true).unwrap();
+                let report = registry.receive(batch).unwrap();
+                assert!(report.errors.is_empty(), "{:?}", report.errors);
+                assert!(report.pending.is_empty(), "{:?}", report.pending);
+                assert!(registry.skipped().unwrap().is_empty(), "{:?}", registry.skipped().unwrap());
+            }
+        }
+        let handle = fixture.open();
+        assert_eq!(fixture.data(&handle)["values"]["counter"], 18);
+        fixture.schema(&handle, json!([[]])).unwrap();
+        fixture.schema(&handle, original.clone()).unwrap();
+        let snapshot = PreferencesDataStore::newWithStorage(fixture.host.clone(), &fixture.path).syncSnapshot().unwrap();
+        assert_eq!(snapshot.data.values["__operit_preferences_schema"]["steps"], original);
+        if let Some(expected) = &expected { assert_eq!(&snapshot.data, expected); }
+        else { expected = Some(snapshot.data); }
+        // All original identities and payloads survive resolution unchanged.
+        let history = fixture.history();
+        for operation in left_history.iter().chain(&right_history) {
+            assert_eq!(history.iter().find(|candidate| candidate.opId == operation.opId), Some(operation));
+        }
+    }
+    // Ordinary edits and another exchange continue after resolving the conflict.
+    left.edit(&left_handle, json!([{"op":"increment_integer","key":"counter","delta":1}]));
+    PreferenceMerge::applyOperations(right.host.clone(), &schema, &[], &left.history(), |_,_|true).unwrap();
+    assert_eq!(right.data(&right_handle)["values"]["counter"], 19);
+    // A higher version with a rewritten prefix also resolves, then old declarations reopen it.
+    let upgraded = json!([[], [{"op":"set_object_field","key":"state","field":"upgraded","value":true}]]);
+    right.schema(&right_handle, upgraded.clone()).unwrap();
+    for fixture in [&left, &unopened, &reverse] {
+        PreferenceMerge::applyOperations(fixture.host.clone(), &schema, &[], &right.history(), |_,_|true).unwrap();
+        let handle = fixture.open();
+        fixture.schema(&handle, original.clone()).unwrap();
+        assert_eq!(fixture.data(&handle)["schemaVersion"], 2);
+        assert_eq!(fixture.data(&handle)["values"]["state"]["upgraded"], true);
+        let snapshot = PreferencesDataStore::newWithStorage(fixture.host.clone(), &fixture.path).syncSnapshot().unwrap();
+        assert_eq!(snapshot.data.values["__operit_preferences_schema"]["steps"], upgraded);
+    }
+    left.dispose(); right.dispose(); unopened.dispose(); reverse.dispose();
 }
 
 /// An unknown migration skips its owner without blocking file correction or another owner.
@@ -662,6 +758,7 @@ fn unknown_portable_schema_is_isolated_to_its_owner() {
     assert!(report.errors.is_empty());
     assert!(registry.skipped().unwrap().contains_key(&receiver.path));
     assert_eq!(PreferencesDataStore::newWithStorage(receiver.host.clone(),healthy).data().unwrap().get(&stringPreferencesKey("value")),Some(&json!(42)));
+    drop(registry);
     source.dispose();receiver.dispose();
 }
 

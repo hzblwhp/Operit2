@@ -40,15 +40,19 @@ use operit_model::ModelParameter::ModelParameter;
 use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
 use operit_model::ToolPrompt::{ToolParameterSchema, ToolPrompt};
-use operit_store::repository::UsageStatisticsStore::{UsageRequestSource, UsageStatisticsStore};
-use operit_tools::files::PathMapper::{PathMapper, ResolvedVfsPath};
+use operit_store::repository::UsageStatisticsStore::UsageRequestSource;
+pub use super::TurnTokenUsage::TurnTokenSnapshot;
+use super::TurnTokenUsage::{RequestTokenUsage, TurnTokenUsage};
+use operit_vfs::VisualFileSystem::VisualFileSystem;
+use crate::chat::config::SystemPromptConfig::WorkspacePathMapping;
 use operit_tools::runtime_support::{CoreRouteResumeContext, ToolRuntimeSupport};
 use operit_tools::tools::climode::CliToolModeSupport::{
     CliToolModeSupport, ToolExposureMode as ResolvedToolExposureMode,
 };
 use operit_tools::tools::AIToolHandler::AIToolHandler;
 use operit_tools::ConversationMarkupManager::{
-    ConversationMarkupManager, ToolResult, ENHANCED_PURE_THINKING_ONLY_WARNING,
+    ConversationMarkupManager, ToolResult, ENHANCED_EMPTY_RESPONSE_WARNING,
+    ENHANCED_PURE_THINKING_ONLY_WARNING,
 };
 use operit_tools::ToolExecutionManager::{
     AITool as RuntimeAITool, RouteChangeIntent, ToolExecutionBatch, ToolExecutionManager,
@@ -96,25 +100,18 @@ pub struct EnhancedAIService {
 
 #[derive(Clone, Debug, Default)]
 pub struct EnhancedAISharedState {
-    pub per_request_token_counts: Option<(i64, i64)>,
+    pub turn_token_usage: TurnTokenUsage,
     pub request_window_estimate: Option<i64>,
     pub active_execution_contexts: BTreeMap<i32, MessageExecutionContext>,
     pub next_execution_context_id: i32,
     /// Invalidates sends that are still waiting to register their response task.
     pub execution_generation: u64,
     pub tool_execution_jobs: BTreeMap<String, ToolExecutionJobMirror>,
-    pub accumulated_input_token_count: i64,
-    pub accumulated_output_token_count: i64,
-    pub accumulated_cached_input_token_count: i64,
-    pub current_request_input_token_count: i64,
-    pub current_request_output_token_count: i64,
-    pub current_request_cached_input_token_count: i64,
     pub current_response_callback_registered: bool,
     pub current_complete_callback_registered: bool,
     pub last_reply_content: Option<String>,
     pub last_provider_model: Option<String>,
     pub last_turn_model_identity: Option<TurnModelIdentity>,
-    pub last_turn_token_snapshot: Option<TurnTokenSnapshot>,
     pub last_turn_context_window: Option<i64>,
     pub pendingRouteChange: Option<RouteChangeIntent>,
 }
@@ -168,6 +165,7 @@ impl EnhancedAISharedState {
             .expect("execution generation must not overflow");
         for context in self.active_execution_contexts.values_mut() {
             context.isConversationActive = false;
+            context.executionCancellation.cancel();
         }
     }
 
@@ -179,16 +177,9 @@ impl EnhancedAISharedState {
             modelName: config.modelId.clone(),
         });
         self.last_reply_content = None;
-        self.last_turn_token_snapshot = None;
+        self.turn_token_usage = TurnTokenUsage::default();
         self.last_turn_context_window = None;
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TurnTokenSnapshot {
-    pub inputTokens: i64,
-    pub outputTokens: i64,
-    pub cachedInputTokens: i64,
 }
 
 pub trait SendMessageCallbacks: Send + Sync {
@@ -203,15 +194,35 @@ pub trait SendMessageCallbacks: Send + Sync {
 
 /// Monotonic per-send cancellation gate, including work not yet registered or started.
 #[derive(Clone, Debug, Default)]
-pub struct MessageCancellationToken(Arc<AtomicBool>);
+pub struct MessageCancellationToken(Arc<MessageCancellationState>);
+
+/// Keeps the monotonic cancellation flag and its wake signal in the same shared allocation.
+#[derive(Debug, Default)]
+struct MessageCancellationState {
+    cancelled: AtomicBool,
+    changed: tokio::sync::Notify,
+}
 
 impl MessageCancellationToken {
+    /// Permanently closes the gate and wakes every pending invocation owned by this send.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.cancelled.store(true, Ordering::Release);
+        self.0.changed.notify_waiters();
     }
 
+    /// Reports cancellation without changing the monotonic gate.
     pub fn isCancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Waits without missing cancellation before or during waiter registration.
+    async fn cancelled(&self) {
+        let notified = self.0.changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.isCancelled() {
+            notified.await;
+        }
     }
 }
 
@@ -384,6 +395,7 @@ impl SendMessageOptions {
 pub struct MessageExecutionContext {
     pub executionId: i32,
     pub cancellationToken: Option<MessageCancellationToken>,
+    executionCancellation: MessageCancellationToken,
     pub guidanceInbox: Option<ChatGuidanceInbox>,
     pub streamBuffer: String,
     pub roundManager: ConversationRoundManagerMirror,
@@ -409,6 +421,7 @@ impl MessageExecutionContext {
         Self {
             executionId,
             cancellationToken: None,
+            executionCancellation: MessageCancellationToken::default(),
             guidanceInbox: None,
             streamBuffer: String::new(),
             roundManager: ConversationRoundManagerMirror::new(),
@@ -419,6 +432,22 @@ impl MessageExecutionContext {
             proxySenderName,
             eventChannel,
             preparedRequest: None,
+        }
+    }
+
+    /// Drops the pending serial tool batch as soon as its owning execution is cancelled.
+    async fn awaitToolExecution<T>(&self, execution: impl std::future::Future<Output = T>) -> Option<T> {
+        let sendCancelled = async {
+            match &self.cancellationToken {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = self.executionCancellation.cancelled() => None,
+            _ = sendCancelled => None,
+            result = execution => Some(result),
         }
     }
 }
@@ -459,7 +488,6 @@ pub enum SendMessageLifecycleStage {
     SetConnectingState,
     GetModelParametersForFunction,
     GetAIServiceForFunction,
-    ClearPerRequestTokenCounts,
     GetAvailableToolsForFunction,
     BeforeFinalizePromptHook,
     BeforeSendToModelHook,
@@ -593,7 +621,25 @@ impl ConversationRoundManagerMirror {
     }
 }
 
-pub struct RuntimePromptHistoryHooks;
+/// Selects explicit send or estimate hooks without invoking the other family's handlers.
+#[derive(Clone, Copy)]
+pub enum PromptPreparationPurpose {
+    Send,
+    Estimate,
+}
+
+pub struct RuntimePromptHistoryHooks {
+    purpose: PromptPreparationPurpose,
+}
+
+/// Finalizes an independent estimate through its own handlers in send-stage order.
+async fn finalize_estimate_prompt(mut context: PromptHookContext) -> Result<PromptHookContext, String> {
+    for stage in ["before_finalize_prompt", "before_send_to_model"] {
+        context.stage = stage.into();
+        context = PromptHookRegistry::dispatchPromptEstimateFinalizeHooks(context).await?;
+    }
+    Ok(context)
+}
 
 impl PromptHistoryHookDispatcher for RuntimePromptHistoryHooks {
     fn dispatch_prompt_history_hooks(
@@ -603,7 +649,7 @@ impl PromptHistoryHookDispatcher for RuntimePromptHistoryHooks {
         Box<dyn std::future::Future<Output = Result<HistoryHookContext, String>> + Send + '_>,
     > {
         Box::pin(async move {
-            let dispatched = PromptHookRegistry::dispatchPromptHistoryHooks(PromptHookContext {
+            let context = PromptHookContext {
                 stage: context.stage.clone(),
                 chat_id: context.chat_id.clone(),
                 function_type: None,
@@ -618,8 +664,11 @@ impl PromptHistoryHookDispatcher for RuntimePromptHistoryHooks {
                 model_parameters: Vec::new(),
                 available_tools: Vec::new(),
                 metadata: btree_to_value_map(&context.metadata),
-            })
-            .await?;
+            };
+            let dispatched = match self.purpose {
+                PromptPreparationPurpose::Send => PromptHookRegistry::dispatchPromptHistoryHooks(context).await?,
+                PromptPreparationPurpose::Estimate => PromptHookRegistry::dispatchPromptEstimateHistoryHooks(context).await?,
+            };
 
             Ok(HistoryHookContext {
                 stage: dispatched.stage,
@@ -776,17 +825,13 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                     _ => None,
                 }
             } else { None };
-            let mapper = context.runtimeStorageHost.as_ref().and_then(|storage| {
-                Some(PathMapper::new(
-                    storage.runtimeRootDir()?, storage.workspaceRootDir()?, storage.clone(),
-                ))
-            });
+            let filesystem = context.runtimeStorageHost.as_ref().map(|_| context.vfs()).transpose()?;
             let primary_directory = request.workspace_path.as_deref().or(output_path.as_deref());
-            let workspace_path_mappings = mapper.as_ref().map(|mapper| {
-                resolve_workspace_path_mappings(mapper, primary_directory, &request.workspace_folders)
+            let workspace_path_mappings = filesystem.as_ref().map(|filesystem| {
+                resolve_workspace_path_mappings(filesystem, primary_directory, &request.workspace_folders)
             }).unwrap_or_default();
             let terminal_path_mappings = resolve_terminal_path_mappings(
-                context.terminalHost.as_deref(), mapper.as_ref(), primary_directory, &request.workspace_folders,
+                context.terminalHost.as_deref(), filesystem.as_ref(), primary_directory, &request.workspace_folders,
             );
             let package_manager = self.tool_handler.getOrCreatePackageManager();
             let (enabled_packages, mcp_servers) = {
@@ -1035,10 +1080,6 @@ impl EnhancedAIService {
         dispatchHooks(initialContext).await
     }
 
-    pub fn bypassPromptHooks(&self, context: PromptHookContext) -> PromptHookContext {
-        context
-    }
-
     /// Correlates final prompt hooks with the same resolved execution participant used by tools.
     pub fn buildPromptFinalizeMetadata(
         &self,
@@ -1062,6 +1103,7 @@ impl EnhancedAIService {
         ])
     }
 
+    /// Reconciles finalized input with the current user turn before counting or sending.
     pub fn applyFinalizedCurrentUserTurn(
         &self,
         preparedHistory: Vec<PromptTurn>,
@@ -1091,6 +1133,7 @@ impl EnhancedAIService {
         functionType: FunctionType,
         chatProviderIdOverride: Option<String>,
         chatModelIdOverride: Option<String>,
+        purpose: PromptPreparationPurpose,
         runtime: &SendMessageRuntime,
     ) -> Result<Vec<PromptTurn>, AiServiceError> {
         let config = self.getModelConfigForFunction(
@@ -1104,7 +1147,7 @@ impl EnhancedAIService {
         let chatModelHasDirectAudio = config.capabilities.directAudio;
         let chatModelHasDirectVideo = config.capabilities.directVideo;
 
-        let history_hooks = RuntimePromptHistoryHooks;
+        let history_hooks = RuntimePromptHistoryHooks { purpose };
         let system_prompt_composer = RuntimeSystemPromptComposer {
             tool_handler: self.tool_handler.clone(),
             provider_runtime_context: self.provider_runtime_context.clone(),
@@ -1177,12 +1220,18 @@ impl EnhancedAIService {
         previousSummary: Option<String>,
         chatId: String,
         configuration: &ChatConfigurationResult,
-    ) -> Result<String, AiServiceError> {
+        progress: Option<crate::chat::enhance::ConversationService::SummaryProgressCallback>,
+        trigger: Option<crate::chat::enhance::ConversationService::SummaryTriggerContext>,
+    ) -> Result<(String, TokenCounts), AiServiceError> {
         let context = toolRuntimeContextForConfiguration(
             configuration, Some(chatId), None, Vec::new(), &ToolExposureMode::Full,
         )?;
-        ToolExecutionManager::scopeToolRuntimeContext(
-            context, self.generateSummary(messages, previousSummary),
+        let mut manager = self.multi_service_manager.clone();
+        let turns = messages.into_iter().map(|(role, content)|
+            PromptTurn::new(PromptTurnKind::from_role(&role), content)
+        ).collect();
+        ToolExecutionManager::scopeToolRuntimeContext(context,
+            self.conversation_service.generateSummaryWithProgress(turns, previousSummary, &mut manager, progress, trigger),
         ).await
     }
 
@@ -1297,6 +1346,7 @@ impl EnhancedAIService {
                 FunctionType::CHAT,
                 chatProviderIdOverride.clone(),
                 chatModelIdOverride.clone(),
+                PromptPreparationPurpose::Estimate,
                 &runtime,
             )
             .await?;
@@ -1316,16 +1366,51 @@ impl EnhancedAIService {
             Some(promptFunctionType.clone()),
             runtime.useEnglish,
             &runtime.chatConfiguration,
-            workspacePath,
+            workspacePath.clone(),
             workspaceFolders,
             &runtime.toolExposureMode,
         )
         .await?;
+        let modelParameters = self.getModelParametersForFunction(
+            FunctionType::CHAT,
+            chatProviderIdOverride.clone(),
+            chatModelIdOverride.clone(),
+            &runtime,
+        );
         let serviceForFunction = self.getAIServiceForFunction(
             FunctionType::CHAT,
             chatProviderIdOverride,
             chatModelIdOverride,
             &mut runtime,
+        );
+        let mut metadata = btree_to_value_map(&runtime.promptMetadata);
+        metadata.extend(self.buildPromptFinalizeMetadata(
+            chatId.clone(),
+            Some(runtime.chatConfiguration.profile.id.clone()),
+            workspacePath,
+            false,
+            false,
+            false,
+        ));
+        let context = PromptHookContext {
+            stage: "before_finalize_prompt".into(),
+            chat_id: chatId,
+            function_type: Some(function_type_name(&FunctionType::CHAT).into()),
+            prompt_function_type: Some(prompt_function_type_name(&promptFunctionType).into()),
+            raw_input: Some(message.clone()),
+            processed_input: Some(message.clone()),
+            prepared_history: preparedHistory,
+            model_parameters: serializePromptHookModelParameters(&modelParameters),
+            available_tools: serializePromptHookToolPrompts(&availableTools),
+            metadata,
+            ..PromptHookContext::default()
+        };
+        let finalized = finalize_estimate_prompt(context)
+            .await.map_err(AiServiceError::RequestFailed)?;
+        let processedInput = finalized.processed_input
+            .ok_or_else(|| AiServiceError::RequestFailed("Estimate hooks removed processed input".into()))?;
+        let preparedHistory = self.applyFinalizedCurrentUserTurn(
+            finalized.prepared_history, &message, &processedInput,
         );
         self.estimatePreparedRequestWindow(
             serviceForFunction,
@@ -1361,6 +1446,7 @@ impl EnhancedAIService {
             ),
         );
         context.isConversationActive = false;
+        context.executionCancellation.cancel();
         if let Some(active) = self
             .shared_state()
             .active_execution_contexts
@@ -1491,9 +1577,7 @@ impl EnhancedAIService {
                 }
             }
             (None, None) => support
-                .modelBindingForFunction(
-                    support.dataDir().map_err(AiServiceError::RequestFailed)?,
-                    options.functionType.clone(),
+                .modelBindingForFunction(options.functionType.clone(),
                 )
                 .map_err(AiServiceError::RequestFailed)?,
             _ => {
@@ -1556,7 +1640,7 @@ impl EnhancedAIService {
             .await
     }
 
-    /// Builds a model runtime exclusively from one validated plugin-resolved descriptor.
+    /// Builds the chat runtime from its execution profile and recognition function bindings.
     #[allow(non_snake_case)]
     pub fn createSendMessageRuntime(
         &mut self,
@@ -1586,9 +1670,9 @@ impl EnhancedAIService {
             // Do not let the retired Core preference silently veto the plugin's switch.
             disableUserPreferenceDescription: false,
             aiName,
-            hasImageRecognition: modelConfig.capabilities.directImage,
-            hasAudioRecognition: modelConfig.capabilities.directAudio,
-            hasVideoRecognition: modelConfig.capabilities.directVideo,
+            hasImageRecognition: self.multi_service_manager.hasImageRecognitionConfigured()?,
+            hasAudioRecognition: self.multi_service_manager.hasAudioRecognitionConfigured()?,
+            hasVideoRecognition: self.multi_service_manager.hasVideoRecognitionConfigured()?,
             chatModelHasDirectAudio: modelConfig.capabilities.directAudio,
             chatModelHasDirectVideo: modelConfig.capabilities.directVideo,
             chatModelHasDirectImage: modelConfig.capabilities.directImage,
@@ -1755,12 +1839,6 @@ impl EnhancedAIService {
 
         {
             let mut shared = self.shared_state();
-            shared.accumulated_input_token_count = 0;
-            shared.accumulated_output_token_count = 0;
-            shared.accumulated_cached_input_token_count = 0;
-            shared.current_request_input_token_count = 0;
-            shared.current_request_output_token_count = 0;
-            shared.current_request_cached_input_token_count = 0;
             shared.pendingRouteChange = None;
         }
 
@@ -1795,6 +1873,7 @@ impl EnhancedAIService {
                 functionType.clone(),
                 chatProviderIdOverride.clone(),
                 chatModelIdOverride.clone(),
+                PromptPreparationPurpose::Send,
                 &runtime,
             )
             .await?;
@@ -1845,14 +1924,6 @@ impl EnhancedAIService {
             ),
             operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
-        lifecycle.push(SendMessageLifecycleStage::ClearPerRequestTokenCounts);
-        {
-            let mut shared = self.shared_state();
-            shared.per_request_token_counts = None;
-            shared.current_request_input_token_count = 0;
-            shared.current_request_output_token_count = 0;
-            shared.current_request_cached_input_token_count = 0;
-        }
         lifecycle.push(SendMessageLifecycleStage::GetAvailableToolsForFunction);
         let availableTools = self.getAvailableToolsForFunction(
             functionType.clone(),
@@ -2030,9 +2101,19 @@ impl EnhancedAIService {
                 None
             }
         };
-        let mut provider_stream = {
+        let (turnUsage, tokenRequest);
+        let providerResult = {
             let mut service = serviceForFunction.lock().await;
-            match service
+            if !self.isExecutionContextActive(&execContext) {
+                self.unregisterExecutionContext(&execContext);
+                return Ok(());
+            }
+            service.reset_token_counts();
+            (turnUsage, tokenRequest) = self.beginRequestTokenUsage(
+                &execContext, serviceForFunction.clone(), functionType.clone(),
+                UsageRequestSource::CHAT_RESPONSE, chatId.clone(),
+            )?;
+            service
                 .send_message(SendMessageRequest {
                     chat_history: requestHistory.clone(),
                     model_parameters: modelParameters.clone(),
@@ -2049,20 +2130,21 @@ impl EnhancedAIService {
                     on_tool_invocation: onToolInvocation.clone(),
                 })
                 .await
-            {
-                Ok(stream) => stream,
-                Err(error) => {
-                    self.invalidateExecutionContext(
-                        &mut execContext,
-                        "sendMessage.provider.error".to_string(),
-                    );
-                    AppLogger::e(TAG, &format!("发送消息时发生错误: {}", error));
-                    if !isSubTask {
-                        self.stopAiService(participantName.clone(), avatarUri.clone());
-                    }
-                    self.unregisterExecutionContext(&execContext);
-                    return Err(error);
+        };
+        let mut provider_stream = match providerResult {
+            Ok(stream) => stream,
+            Err(error) => {
+                turnUsage.finishRequest(&tokenRequest, runtimeSupport.as_ref()).await?;
+                self.invalidateExecutionContext(
+                    &mut execContext,
+                    "sendMessage.provider.error".to_string(),
+                );
+                AppLogger::e(TAG, &format!("发送消息时发生错误: {}", error));
+                if !isSubTask {
+                    self.stopAiService(participantName.clone(), avatarUri.clone());
                 }
+                self.unregisterExecutionContext(&execContext);
+                return Err(error);
             }
         };
         execContext.preparedRequest = Some(PreparedRequestWindow {
@@ -2153,6 +2235,7 @@ impl EnhancedAIService {
                 }
             })
             .await;
+        let tokens = turnUsage.finishRequest(&tokenRequest, runtimeSupport.as_ref()).await?;
         if !self.isExecutionContextActive(&execContext) {
             AppLogger::w(
                 TAG,
@@ -2175,14 +2258,8 @@ impl EnhancedAIService {
         }
 
         lifecycle.push(SendMessageLifecycleStage::PersistTokenUsage);
-        let (inputTokens, cachedInputTokens, outputTokens) = {
-            let service = serviceForFunction.lock().await;
-            (
-                service.input_token_count(),
-                service.cached_input_token_count(),
-                service.output_token_count(),
-            )
-        };
+        let (inputTokens, cachedInputTokens, outputTokens) =
+            (tokens.input, tokens.cached_input, tokens.output);
         AppLogger::i(
             TAG,
             &format!(
@@ -2196,38 +2273,9 @@ impl EnhancedAIService {
                 totalChars
             ),
         );
-        {
-            let mut shared = self.shared_state();
-            shared.accumulated_input_token_count += inputTokens;
-            shared.accumulated_output_token_count += outputTokens;
-            shared.accumulated_cached_input_token_count += cachedInputTokens;
-            shared.current_request_input_token_count = 0;
-            shared.current_request_output_token_count = 0;
-            shared.current_request_cached_input_token_count = 0;
-            shared.per_request_token_counts = Some((inputTokens, outputTokens));
-        }
-        persistProviderModelTokenUsage(
-            self.provider_runtime_context.support(),
-            &providerModel,
-            functionType.clone(),
-            UsageRequestSource::CHAT_RESPONSE,
-            chatId.clone(),
-            inputTokens,
-            outputTokens,
-            cachedInputTokens,
-        )?;
-        let (
-            accumulatedInputTokenCount,
-            accumulatedOutputTokenCount,
-            accumulatedCachedInputTokenCount,
-        ) = {
-            let shared = self.shared_state();
-            (
-                shared.accumulated_input_token_count,
-                shared.accumulated_output_token_count,
-                shared.accumulated_cached_input_token_count,
-            )
-        };
+        let snapshot = turnUsage.snapshot();
+        let (accumulatedInputTokenCount, accumulatedOutputTokenCount, accumulatedCachedInputTokenCount) =
+            (snapshot.inputTokens, snapshot.outputTokens, snapshot.cachedInputTokens);
         AppLogger::v_with_level(
             TAG,
             &format!(
@@ -2372,11 +2420,6 @@ impl EnhancedAIService {
             let mut shared = self.shared_state();
             shared.last_reply_content = Some(execContext.roundManager.getDisplayContent());
             shared.last_turn_context_window = completedContextWindow;
-            shared.last_turn_token_snapshot = Some(TurnTokenSnapshot {
-                inputTokens: shared.accumulated_input_token_count,
-                outputTokens: shared.accumulated_output_token_count,
-                cachedInputTokens: shared.accumulated_cached_input_token_count,
-            });
         }
         let _ = finalProcessedInput;
         let _ = requestHistory;
@@ -2577,11 +2620,9 @@ impl EnhancedAIService {
                         tokenUsageThreshold
                     ),
                 );
-                // Compaction ends this execution before normal completion publishes its metrics.
-                let tokenSnapshot = self.captureCurrentTurnTokenSnapshot();
+                // Compaction retains this request window while request accounting stays on the turn.
                 {
                     let mut shared = self.shared_state();
-                    shared.last_turn_token_snapshot = Some(tokenSnapshot);
                     shared.last_turn_context_window = Some(currentTokens);
                     shared.last_reply_content = Some(context.roundManager.getDisplayContent());
                 }
@@ -2602,14 +2643,6 @@ impl EnhancedAIService {
             }
         }
 
-        {
-            let mut shared = self.shared_state();
-            shared.per_request_token_counts = None;
-            shared.current_request_input_token_count = 0;
-            shared.current_request_output_token_count = 0;
-            shared.current_request_cached_input_token_count = 0;
-        }
-
         AppLogger::v_with_level(
             TAG,
             &format!(
@@ -2623,7 +2656,8 @@ impl EnhancedAIService {
             ),
             operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
-        let mut response = {
+        let (turnUsage, tokenRequest);
+        let responseResult = {
             let providerOnNonFatalError: Option<Arc<dyn Fn(String) + Send + Sync>> =
                 onNonFatalError.map(|callbackFn| {
                     Arc::new(move |error: String| {
@@ -2631,6 +2665,14 @@ impl EnhancedAIService {
                     }) as Arc<dyn Fn(String) + Send + Sync>
                 });
             let mut service = runtime.aiService.lock().await;
+            if !self.isExecutionContextActive(context) {
+                return Ok(false);
+            }
+            service.reset_token_counts();
+            (turnUsage, tokenRequest) = self.beginRequestTokenUsage(
+                context, runtime.aiService.clone(), functionType.clone(),
+                UsageRequestSource::TOOL_RESULT_RESPONSE, chatId.clone(),
+            )?;
             service
                 .send_message(SendMessageRequest {
                     chat_history: currentChatHistory,
@@ -2647,7 +2689,14 @@ impl EnhancedAIService {
                     on_non_fatal_error: providerOnNonFatalError,
                     on_tool_invocation: onToolInvocation.clone(),
                 })
-                .await?
+                .await
+        };
+        let mut response = match responseResult {
+            Ok(response) => response,
+            Err(error) => {
+                turnUsage.finishRequest(&tokenRequest, self.provider_runtime_context.support()).await?;
+                return Err(error);
+            }
         };
 
         context.preparedRequest = Some(PreparedRequestWindow {
@@ -2656,6 +2705,7 @@ impl EnhancedAIService {
         });
 
         if !self.isExecutionContextActive(context) {
+            turnUsage.finishRequest(&tokenRequest, self.provider_runtime_context.support()).await?;
             return Ok(false);
         }
 
@@ -2666,6 +2716,7 @@ impl EnhancedAIService {
         }
 
         if !self.isExecutionContextActive(context) {
+            turnUsage.finishRequest(&tokenRequest, self.provider_runtime_context.support()).await?;
             return Ok(false);
         }
 
@@ -2715,6 +2766,7 @@ impl EnhancedAIService {
                 }
             })
             .await;
+        let tokens = turnUsage.finishRequest(&tokenRequest, self.provider_runtime_context.support()).await?;
         if !self.isExecutionContextActive(context) {
             return Ok(false);
         }
@@ -2732,47 +2784,11 @@ impl EnhancedAIService {
             operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
-        let (providerModel, inputTokens, cachedInputTokens, outputTokens) = {
-            let service = runtime.aiService.lock().await;
-            (
-                service.provider_model(),
-                service.input_token_count(),
-                service.cached_input_token_count(),
-                service.output_token_count(),
-            )
-        };
-        {
-            let mut shared = self.shared_state();
-            shared.accumulated_input_token_count += inputTokens;
-            shared.accumulated_output_token_count += outputTokens;
-            shared.accumulated_cached_input_token_count += cachedInputTokens;
-            shared.current_request_input_token_count = 0;
-            shared.current_request_output_token_count = 0;
-            shared.current_request_cached_input_token_count = 0;
-            shared.per_request_token_counts = Some((inputTokens, outputTokens));
-        }
-        persistProviderModelTokenUsage(
-            self.provider_runtime_context.support(),
-            &providerModel,
-            functionType.clone(),
-            UsageRequestSource::TOOL_RESULT_RESPONSE,
-            chatId.clone(),
-            inputTokens,
-            outputTokens,
-            cachedInputTokens,
-        )?;
-        let (
-            accumulatedInputTokenCount,
-            accumulatedOutputTokenCount,
-            accumulatedCachedInputTokenCount,
-        ) = {
-            let shared = self.shared_state();
-            (
-                shared.accumulated_input_token_count,
-                shared.accumulated_output_token_count,
-                shared.accumulated_cached_input_token_count,
-            )
-        };
+        let (inputTokens, cachedInputTokens, outputTokens) =
+            (tokens.input, tokens.cached_input, tokens.output);
+        let snapshot = turnUsage.snapshot();
+        let (accumulatedInputTokenCount, accumulatedOutputTokenCount, accumulatedCachedInputTokenCount) =
+            (snapshot.inputTokens, snapshot.outputTokens, snapshot.cachedInputTokens);
         AppLogger::v_with_level(
             TAG,
             &format!(
@@ -2821,9 +2837,21 @@ impl EnhancedAIService {
         callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
         runtime: &mut SendMessageRuntime,
     ) -> Result<(), AiServiceError> {
+        let mut consecutiveEmptyResponses = 0;
         loop {
             if !self.isExecutionContextActive(context) {
                 return Ok(());
+            }
+
+            if context.streamBuffer.trim().is_empty() {
+                consecutiveEmptyResponses += 1;
+                if consecutiveEmptyResponses >= 3 {
+                    return Err(AiServiceError::RequestFailed(
+                        "模型连续 3 次返回空内容，请检查你的 API 上游服务。".to_string(),
+                    ));
+                }
+            } else {
+                consecutiveEmptyResponses = 0;
             }
 
             let continuation = match self.completeResponseRound(
@@ -2925,10 +2953,22 @@ impl EnhancedAIService {
             operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         if content.is_empty() {
+            if !disableWarning {
+                let emptyResponseWarning =
+                    ConversationMarkupManager::createWarningStatus(ENHANCED_EMPTY_RESPONSE_WARNING);
+                context
+                    .roundManager
+                    .appendContent(&format!("\n{emptyResponseWarning}"));
+                collector.emit_chunk(emptyResponseWarning.clone());
+                return ResponseRoundAction::Continue(ToolResultContinuation {
+                    results: Vec::new(),
+                    message: emptyResponseWarning,
+                });
+            }
             AppLogger::v_with_level(
                 TAG,
                 &format!(
-                    "chat.response.finalize_empty executionId={} round={}",
+                    "chat.response.finalize_empty executionId={} round={} disableWarning=true",
                     context.executionId, context.roundManager.roundIndex
                 ),
                 operit_util::AppLogger::VERBOSE_LEVEL_2,
@@ -3141,12 +3181,7 @@ impl EnhancedAIService {
             ToolExposureMode::Cli => RuntimeToolExposureMode::CLI,
             ToolExposureMode::Full => RuntimeToolExposureMode::FULL,
         };
-        let ToolExecutionBatch {
-            results: allToolResults,
-            message: toolResultMessage,
-            displayMessage,
-            routeChangeIntent,
-        } =
+        let toolBatch = context.awaitToolExecution(
             ToolExecutionManager::executeInvocations(
                 &toolInvocations,
                 &mut self.tool_handler,
@@ -3159,9 +3194,17 @@ impl EnhancedAIService {
                 toolExposureMode,
                 runtime.chatConfiguration.extensionOwner.clone(),
                 runtime.chatConfiguration.executionData.clone(),
-            )
-            .await
-            .map_err(AiServiceError::RequestFailed)?;
+            ),
+        ).await;
+        let Some(toolBatch) = toolBatch else {
+            return Ok(None);
+        };
+        let ToolExecutionBatch {
+            results: allToolResults,
+            message: toolResultMessage,
+            displayMessage,
+            routeChangeIntent,
+        } = toolBatch.map_err(AiServiceError::RequestFailed)?;
         let routeChangeTargetNodeId = routeChangeIntent
             .as_ref()
             .map(|intent| intent.targetNodeId.clone());
@@ -3276,28 +3319,25 @@ impl EnhancedAIService {
         self.notifyReplyCompleted(chatId, participantName, avatarUri, notifyReplyOverride);
     }
 
-    /// Cancels the active conversation and tool execution jobs.
-    pub async fn cancelConversation(&mut self) {
+    /// Cancels the producer and settles its request before releasing turn accounting.
+    pub async fn cancelConversation(&mut self) -> Result<(), AiServiceError> {
+        let turnUsage = self.turnTokenUsage();
         self.invalidateAllExecutionContexts("cancelConversation".to_string());
         self.multi_service_manager.cancelAllStreaming().await;
+        let usageResult = turnUsage
+            .finishCurrentRequest(self.provider_runtime_context.support()).await;
         self.input_processing_state
             .set_value(InputProcessingState::Idle);
         AppLogger::v_with_level(TAG, "Conversation canceled", operit_util::AppLogger::VERBOSE_LEVEL_2);
         {
             let mut shared = self.shared_state();
-            shared.per_request_token_counts = None;
             shared.last_turn_context_window = None;
-            shared.accumulated_input_token_count = 0;
-            shared.accumulated_output_token_count = 0;
-            shared.accumulated_cached_input_token_count = 0;
-            shared.current_request_input_token_count = 0;
-            shared.current_request_output_token_count = 0;
-            shared.current_request_cached_input_token_count = 0;
             shared.current_response_callback_registered = false;
             shared.current_complete_callback_registered = false;
         }
         self.stopAiService(None, None);
         AppLogger::v_with_level(TAG, "Conversation cancellation complete", operit_util::AppLogger::VERBOSE_LEVEL_2);
+        usageResult
     }
 
     pub fn cancelAllToolExecutions(&mut self) {
@@ -3306,22 +3346,22 @@ impl EnhancedAIService {
 
     #[allow(non_snake_case)]
     pub fn getCurrentInputTokenCount(&self) -> i64 {
-        self.shared_state().accumulated_input_token_count
+        self.captureCurrentTurnTokenSnapshot().inputTokens
     }
 
     #[allow(non_snake_case)]
     pub fn getCurrentOutputTokenCount(&self) -> i64 {
-        self.shared_state().accumulated_output_token_count
+        self.captureCurrentTurnTokenSnapshot().outputTokens
     }
 
     #[allow(non_snake_case)]
     pub fn getCurrentCachedInputTokenCount(&self) -> i64 {
-        self.shared_state().accumulated_cached_input_token_count
+        self.captureCurrentTurnTokenSnapshot().cachedInputTokens
     }
 
     #[allow(non_snake_case)]
     pub fn getPerRequestTokenCounts(&self) -> Option<(i64, i64)> {
-        self.shared_state().per_request_token_counts
+        self.turnTokenUsage().perRequestTokens()
     }
 
     #[allow(non_snake_case)]
@@ -3340,9 +3380,27 @@ impl EnhancedAIService {
         self.shared_state().last_turn_model_identity.clone()
     }
 
-    #[allow(non_snake_case)]
-    pub fn getLastTurnTokenSnapshot(&self) -> Option<TurnTokenSnapshot> {
-        self.shared_state().last_turn_token_snapshot.clone()
+    /// Shares accounting with the persistence owner for this exact turn.
+    pub fn turnTokenUsage(&self) -> TurnTokenUsage {
+        self.shared_state().turn_token_usage.clone()
+    }
+
+    /// Registers accounting atomically with execution invalidation while the provider is locked.
+    fn beginRequestTokenUsage(
+        &self, context: &MessageExecutionContext, service: SharedAIServiceHandle,
+        functionType: FunctionType, source: UsageRequestSource, chatId: Option<String>,
+    ) -> Result<(TurnTokenUsage, Arc<RequestTokenUsage>), AiServiceError> {
+        let shared = self.shared_state();
+        if !context.isConversationActive
+            || context.cancellationToken.as_ref().is_some_and(MessageCancellationToken::isCancelled)
+            || !shared.active_execution_contexts.get(&context.executionId)
+                .is_some_and(|active| active.isConversationActive)
+        {
+            return Err(AiServiceError::RequestCancelled);
+        }
+        let usage = shared.turn_token_usage.clone();
+        let request = usage.beginRequest(service, functionType, source, chatId);
+        Ok((usage, request))
     }
 
     /// Returns the completed estimate from this turn's actual prepared request.
@@ -3352,20 +3410,10 @@ impl EnhancedAIService {
         self.shared_state().last_turn_context_window
     }
 
+    /// Returns settled request totals for the current turn regardless of terminal outcome.
     #[allow(non_snake_case)]
     pub fn captureCurrentTurnTokenSnapshot(&self) -> TurnTokenSnapshot {
-        let shared = self.shared_state();
-        TurnTokenSnapshot {
-            inputTokens: (shared.accumulated_input_token_count
-                + shared.current_request_input_token_count)
-                .max(0),
-            outputTokens: (shared.accumulated_output_token_count
-                + shared.current_request_output_token_count)
-                .max(0),
-            cachedInputTokens: (shared.accumulated_cached_input_token_count
-                + shared.current_request_cached_input_token_count)
-                .max(0),
-        }
+        self.turnTokenUsage().snapshot()
     }
 
     #[allow(non_snake_case)]
@@ -3375,29 +3423,16 @@ impl EnhancedAIService {
         outputTokens: i64,
         cachedInputTokens: i64,
     ) {
-        let mut shared = self.shared_state();
-        shared.accumulated_input_token_count = inputTokens.max(0);
-        shared.accumulated_output_token_count = outputTokens.max(0);
-        shared.accumulated_cached_input_token_count = cachedInputTokens.max(0);
-        shared.current_request_input_token_count = 0;
-        shared.current_request_output_token_count = 0;
-        shared.current_request_cached_input_token_count = 0;
-        shared.per_request_token_counts = Some((
-            shared.accumulated_input_token_count,
-            shared.accumulated_output_token_count,
-        ));
+        self.turnTokenUsage().setSnapshot(TurnTokenSnapshot {
+            inputTokens: inputTokens.max(0),
+            outputTokens: outputTokens.max(0),
+            cachedInputTokens: cachedInputTokens.max(0),
+        });
     }
 
     #[allow(non_snake_case)]
     pub fn resetTokenCounters(&mut self) {
-        let mut shared = self.shared_state();
-        shared.per_request_token_counts = None;
-        shared.accumulated_input_token_count = 0;
-        shared.accumulated_output_token_count = 0;
-        shared.accumulated_cached_input_token_count = 0;
-        shared.current_request_input_token_count = 0;
-        shared.current_request_output_token_count = 0;
-        shared.current_request_cached_input_token_count = 0;
+        self.turnTokenUsage().reset();
     }
 }
 
@@ -3421,15 +3456,12 @@ impl Clone for EnhancedAIService {
     }
 }
 
+/// Replaces an existing current turn exactly, including explicit empty text.
 fn apply_finalized_current_user_turn(
     preparedHistory: Vec<PromptTurn>,
     originalCurrentMessage: &str,
     finalizedCurrentMessage: &str,
 ) -> Vec<PromptTurn> {
-    if finalizedCurrentMessage.trim().is_empty() {
-        return preparedHistory;
-    }
-
     let mut history = preparedHistory;
     if let Some(lastTurn) = history.last_mut() {
         if lastTurn.kind == PromptTurnKind::USER && lastTurn.content == finalizedCurrentMessage {
@@ -3441,6 +3473,10 @@ fn apply_finalized_current_user_turn(
         }
     }
 
+    if finalizedCurrentMessage.is_empty() {
+        return history;
+    }
+
     history.push(PromptTurn {
         kind: PromptTurnKind::USER,
         content: finalizedCurrentMessage.to_string(),
@@ -3448,34 +3484,6 @@ fn apply_finalized_current_user_turn(
         metadata: Default::default(),
     });
     history
-}
-
-#[allow(non_snake_case)]
-fn persistProviderModelTokenUsage(
-    runtimeSupport: &dyn ProviderRuntimeSupport,
-    providerModel: &str,
-    functionType: FunctionType,
-    source: UsageRequestSource,
-    chatId: Option<String>,
-    inputTokens: i64,
-    outputTokens: i64,
-    cachedInputTokens: i64,
-) -> Result<(), AiServiceError> {
-    runtimeSupport
-        .updateTokensForProviderModel(providerModel, inputTokens, outputTokens, cachedInputTokens)
-        .map_err(AiServiceError::RequestFailed)?;
-    UsageStatisticsStore::new()
-        .recordProviderModelRequest(
-            providerModel.to_string(),
-            functionType,
-            source,
-            chatId,
-            inputTokens,
-            outputTokens,
-            cachedInputTokens,
-        )
-        .map(|_| ())
-        .map_err(AiServiceError::RequestFailed)
 }
 
 /// Resolves proxy wrappers to the concrete tool name shown to users and callbacks.
@@ -3810,7 +3818,7 @@ fn value_to_btree_map(source: HashMap<String, Value>) -> BTreeMap<String, String
 /// has no platform policy and never turns a physical root into a guest path.
 fn resolve_terminal_path_mappings(
     host: Option<&dyn operit_host_api::TerminalHost>,
-    mapper: Option<&PathMapper>,
+    filesystem: Option<&VisualFileSystem>,
     primary: Option<&str>,
     folders: &[String],
 ) -> Vec<crate::chat::config::SystemPromptConfig::TerminalPathMapping> {
@@ -3827,8 +3835,8 @@ fn resolve_terminal_path_mappings(
         .filter(|path| !path.trim().is_empty() && directories.insert(path.to_string()))
         .collect::<Vec<_>>();
     let resolve_host = |path: &str| {
-        mapper.ok_or_else(|| operit_host_api::HostError::new("File path mapping is unavailable"))?
-            .resolve(path).and_then(|mapping| mapping.nativePath())
+        filesystem.ok_or_else(|| operit_host_api::HostError::new("File path mapping is unavailable"))?
+            .terminalDirectory(host, path)
             .map_err(operit_host_api::HostError::new)
     };
     let mut kinds = info.types.into_iter().filter(|kind| kind.available).collect::<Vec<_>>();
@@ -3847,19 +3855,19 @@ fn resolve_terminal_path_mappings(
 }
 
 fn resolve_workspace_path_mappings(
-    mapper: &PathMapper,
+    filesystem: &VisualFileSystem,
     workspace_path: Option<&str>,
     workspace_folders: &[String],
-) -> Vec<ResolvedVfsPath> {
+) -> Vec<WorkspacePathMapping> {
     let mut seen = BTreeSet::new();
     workspace_path
         .into_iter()
         .chain(workspace_folders.iter().map(String::as_str))
         .filter(|path| !path.trim().is_empty())
-        .filter_map(|path| mapper.resolve(path).ok())
-        // Browser storage keys (e.g. workspaces/chat-id) are not terminal paths.
-        .filter(|mapping| std::path::Path::new(&mapping.physicalPath).is_absolute())
-        .filter(|mapping| seen.insert(mapping.vfsPath.clone()))
+        .filter_map(|path| filesystem.validatePath(path, "workspace").ok().and_then(|_| operit_vfs::VfsPath::canonicalizeVfsPath(path).ok()))
+
+        .filter(|path| seen.insert(path.clone()))
+        .map(|vfsPath| WorkspacePathMapping { vfsPath })
         .collect()
 }
 
@@ -3924,85 +3932,115 @@ mod completed_request_window_tests {
 }
 
 #[cfg(test)]
-mod workspace_path_tests {
-    use super::resolve_workspace_path_mappings;
-    use operit_tools::files::PathMapper::PathMapper;
+mod estimate_hook_tests {
+    use super::*;
+    use crate::chat::hooks::PromptHookRegistry::{
+        PromptEstimateFinalizeHook, PromptEstimateHistoryHook, PromptFinalizeHook,
+        PromptHistoryHook, PromptHookFuture, PromptHookMutation,
+    };
 
-    #[test]
-    fn resolves_primary_and_all_folders_from_configured_roots() {
-        let root = std::env::temp_dir().join("Operit My Projects");
-        let workspace_root = root.join("workspaces");
-        let mapper = PathMapper::builtinOnly(root.join("runtime"), workspace_root.clone());
-        let mappings = resolve_workspace_path_mappings(
-            &mapper,
-            Some("/operitapp/workspaces/main"),
-            &[
-                "/operitapp/workspaces/main/".into(),
-                "/operitapp/workspaces/other".into(),
-                "".into(),
-                "/unknown/project".into(),
-            ],
-        );
-        assert_eq!(mappings.len(), 2);
-        assert_eq!(mappings[0].vfsPath, "/operitapp/workspaces/main");
-        assert_eq!(
-            mappings[0].physicalPath,
-            workspace_root
-                .join("main")
-                .to_string_lossy()
-                .replace('\\', "/")
-        );
-        assert_eq!(
-            mappings[1].physicalPath,
-            workspace_root
-                .join("other")
-                .to_string_lossy()
-                .replace('\\', "/")
-        );
+    struct Probe {
+        events: Arc<Mutex<Vec<String>>>,
     }
 
-    #[test]
-    fn workspace_switch_resolves_new_path() {
-        let root = std::env::temp_dir().join("Operit workspace switch");
-        let mapper = PathMapper::builtinOnly(root.join("runtime"), root.join("workspaces"));
-        let first = resolve_workspace_path_mappings(&mapper, Some("/operitapp/workspaces/first"), &[]);
-        let second = resolve_workspace_path_mappings(&mapper, Some("/operitapp/workspaces/second"), &[]);
-        assert_eq!(
-            first[0].physicalPath,
-            root.join("workspaces/first")
-                .to_string_lossy()
-                .replace('\\', "/")
-        );
-        assert_eq!(
-            second[0].physicalPath,
-            root.join("workspaces/second")
-                .to_string_lossy()
-                .replace('\\', "/")
-        );
+    macro_rules! probe_hook {
+        ($hook:ident, $name:literal) => {
+            impl $hook for Probe {
+                /// Gives each hook family an independent registry identity.
+                fn id(&self) -> &str { concat!("estimate-routing-test-", $name) }
+
+                /// Records real registry dispatch and changes the history counted by the caller.
+                fn on_event_async<'a>(&'a self, context: &'a PromptHookContext) -> PromptHookFuture<'a> {
+                    Box::pin(async move {
+                        if context.chat_id.as_deref() != Some("estimate-routing-test") { return Ok(None); }
+                        self.events.lock().unwrap().push(format!("{}:{}", $name, context.stage));
+                        if context.metadata.get("fail") == Some(&json!(true)) {
+                            return Err("estimate hook failed".into());
+                        }
+                        let mut history = context.prepared_history.clone();
+                        history.push(PromptTurn::new(PromptTurnKind::SYSTEM, format!("{}:{}", $name, context.stage)));
+                        Ok(Some(PromptHookMutation { prepared_history: Some(history), ..Default::default() }))
+                    })
+                }
+            }
+        };
+    }
+    probe_hook!(PromptHistoryHook, "send-history");
+    probe_hook!(PromptEstimateHistoryHook, "estimate-history");
+    probe_hook!(PromptFinalizeHook, "send-finalize");
+    probe_hook!(PromptEstimateFinalizeHook, "estimate-finalize");
+
+    /// Runs the production dispatchers to verify estimate isolation, chaining and error propagation.
+    #[tokio::test]
+    async fn independent_estimates_run_only_their_own_hook_families() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let probe = Arc::new(Probe { events: events.clone() });
+        PromptHookRegistry::registerPromptHistoryHook(probe.clone());
+        PromptHookRegistry::registerPromptEstimateHistoryHook(probe.clone());
+        PromptHookRegistry::registerPromptFinalizeHook(probe.clone());
+        PromptHookRegistry::registerPromptEstimateFinalizeHook(probe);
+        let dispatcher = RuntimePromptHistoryHooks { purpose: PromptPreparationPurpose::Estimate };
+        let mut history = HistoryHookContext {
+            stage: "before_prepare_history".into(), chat_id: Some("estimate-routing-test".into()),
+            prompt_function_type: "CHAT".into(), processed_input: "question".into(),
+            chat_history: Vec::new(), prepared_history: Vec::new(), use_english: None,
+            metadata: Default::default(),
+        };
+        history = dispatcher.dispatch_prompt_history_hooks(history).await.unwrap();
+        history.stage = "after_prepare_history".into();
+        history = dispatcher.dispatch_prompt_history_hooks(history).await.unwrap();
+        let context = PromptHookContext {
+            chat_id: history.chat_id, prepared_history: history.prepared_history,
+            processed_input: Some(history.processed_input), ..Default::default()
+        };
+        let finalized = finalize_estimate_prompt(context.clone()).await.unwrap();
+        assert_eq!(finalized.prepared_history.len(), 4);
+        assert_eq!(*events.lock().unwrap(), [
+            "estimate-history:before_prepare_history", "estimate-history:after_prepare_history",
+            "estimate-finalize:before_finalize_prompt", "estimate-finalize:before_send_to_model",
+        ]);
+        let mut failing = context;
+        failing.metadata.insert("fail".into(), json!(true));
+        assert_eq!(finalize_estimate_prompt(failing).await.err().as_deref(), Some("estimate hook failed"));
+        PromptHookRegistry::unregisterPromptHistoryHook("estimate-routing-test-send-history");
+        PromptHookRegistry::unregisterPromptEstimateHistoryHook("estimate-routing-test-estimate-history");
+        PromptHookRegistry::unregisterPromptFinalizeHook("estimate-routing-test-send-finalize");
+        PromptHookRegistry::unregisterPromptEstimateFinalizeHook("estimate-routing-test-estimate-finalize");
     }
 
-    #[cfg(target_os = "macos")]
+    /// Lets explicit clearing replace an existing current turn without adding a blank synthetic turn.
     #[test]
-    fn resolves_external_macos_workspace_alongside_default_workspace() {
-        let mapper = PathMapper::builtinOnly("/runtime".into(), "/workspaces".into());
-        let mappings = resolve_workspace_path_mappings(
-            &mapper,
-            Some("/operitapp/workspaces/main"),
-            &["/virtual/macos/Users/test/External Project".into()],
-        );
-        assert_eq!(mappings.len(), 2);
-        assert_eq!(mappings[1].physicalPath, "/Users/test/External Project");
-    }
-
-    #[test]
-    fn browser_storage_keys_are_not_advertised_as_terminal_paths() {
-        let mapper = PathMapper::builtinOnly("runtime".into(), "workspaces".into());
-        assert!(
-            resolve_workspace_path_mappings(&mapper, Some("/operitapp/workspaces/main"), &[]).is_empty()
-        );
+    fn empty_finalized_input_replaces_the_original_current_turn() {
+        let history = vec![PromptTurn::new(PromptTurnKind::USER, "remove me")];
+        let finalized = apply_finalized_current_user_turn(history, "remove me", "");
+        assert_eq!(finalized.len(), 1);
+        assert_eq!(finalized[0].content, "");
+        assert!(apply_finalized_current_user_turn(Vec::new(), "remove me", "").is_empty());
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod workspace_path_tests {
+    use super::resolve_workspace_path_mappings;
+    use operit_vfs::VisualFileSystem::VisualFileSystem;
+
+    /// Keeps prompt workspace identities portable across backend roots and workspace switches.
+    #[test]
+    fn workspace_prompt_paths_remain_virtual() {
+        let root = std::env::temp_dir().join("Operit workspace paths");
+        let files = VisualFileSystem::builtinOnly(
+            std::sync::Arc::new(operit_host_native_filesystem::PosixFileSystemHost::new()),
+            root.join("runtime"), root.join("workspaces"),
+        );
+        let mappings = resolve_workspace_path_mappings(&files, Some("/operitapp/workspaces/main"), &[
+            "/app/workspaces/main/".into(), "/operitapp/workspaces/other".into(), "/unknown/project".into(),
+        ]);
+        assert_eq!(mappings.iter().map(|item| item.vfsPath.as_str()).collect::<Vec<_>>(),
+            ["/operitapp/workspaces/main", "/operitapp/workspaces/other"]);
+        let next = resolve_workspace_path_mappings(&files, Some("/operitapp/workspaces/next"), &[]);
+        assert_eq!(next[0].vfsPath, "/operitapp/workspaces/next");
+    }
+}
 #[cfg(test)]
 mod model_identity_tests {
     use super::{EnhancedAISharedState, TurnModelIdentity, TurnTokenSnapshot};
@@ -4073,7 +4111,8 @@ mod model_identity_tests {
         let previous_identity = state.last_turn_model_identity.clone();
         state.last_reply_content = Some("previous reply".into());
         state.last_turn_context_window = Some(1234);
-        state.last_turn_token_snapshot = Some(TurnTokenSnapshot {
+        let previous_usage = state.turn_token_usage.clone();
+        state.turn_token_usage.setSnapshot(TurnTokenSnapshot {
             inputTokens: 100,
             outputTokens: 50,
             cachedInputTokens: 20,
@@ -4094,7 +4133,8 @@ mod model_identity_tests {
         );
         assert_eq!(previous_identity.unwrap().modelName, "model-a");
         assert!(state.last_reply_content.is_none());
-        assert!(state.last_turn_token_snapshot.is_none());
+        assert_eq!(state.turn_token_usage.snapshot(), TurnTokenSnapshot::default());
+        assert_eq!(previous_usage.snapshot().inputTokens, 100);
         assert!(state.last_turn_context_window.is_none());
     }
 }
@@ -4106,6 +4146,54 @@ mod cancellation_tests {
         SendMessageOptions,
     };
     use std::sync::{Arc, Mutex};
+
+    /// Wakes every observer and remains ready for observers created after cancellation.
+    #[tokio::test]
+    async fn cancellation_wakes_all_tool_waiters_without_losing_early_signals() {
+        let token = MessageCancellationToken::default();
+        let mut first = Box::pin(token.cancelled());
+        let mut second = Box::pin(token.cancelled());
+        assert!(futures_util::poll!(&mut first).is_pending());
+        assert!(futures_util::poll!(&mut second).is_pending());
+        token.cancel();
+        assert!(futures_util::poll!(&mut first).is_ready());
+        assert!(futures_util::poll!(&mut second).is_ready());
+        assert!(futures_util::poll!(Box::pin(token.cancelled())).is_ready());
+    }
+
+    /// Stops a pending batch on either cancellation path before any later tool can run.
+    #[tokio::test]
+    async fn cancellation_drops_pending_tool_batch_and_prevents_later_invocations() {
+        for cancelSend in [false, true] {
+            let token = MessageCancellationToken::default();
+            let mut options = SendMessageOptions::new();
+            options.cancellationToken = Some(token.clone());
+            let mut state = EnhancedAISharedState::default();
+            let context = state.createExecutionContext(0, &options).unwrap();
+            let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+            let laterTool = std::sync::atomic::AtomicBool::new(false);
+            let mut batch = Box::pin(context.awaitToolExecution(async {
+                receiver.await.unwrap();
+                laterTool.store(true, std::sync::atomic::Ordering::SeqCst);
+            }));
+            assert!(futures_util::poll!(&mut batch).is_pending());
+            if cancelSend { token.cancel(); } else { state.invalidateExecutionContexts(); }
+            assert!(matches!(futures_util::poll!(&mut batch), std::task::Poll::Ready(None)));
+            assert!(sender.is_closed(), "the cancelled invocation must be dropped immediately");
+            assert!(!laterTool.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
+
+    /// Preserves successful results and never polls a batch cancelled before it begins.
+    #[tokio::test]
+    async fn tool_batch_preserves_completion_and_rejects_cancelled_start() {
+        let mut state = EnhancedAISharedState::default();
+        let context = state.createExecutionContext(0, &SendMessageOptions::new()).unwrap();
+        assert_eq!(context.awaitToolExecution(async { 42 }).await, Some(42));
+        state.invalidateExecutionContexts();
+        let mut cancelled = Box::pin(context.awaitToolExecution(async { panic!("cancelled batch started") }));
+        assert!(matches!(futures_util::poll!(&mut cancelled), std::task::Poll::Ready(None)));
+    }
 
     #[test]
     fn queued_response_context_is_invalidated_before_worker_starts() {

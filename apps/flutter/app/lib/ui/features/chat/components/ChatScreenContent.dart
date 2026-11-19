@@ -10,7 +10,6 @@ import 'ChatToolPermissionPanel.dart';
 import '../../../../data/preferences/UserPreferencesManager.dart';
 import '../../../../l10n/generated/app_localizations.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
-import '../../../common/contributions/ChatUiContributionModels.dart';
 import '../../../theme/OperitThemeAssets.dart';
 import '../../../common/interactions/DrawerGestureExclusion.dart';
 import '../../../theme/OperitTheme.dart';
@@ -104,7 +103,7 @@ class ChatScreenContent extends StatelessWidget {
     required this.onAttachLocation,
     required this.onAttachPackage,
     required this.onRemoveAttachment,
-    required this.onInsertAttachment,
+    required this.onPreviewAttachment,
     required this.toastMessageListenable,
     required this.onDismissToast,
     required this.isMultiSelectMode,
@@ -129,7 +128,7 @@ class ChatScreenContent extends StatelessWidget {
   final ChatViewModel viewModel;
   final String? currentChatId;
   final String? fileDirectory;
-  final ChatUiIdentity? chatIdentity;
+  final core_proxy.ChatDisplayIdentity? chatIdentity;
   final String? backgroundUri;
   final VoidCallback? onIdentityTap;
   final ValueListenable<bool> autoScrollToBottomListenable;
@@ -193,7 +192,7 @@ class ChatScreenContent extends StatelessWidget {
   final VoidCallback? onAttachLocation;
   final ValueChanged<String> onAttachPackage;
   final ValueChanged<String> onRemoveAttachment;
-  final ValueChanged<AttachmentInfo> onInsertAttachment;
+  final ValueChanged<AttachmentInfo> onPreviewAttachment;
   final ValueListenable<String?> toastMessageListenable;
   final VoidCallback onDismissToast;
   final bool isMultiSelectMode;
@@ -216,10 +215,7 @@ class ChatScreenContent extends StatelessWidget {
         inputProcessingState.tag == 'ToolProgress' ||
         inputProcessingState.tag == 'Receiving' ||
         inputProcessingState.tag == 'Processing' ||
-        inputProcessingState.tag == 'Summarizing' ||
         inputProcessingState.tag == 'Connecting' ||
-        inputProcessingState.message == 'chat_compressing_history' ||
-        inputProcessingState.message == 'chat_summarizing_generating' ||
         inputProcessingState.message == 'enhanced_receiving_tool_result' ||
         inputProcessingState.message == 'enhanced_receiving_response' ||
         inputProcessingState.message == 'enhanced_processing_message' ||
@@ -435,7 +431,7 @@ class ChatScreenContent extends StatelessWidget {
         onAttachLocation: onAttachLocation,
         onAttachPackage: onAttachPackage,
         onRemoveAttachment: onRemoveAttachment,
-        onInsertAttachment: onInsertAttachment,
+        onPreviewAttachment: onPreviewAttachment,
         isSpeechRecording: isSpeechRecording,
         isSpeechTranscribing: isSpeechTranscribing,
         onSpeechInput: onSpeechInput,
@@ -474,7 +470,7 @@ class ChatScreenContent extends StatelessWidget {
         onAttachLocation: onAttachLocation,
         onAttachPackage: onAttachPackage,
         onRemoveAttachment: onRemoveAttachment,
-        onInsertAttachment: onInsertAttachment,
+        onPreviewAttachment: onPreviewAttachment,
         isSpeechRecording: isSpeechRecording,
         isSpeechTranscribing: isSpeechTranscribing,
         onSpeechInput: onSpeechInput,
@@ -563,6 +559,7 @@ class ChatScreenContent extends StatelessWidget {
         ),
         child: InputProcessingStatusLane(
           visible: visible,
+          isSummarizing: inputProcessingState.tag == 'Summarizing',
           status: status,
           textStyle: textStyle,
         ),
@@ -628,9 +625,7 @@ class ChatScreenContent extends StatelessWidget {
 
   /// Copies the selected messages into the system clipboard.
   Future<void> _copySelectedMessages(BuildContext context) async {
-    final text = _selectedVisibleMessages
-        .map((message) => cleanMessageContent(message.copySourceText))
-        .join('\n\n');
+    final text = buildMessagesCopyText(_selectedVisibleMessages);
     try {
       await Clipboard.setData(ClipboardData(text: text));
     } on PlatformException catch (error) {

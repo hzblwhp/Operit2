@@ -618,7 +618,7 @@ impl StandardChatManagerTool {
             Ok(None) => return toolError(tool, format!("Chat does not exist: {chatId}")),
             Err(error) => return toolError(tool, format!("Error loading chat: {error}")),
         }
-        match manager.loadChatMessagesWithOptions(chatId.clone(), Some(order.clone()), Some(limit))
+        match manager.loadChatMessagesRange(chatId.clone(), order.clone(), 0, limit - 1)
         {
             Ok(messages) => successData(
                 tool,
@@ -789,7 +789,7 @@ impl AsyncToolExecutor for ChatManagerToolExecutor {
     }
 
     /// Creates local runtime futures on their owning scheduler and awaits only a Send receipt.
-    fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool, context: &'a ToolInvocationContext) -> ToolInvocationFuture<'a> {
+    fn invokeAndStreamAsync<'a>(&'a self, tool: &'a AITool, context: &'a ToolInvocationContext) -> ToolInvocationFuture<'a> {
         let tools = self.tools.clone();
         let operation = self.operation;
         let request = tool.clone();
@@ -1538,9 +1538,20 @@ struct ObservationArguments {
     observation: ChatObservationRequest,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyPreparedChatArguments {}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedNotificationIdArguments { id: String }
+
 /// Selects one owner-scoped Chat operation registered on the common tool pipeline.
 #[derive(Clone, Copy)]
 pub(crate) enum PluginChatToolOperation {
+    ListScheduledMessages,
+    DeliverPrepared,
+    ScheduleMessage,
+    CancelScheduledMessage,
     SendMessage,
     Observe,
     Cancel,
@@ -1562,6 +1573,36 @@ impl SharedToolExecutor for PluginChatToolExecutor {
         checkAccess: bool,
     ) -> Result<PreparedToolInvocation<'a>, String> {
         match self.operation {
+            PluginChatToolOperation::ListScheduledMessages => {
+                let _: EmptyPreparedChatArguments = decodeArguments(request)?;
+                let owner = context.requirePluginOwner()?;
+                Ok(prepareInvocation(request, checkAccess, ToolEffect::READ, async move {
+                    Ok(ToolResultData::ChatScheduledMessagesResultData(context.host().runtimeSupport().listScheduledChatMessages(&owner).await?))
+                }))
+            }
+            PluginChatToolOperation::DeliverPrepared => {
+                let args: RequestArguments<operit_plugin_sdk::js_sdk::chat::ChatPreparedMessageRequest> = decodeArguments(request)?;
+                context.requirePluginOwner()?;
+                operit_plugin_sdk::js_sdk::chat::validatePreparedMessageRequest(&args.request, currentTimeMillis())?;
+                Ok(prepareInvocation(request, checkAccess, ToolEffect::WRITE, async move {
+                    Ok(ToolResultData::ChatPreparedDeliveryResultData(context.host().runtimeSupport().deliverPreparedChatMessage(args.request).await?))
+                }))
+            }
+            PluginChatToolOperation::ScheduleMessage => {
+                let args: RequestArguments<operit_plugin_sdk::js_sdk::chat::ChatScheduledMessageRequest> = decodeArguments(request)?;
+                let owner = context.requirePluginOwner()?;
+                Ok(prepareInvocation(request, checkAccess, ToolEffect::WRITE, async move {
+                    Ok(ToolResultData::ChatScheduleMessageResultData(context.host().runtimeSupport().scheduleChatMessage(&owner, args.request).await?))
+                }))
+            }
+            PluginChatToolOperation::CancelScheduledMessage => {
+                let args: PreparedNotificationIdArguments = decodeArguments(request)?;
+                let owner = context.requirePluginOwner()?;
+                operit_plugin_sdk::js_sdk::chat::validatePreparedNotificationId(&args.id)?;
+                Ok(prepareInvocation(request, checkAccess, ToolEffect::WRITE, async move {
+                    Ok(ToolResultData::ChatCancelScheduledMessageResultData(context.host().runtimeSupport().cancelScheduledChatMessage(&owner, args.id).await?))
+                }))
+            }
             PluginChatToolOperation::SendMessage => {
                 let args: RequestArguments<ChatSendRequest> = decodeArguments(request)?;
                 args.request.validate()?;

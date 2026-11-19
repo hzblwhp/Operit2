@@ -669,7 +669,7 @@ fn remainingScriptRequestMillis(deadline: u128) -> JsExecutionResult<u64> {
 fn javaScriptExecutionErrorFromHost(error: HostError) -> JsExecutionError {
     match error.kind {
         HostErrorKind::Timeout => JsExecutionError::timeout(error.message),
-        HostErrorKind::General => JsExecutionError::worker_unavailable(error.message),
+        HostErrorKind::General | HostErrorKind::NotFound | HostErrorKind::PermissionDenied => JsExecutionError::worker_unavailable(error.message),
     }
 }
 
@@ -1041,6 +1041,33 @@ fn javaScriptSourceFingerprint(source: &str) -> String {
 }
 
 impl JsEngineState {
+    /// Uses the owning manifest or registered script contract for each call on a pooled engine.
+    fn scriptApiVersion(&self, script: &str, params: &BTreeMap<String, Value>) -> JsExecutionResult<String> {
+        use operit_plugin_sdk::toolpkg::ToolPkgApiVersion::{
+            CURRENT_TOOLPKG_API_VERSION, requireSupportedToolPkgApiVersion,
+        };
+        use operit_plugin_sdk::JsPackageLoader::JsPackageLoader;
+        if let Some(context) = &self.toolPkgContext {
+            return Ok(context.api_version.clone());
+        }
+        if let Some(version) = params.get("__operit_package_api_version") {
+            let version = version.as_str().ok_or_else(|| {
+                JsExecutionError::invalid_request("Package API version must be a string")
+            })?;
+            return requireSupportedToolPkgApiVersion(version)
+                .map(|version| version.to_string())
+                .map_err(JsExecutionError::invalid_request);
+        }
+        let metadata = JsPackageLoader::extract_metadata(script);
+        if metadata != "{}" {
+            let object = JsPackageLoader::parse_metadata_object(&metadata)
+                .map_err(JsExecutionError::invalid_request)?;
+            return JsPackageLoader::parse_api_version(&object).map_err(JsExecutionError::invalid_request);
+        }
+        // Internal host scripts have no package metadata and use the current SDK.
+        Ok(CURRENT_TOOLPKG_API_VERSION.to_string())
+    }
+
     /// Creates a JavaScript runtime state from a Host-owned runtime instance.
     fn newWithRuntime(
         runtime: Box<dyn HostJavaScriptRuntime>,
@@ -1184,6 +1211,7 @@ impl JsEngineState {
             deadlineMillis,
             ipcTiming,
         } = request;
+        let apiVersion = self.scriptApiVersion(&script, &params)?;
         let textResources = if useComposeDslTextResources {
             if let Some(textResources) = textResources {
                 self.composeDslTextResources = Some(textResources);
@@ -1222,12 +1250,6 @@ impl JsEngineState {
         let started = (|| {
             let mut effectiveParams = params;
             bindEnvironmentOwner(&mut effectiveParams, context.environmentOwner.as_ref());
-            // Async Compose renders and actions need the same API contract as synchronous calls.
-            let apiVersion = match self.toolPkgContext.as_ref() {
-                Some(context) => context.api_version.clone(),
-                None => operit_plugin_sdk::toolpkg::ToolPkgApiVersion::CURRENT_TOOLPKG_API_VERSION
-                    .to_string(),
-            };
             bindCallerContext(&mut effectiveParams, context.executionHost.as_deref());
             effectiveParams.insert(
                 "__operit_toolpkg_api_version".to_string(),
@@ -1305,6 +1327,7 @@ impl JsEngineState {
         timeoutSec: u64,
         executionListener: Option<JsExecutionListenerRef>,
     ) -> JsExecutionResult<Option<String>> {
+        let apiVersion = self.scriptApiVersion(script, params)?;
         let context = JsCallContext {
             interrupt: HostJavaScriptExecutionInterrupt::unlimited(),
             executionHost: self.executionHost.clone(),
@@ -1318,12 +1341,6 @@ impl JsEngineState {
         installThreadLocalCallContext(&context);
         let mut effectiveParams = params.clone();
         bindEnvironmentOwner(&mut effectiveParams, context.environmentOwner.as_ref());
-        // Standalone scripts use the current SDK contract; ToolPkg engines retain their manifest contract.
-        let apiVersion = match self.toolPkgContext.as_ref() {
-            Some(context) => context.api_version.clone(),
-            None => operit_plugin_sdk::toolpkg::ToolPkgApiVersion::CURRENT_TOOLPKG_API_VERSION
-                .to_string(),
-        };
         bindCallerContext(&mut effectiveParams, context.executionHost.as_deref());
         effectiveParams.insert(
             "__operit_toolpkg_api_version".to_string(),
@@ -1729,8 +1746,11 @@ impl JsEngineState {
             .as_bool()
             .ok_or("Detached-call predicate must return a boolean")?;
         if detached {
+            let mut context = pending.context.clone();
+            // The successful primary result ends its before-hook deadline; retained work owns its lifetime.
+            context.interrupt = HostJavaScriptExecutionInterrupt::unlimited();
             self.detachedCallContexts
-                .insert(pending.callId.clone(), pending.context.clone());
+                .insert(pending.callId.clone(), context);
         }
         Ok(())
     }
@@ -1886,6 +1906,8 @@ impl JsEngineState {
             )
             .map_err(|error| error.to_string())?;
         let syncNames = [
+            "__operitNativePrepareJavaScript",
+            "__operitNativeAsyncMethodKind",
             "__operitNativePrepareComposeModule",
             "__operitNativeReadBootstrapLibrary",
             "__operitNativeHashText",
@@ -2089,6 +2111,18 @@ impl JsEngineState {
                 .registerHostJavaScriptAsyncJsonFunction(name, callback)
                 .map_err(|error| error.to_string())?;
         }
+        let migratorBinding = self.packageBinding.clone();
+        self.registerCoreRoute("__operitNativeImportV1MigratorArchive", asyncCallbackSink.clone(), move |host, [path]| {
+            let binding = migratorBinding.get().filter(|binding| {
+                binding.context.container_package_name == "com.operit.chathistory_migrator"
+                    && matches!(binding.context.api_version.as_str(), "1.0.0" | "1.0.1")
+            }).ok_or_else(|| HostError::new("Chat archive import requires the installed v1 migrator"))?;
+            if !Arc::ptr_eq(&host, &binding.executionHost) {
+                return Err(HostError::new("Chat archive import requires the package execution host"));
+            }
+            let path = hostJavaScriptStringArgument(path)?;
+            Ok(Box::new(move || host.import_v1_migrator_archive(path)))
+        })?;
         self.registerCoreRoute("__operitNativeCallCoreRoute", asyncCallbackSink.clone(), |host, [target, method, args]| {
             let target = hostJavaScriptStringArgument(target)?;
             let method = hostJavaScriptStringArgument(method)?;
@@ -2909,6 +2943,16 @@ fn executeHostOperation(name: &str, arguments: Vec<impl Into<operit_host_api::Ho
                 ));
             }
             Ok(Value::String(path))
+        }
+        "__operitNativePrepareJavaScript" => {
+            let [source] = exactHostJavaScriptJsonArguments(name, arguments)?;
+            crate::javascript::JsAsyncCompiler::compile(&hostJavaScriptStringArgument(source)?)
+                .map(Value::String).map_err(HostError::new)
+        }
+        "__operitNativeAsyncMethodKind" => {
+            let [source] = exactHostJavaScriptJsonArguments(name, arguments)?;
+            crate::javascript::JsAsyncCompiler::method_kind(&hostJavaScriptStringArgument(source)?)
+                .map(|kind| Value::String(kind.into())).map_err(HostError::new)
         }
         "__operitNativePrepareComposeModule" => {
             let [source, identity] = exactHostJavaScriptJsonArguments(name, arguments)?;

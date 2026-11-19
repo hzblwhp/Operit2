@@ -298,7 +298,8 @@ LocalModelFile { relativePath: "tokenizer.txt".to_string(), sha256: "77009625db0
                 tokens: "tokens.txt".to_string(),
                 ruleFsts: Vec::new(),
                 ruleFars: Vec::new(),
-                speakerCount: 175,
+                // The pinned ONNX model declares n_speakers=174 (IDs 0 through 173).
+                speakerCount: 174,
             }),
             sources: vec![
                 huggingFaceSource(
@@ -1116,10 +1117,7 @@ mod tests {
                 LocalPlatform::Ios,
                 LocalPlatform::Ohos,
             ] {
-                assert_eq!(
-                    manifest.supportsPlatform(&platform),
-                    cfg!(feature = "native-llm")
-                );
+                assert!(manifest.supportsPlatform(&platform));
             }
             let entryPath = match manifest.driver.as_ref().unwrap() {
                 LocalModelDriver::LlamaCpp { model } => model,

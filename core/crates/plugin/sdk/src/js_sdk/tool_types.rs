@@ -5,6 +5,15 @@ use super::results::*;
 /// Maps every built-in tool name to its concrete public result type.
 #[operit_plugin_sdk_macros::tool_display]
 pub struct ToolResultMap {
+    pub list_windows: JsonResultData,
+    pub focus_window: UIActionResultData,
+    pub get_page_info: UIPageResultData,
+    pub tap: UIActionResultData,
+    pub long_press: UIActionResultData,
+    pub click_element: UIActionResultData,
+    pub set_input_text: UIActionResultData,
+    pub press_key: UIActionResultData,
+    pub swipe: UIActionResultData,
     pub edge_execute: EdgePortResultData,
     pub io_execute: EdgePortResultData,
     #[display(action = "list", icon = "folder", target = "path", result = "directory")]
@@ -192,6 +201,10 @@ pub struct ToolResultMap {
     pub send_message_to_ai_streaming: MessageSendResultData,
     pub chat_send_message: ChatSendMessageResultData,
     pub chat_observe: ChatObservationResultData,
+    pub chat_deliver_prepared: ChatPreparedDeliveryResultData,
+    pub chat_list_scheduled_messages: ChatScheduledMessagesResultData,
+    pub chat_schedule_message: ChatScheduleMessageResultData,
+    pub chat_cancel_scheduled_message: ChatCancelScheduledMessageResultData,
     pub chat_cancel: ChatCancelResultData,
     pub chat_read_extension: ChatReadExtensionResultData,
     pub chat_write_extension: ChatWriteExtensionResultData,

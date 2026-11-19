@@ -16,10 +16,11 @@ import java.util.zip.ZipOutputStream
  * Invoked by native runtime workers, never by the UI thread through MethodChannel. */
 class AndroidDocumentFileSystem(
     private val documents: DocumentTreeAccess,
+    private val fileSharer: ((File?, String?, String?, String) -> Unit)? = null,
     private val fileOpener: ((File?, String?, String?) -> Unit)? = null,
 ) {
     constructor(context: Context) : this(
-        ContentResolverDocumentTreeAccess(context), AndroidFileOpener(context)::open,
+        ContentResolverDocumentTreeAccess(context), AndroidFileOpener(context)::share, AndroidFileOpener(context)::open,
     )
     private val prefix = "operit-resource:"
     private class Missing(message: String) : FileNotFoundException(message)
@@ -27,6 +28,7 @@ class AndroidDocumentFileSystem(
     fun execute(encoded: String): String = try {
         val request = JSONObject(encoded)
         val value: Any? = when (request.getString("operation")) {
+            "resolveNativeDirectory" -> node(request.getString("path")).nativeDirectory()
             "listFiles" -> JSONArray(node(request.getString("path")).children().map { it.entry() })
             "readFileBytes", "readFileWithLimit" -> {
                 val maximum = request.optLong("maxBytes", -1)
@@ -55,13 +57,19 @@ class AndroidDocumentFileSystem(
                 node(request.getString("path")).output(request.optBoolean("append")).use { it.write(content) }
                 JSONObject.NULL
             }
-            "openFile" -> {
+            "openFile", "shareFile" -> {
                 val target = node(request.getString("path"))
-                require(!target.info().getBoolean("isDirectory")) { "Cannot open a directory as a file" }
+                require(!target.stat().getBoolean("isDirectory")) { "Cannot open a directory as a file" }
                 // Validate the real read capability, including revoked SAF grants.
                 target.input().use { }
-                val opener = fileOpener ?: throw UnsupportedOperationException("File opener is not installed")
-                opener(target.file, target.tree, if (target.file == null) target.documentId() else null)
+                val id = if (target.file == null) target.documentId() else null
+                if (request.getString("operation") == "openFile") {
+                    val opener = fileOpener ?: throw UnsupportedOperationException("File opener is not installed")
+                    opener(target.file, target.tree, id)
+                } else {
+                    val sharer = fileSharer ?: throw UnsupportedOperationException("File sharing is not installed")
+                    sharer(target.file, target.tree, id, request.optString("title", ""))
+                }
                 JSONObject.NULL
             }
             "fileExists" -> node(request.getString("path")).existence()
@@ -118,7 +126,9 @@ class AndroidDocumentFileSystem(
         }
         JSONObject().put("ok", true).put("value", value ?: JSONObject.NULL).toString()
     } catch (error: Exception) {
-        JSONObject().put("ok", false).put("error", "${error.javaClass.simpleName}: ${error.message}").toString()
+        val presentation = runCatching { JSONObject(encoded).optString("operation") in setOf("openFile", "shareFile") }.getOrDefault(false)
+        val message = if (presentation) AndroidFileOpener.safeFailureMessage(error) else error.message
+        JSONObject().put("ok", false).put("error", "${error.javaClass.simpleName}: $message").toString()
     }
 
     private fun relativeParts(path: String): List<String> {
@@ -215,6 +225,10 @@ class AndroidDocumentFileSystem(
                 }
             }
             return current
+        }
+        fun nativeDirectory(): String {
+            require(stat().getBoolean("isDirectory")) { "Terminal working directory is not a directory" }
+            return file?.canonicalPath ?: documents.nativeDirectory(tree!!, documentId())
         }
         fun stat(): JSONObject {
             if (file != null) {

@@ -78,15 +78,13 @@ impl Fixture {
     }
     /// Replays all exported transactions onto another actual SQLite host.
     fn replay(&self, operations: &[SyncOperation]) {
-        for operation in operations {
-            PluginStorage::applyOperation(
-                self.host.clone(),
-                self.host.clone(),
-                operation,
-                &Default::default(),
-            )
-            .unwrap();
-        }
+        PluginStorage::applyOperations(self.host.clone(), self.host.clone(), operations, &Default::default()).unwrap();
+    }
+    /// Applies the source's complete declaration and baseline through the production recovery path.
+    fn repair(&self, source: &Fixture, expected: &str, snapshot: &operit_store::Transaction::Snapshot) -> Result<bool, String> {
+        let definition = PluginStorage::snapshotDefinition(source.host.clone(), &source.path).unwrap();
+        if !self.host.exists(&self.path).unwrap() { PluginStorage::provisionSnapshotDatabase(self.host.clone(), self.host.clone(), &self.path, definition.clone()).unwrap(); }
+        PluginStorage::repairSyncedSnapshot(self.host.clone(), expected, snapshot, self.device, &definition)
     }
     /// Releases all database handles before removing only this test's unique temporary directory.
     fn dispose(mut self) {
@@ -552,6 +550,54 @@ fn sqlite_sync_is_atomic_and_validates_declared_rows() {
     b.dispose();
 }
 
+/// Copied metadata cannot claim storage ownership or make ordinary files unreadable.
+#[test]
+fn copied_markers_do_not_register_files_outside_the_live_storage_namespace() {
+    let f = Fixture::new("first");
+    for root in [
+        "workspaces/project",
+        "runtime/data/chat_outputs/chat",
+        "runtime/data/chat_attachments/chat",
+        "runtime/plugin_data/space-copy/demo",
+        "runtime/plugin_data/device-copy/demo",
+    ] {
+        let database = format!("{root}/identities/old/runtime/plugin_data/space/demo/records.sqlite");
+        let marker = format!("{database}.operit-storage.json");
+        for stored_path in ["runtime/plugin_data/space/demo/records.sqlite", &database] {
+            let metadata = serde_json::to_vec(&json!({
+                "path": stored_path, "owner": "demo", "kind": "sqlite", "sync": true,
+            })).unwrap();
+            f.host.writeBytes(&marker, &metadata).unwrap();
+            for suffix in ["", ".operit-storage.json", "-wal", "-shm", "-journal"] {
+                let path = format!("{database}{suffix}");
+                assert!(!PluginStorage::ownsFile(f.host.clone(), &path).unwrap(), "{path}");
+            }
+            assert_eq!(f.host.readBytes(&marker).unwrap(), metadata);
+        }
+        f.host.writeBytes(&marker, b"invalid copied metadata").unwrap();
+        assert!(!PluginStorage::ownsFile(f.host.clone(), &database).unwrap());
+        assert!(!PluginStorage::ownsFile(f.host.clone(), &marker).unwrap());
+        assert_eq!(f.host.readBytes(&marker).unwrap(), b"invalid copied metadata");
+    }
+    f.dispose();
+}
+
+/// A malformed live registration still fails closed with actionable paths.
+#[test]
+fn active_marker_mismatch_remains_an_error_with_the_storage_paths() {
+    let f = Fixture::new("first");
+    f.open("objects");
+    let marker = format!("{}.operit-storage.json", f.path);
+    let old_path = "runtime/plugin_data/space/other/old.sqlite";
+    let mut metadata: serde_json::Value = serde_json::from_slice(&f.host.readBytes(&marker).unwrap()).unwrap();
+    metadata["path"] = json!(old_path);
+    f.host.writeBytes(&marker, &serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let error = PluginStorage::ownsFile(f.host.clone(), &f.path).unwrap_err().to_string();
+    assert!(error.contains("Storage marker identity mismatch"));
+    for path in [&marker, &f.path, old_path] { assert!(error.contains(path), "{error}"); }
+    f.dispose();
+}
+
 /// Ensures database bytes and sidecars never enter automatic whole-file change capture.
 #[test]
 fn file_sync_excludes_database_and_sidecars_but_keeps_ordinary_files() {
@@ -579,6 +625,7 @@ fn file_sync_excludes_database_and_sidecars_but_keeps_ordinary_files() {
     f.call(json!({"op":"close","handle":handle})).unwrap();
     PluginStorage::unregisterDatabase(f.host.clone(), &f.path).unwrap();
     assert!(f.export().is_empty());
+    drop(files);
     f.dispose();
 }
 
@@ -1630,6 +1677,7 @@ fn unavailable_database_does_not_block_healthy_database_export() {
     )
     .unwrap();
     let brokenPath = format!("{}/broken.sqlite", source.roots[0]);
+    SqliteStore::openWithHost(source.host.clone(), &brokenPath).unwrap().executeBatch("CREATE TABLE unrelated(id INTEGER)").unwrap();
     catalog.execute("INSERT INTO plugin_databases(path,owner,kind,sync,merge) VALUES(?1,'storage_test','objects',1,NULL)", vec![operit_host_api::SqliteValue::Text(brokenPath.clone())]).unwrap();
     let (operations, errors) = PluginStorage::exportWithBudget(
         source.host.clone(),
@@ -1808,7 +1856,7 @@ fn snapshot_correction_preserves_plugin_scope_versions_and_uncovered_late_rows()
     let authoritative = PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap();
     assert_eq!(PluginStorage::syncCoverage(source.host.clone(), &source.path).unwrap(), authoritative.covered);
     let capture = PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap();
-    assert!(PluginStorage::repairSyncedSnapshot(target.host.clone(), &capture.token().unwrap(), &authoritative, target.device).unwrap());
+    assert!(target.repair(&source, &capture.token().unwrap(), &authoritative).unwrap());
     assert_eq!(PluginStorage::syncCoverage(target.host.clone(), &target.path).unwrap(), PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap().covered);
     assert_eq!(PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap().data, authoritative.data);
     target.call(json!({"op":"close","handle":target_handle})).unwrap();
@@ -1829,6 +1877,7 @@ fn snapshot_correction_preserves_plugin_scope_versions_and_uncovered_late_rows()
     source.replay(&late);
     assert_eq!(PluginStorage::syncSnapshot(reopened, &target.path, target.device).unwrap().data,
         PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap().data);
+    drop((authoritative, capture));
     author.dispose();source.dispose();target.dispose();delayed.dispose();
 }
 
@@ -1855,56 +1904,105 @@ fn same_author_sql_changes_follow_sequence_when_its_clock_moves_backwards() {
     source.dispose();
 }
 
+/// Complete recovery replaces absent, extra-table and incompatible-column schemas and forwards the same baseline.
 #[test]
-fn complete_file_correction_provisions_missing_plugin_databases_without_business_history() {
-    for kind in ["objects", "sqlite"] {
-        let source = Fixture::new("source");
-        source.open(kind);
-        assert!(source.export().is_empty());
-        let target = Fixture::new("target");
-        assert!(PluginStorage::syncDatasetPaths(target.host.clone()).unwrap().is_empty());
-        let file = PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap();
-        let definition = PluginStorage::snapshotDefinition(source.host.clone(), &source.path).unwrap();
-        PluginStorage::installSnapshotDefinition(target.host.clone(), target.host.clone(), &target.path, definition).unwrap();
-        assert!(PluginStorage::repairSyncedSnapshot(target.host.clone(), "", &file, target.device).unwrap());
-        assert!(!PluginStorage::repairSyncedSnapshot(target.host.clone(), "", &file, target.device).unwrap());
-        assert_eq!(PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap().data, file.data);
-        assert_eq!(PluginStorage::syncDatasetPaths(target.host.clone()).unwrap(), vec![target.path.clone()]);
-        let initialized = target.export();
-        assert_eq!(initialized.len(),1);
-        assert!(operit_store::Transaction::compaction::Initialization::decode(&initialized[0]).unwrap().is_some());
-        let handle = target.open(kind);
-        if kind == "objects" {
-            target.call(json!({"op":"commit","handle":handle,"mutations":[put("new",json!("after baseline"))]})).unwrap();
-            source.replay(&target.export());
-            let handle = source.open(kind);
-            assert_eq!(source.get(&handle,"new")["value"], "after baseline");
-        } else {
-            target.call(json!({"op":"define_table","handle":handle,"table":table()})).unwrap();
-            target.call(json!({"op":"execute","handle":handle,"statement":{"sql":"INSERT INTO records VALUES('new',7,NULL)","params":[]}})).unwrap();
-            source.replay(&target.export());
-            assert_eq!(PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap().data,
-                PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap().data);
+fn complete_file_correction_restores_plugin_schema_and_history() {
+    for (kind, populated) in [("objects", false), ("sqlite", false), ("sqlite", true)] {
+        for existing in ["absent", "empty", "extra", "columns"] {
+            let source = Fixture::new("source"); let handle = source.open(kind);
+            assert!(source.export().is_empty());
+            if populated {
+                let mut initial = table(); initial["columns"].as_array_mut().unwrap().pop();
+                source.call(json!({"op":"define_table","handle":handle,"table":initial})).unwrap();
+                let mut interleaved = table(); interleaved["columns"].as_array_mut().unwrap().swap(1, 2);
+                source.call(json!({"op":"define_table","handle":handle,"table":interleaved})).unwrap();
+                source.call(json!({"op":"execute","handle":handle,"statement":{"sql":"INSERT INTO records VALUES('one',9,X'00ff')","params":[]}})).unwrap();
+            }
+            let target = Fixture::new("target");
+            if existing != "absent" {
+                let handle = target.open(kind);
+                if kind == "sqlite" && existing != "empty" {
+                    let mut old = table(); old["columns"].as_array_mut().unwrap().pop();
+                    target.call(json!({"op":"define_table","handle":handle,"table":old})).unwrap();
+                    if existing == "extra" {
+                        old["name"] = json!("extra");
+                        target.call(json!({"op":"define_table","handle":handle,"table":old})).unwrap();
+                    }
+                }
+            }
+            let file = PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap();
+            let history = target.export();
+            let capture = if existing != "absent" { PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap().token().unwrap() } else { String::new() };
+            assert!(!target.repair(&source, "stale token", &file).unwrap());
+            if existing != "absent" { assert_eq!(PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap().token().unwrap(), capture); }
+            if populated && existing == "extra" {
+                let definition = PluginStorage::snapshotDefinition(target.host.clone(), &target.path).unwrap();
+                let store = SqliteStore::openWithHost(target.host.clone(), &target.path).unwrap();
+                store.executeBatch("CREATE TRIGGER stop_retirement BEFORE UPDATE OF retired ON _operit_compacted BEGIN SELECT RAISE(ABORT,'injected retirement failure'); END").unwrap();
+                assert!(target.repair(&source, &capture, &file).is_err());
+                assert_eq!(PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap().token().unwrap(), capture);
+                assert_eq!(PluginStorage::snapshotDefinition(target.host.clone(), &target.path).unwrap(), definition);
+                assert_eq!(target.export(), history);
+                store.executeBatch("DROP TRIGGER stop_retirement; UPDATE _operit_log SET payload='{invalid'").unwrap();
+            }
+            assert!(target.repair(&source, &capture, &file).unwrap());
+            assert!(!target.repair(&source, &capture, &file).unwrap());
+            assert_eq!(PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap().data, file.data);
+            let initialized = target.export(); assert_eq!(initialized.len(), 1);
+            assert_eq!(operit_store::Transaction::compaction::Initialization::decode(&initialized[0]).unwrap().unwrap().definition,
+                Some(PluginStorage::snapshotDefinition(source.host.clone(), &source.path).unwrap()));
+            let offline = Fixture::new("offline"); offline.replay(&history); offline.replay(&initialized);
+            offline.replay(&source.export()); target.replay(&source.export());
+            assert_eq!(PluginStorage::syncSnapshot(offline.host.clone(), &offline.path, offline.device).unwrap().data, file.data);
+            drop(file);
+            source.dispose(); target.dispose(); offline.dispose();
         }
-        source.dispose(); target.dispose();
     }
 }
 
+/// Corruption remains capturable for CAS, selects an intact source, and restores without opening a plugin session.
 #[test]
-fn file_correction_copies_sql_schema_rows_and_versions_into_a_missing_database() {
-    let source = Fixture::new("source");
-    let handle = source.open("sqlite");
-    source.call(json!({"op":"define_table","handle":handle,"table":table()})).unwrap();
-    source.call(json!({"op":"execute","handle":handle,"statement":{"sql":"INSERT INTO records VALUES('one',9,X'00ff')","params":[]}})).unwrap();
-    let file = PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap();
-    let definition = PluginStorage::snapshotDefinition(source.host.clone(), &source.path).unwrap();
-    let target = Fixture::new("target");
-    PluginStorage::installSnapshotDefinition(target.host.clone(), target.host.clone(), &target.path, definition).unwrap();
-    assert!(PluginStorage::repairSyncedSnapshot(target.host.clone(), "", &file, target.device).unwrap());
-    // Resending all archived originals cannot reapply them over the copied baseline.
-    target.replay(&source.export());
-    assert_eq!(PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap().data, file.data);
-    source.dispose(); target.dispose();
+fn damaged_plugin_structures_accept_complete_correction_and_forward_the_baseline() {
+    for damage in ["missing-internal", "missing-business", "missing-declarations", "wrong-internal", "wrong-business", "invalid-declaration", "invalid-initialization"] {
+        let source = Fixture::new("source"); let handle = source.open("sqlite");
+        source.call(json!({"op":"define_table","handle":handle,"table":table()})).unwrap();
+        source.call(json!({"op":"execute","handle":handle,"statement":{"sql":"INSERT INTO records VALUES('one',9,X'00ff')","params":[]}})).unwrap();
+        let target = Fixture::new("target"); target.replay(&source.export());
+        if damage == "invalid-initialization" {
+            let file = PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap();
+            let capture = PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap();
+            assert!(target.repair(&source, &capture.token().unwrap(), &file).unwrap());
+        }
+        let store = SqliteStore::openWithHost(target.host.clone(), &target.path).unwrap();
+        store.executeBatch(match damage {
+            "missing-internal" => "DROP TABLE _operit_merge_map; DROP TABLE _operit_merge_names",
+            "missing-business" => "DROP TABLE records",
+            "missing-declarations" => "DROP TABLE _operit_tables",
+            "wrong-internal" => "DROP TABLE _operit_merge_map; CREATE TABLE _operit_merge_map(broken TEXT)",
+            "wrong-business" => "DROP TABLE records; CREATE TABLE records(id TEXT PRIMARY KEY)",
+            "invalid-declaration" => "UPDATE _operit_tables SET definition='{invalid'",
+            "invalid-initialization" => "UPDATE _operit_transaction_initialization SET original='{invalid'",
+            _ => unreachable!(),
+        }).unwrap();
+        let capture = PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap();
+        assert_eq!(PluginStorage::snapshotContentSummary(&capture).is_err(), !matches!(damage,"missing-internal"|"invalid-initialization"), "{damage}");
+        assert_eq!(capture.manifest().unwrap().damaged, damage == "invalid-initialization");
+        let file = PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap();
+        assert!(!target.repair(&source, "stale", &file).unwrap(), "{damage}");
+        assert_eq!(PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap(), capture);
+        if damage == "missing-business" {
+            let mut invalid = file.clone(); invalid.data = serde_json::from_slice(&serde_json::to_vec(&invalid.data).unwrap()).unwrap(); invalid.data.values.get_mut("records").unwrap()["columns"] = json!(["invalid"]);
+            assert!(target.repair(&source, &capture.token().unwrap(), &invalid).is_err());
+            assert_eq!(PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap(), capture);
+        }
+        assert!(target.repair(&source, &capture.token().unwrap(), &file).unwrap(), "{damage}");
+        let restored = PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap();
+        assert_eq!(restored.data, file.data, "{damage}");
+        assert!(PluginStorage::snapshotContentSummary(&restored).is_ok());
+        let offline = Fixture::new("offline"); offline.replay(&target.export());
+        assert_eq!(PluginStorage::syncSnapshot(offline.host.clone(), &offline.path, offline.device).unwrap().data, file.data);
+        drop((store, capture, file, restored)); source.dispose(); target.dispose(); offline.dispose();
+    }
 }
 
 #[test]
@@ -1919,12 +2017,10 @@ fn covered_character_history_cannot_rekey_the_copied_file_through_merge_rules() 
     let mut file = PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap();
     file.covered.extend(covered.iter().map(|op|op.opId.clone()));
     let target = Fixture::new("target");
-    PluginStorage::installSnapshotDefinition(target.host.clone(), target.host.clone(), &target.path,
-        PluginStorage::snapshotDefinition(source.host.clone(), &source.path).unwrap()).unwrap();
-    let capture = PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap();
-    assert!(PluginStorage::repairSyncedSnapshot(target.host.clone(), &capture.token().unwrap(), &file, target.device).unwrap());
+    assert!(target.repair(&source, "", &file).unwrap());
     target.replay(&covered);
     assert_eq!(PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap().data, file.data);
+    drop(file);
     old.dispose(); source.dispose(); target.dispose();
 }
 
@@ -1936,26 +2032,28 @@ fn incremental_object_merge_bookkeeping_does_not_require_a_full_snapshot() {
     seed_object_card(&source, &handle, "same-card", "Card", "same content");
     let target = Fixture::new("digest-target");
     target.replay(&source.export());
-    let a = PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap();
-    let b = PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap();
+    let mut a = PluginStorage::syncSnapshot(source.host.clone(), &source.path, source.device).unwrap();
+    let mut b = PluginStorage::syncSnapshot(target.host.clone(), &target.path, target.device).unwrap();
+    a.data=serde_json::from_slice(&serde_json::to_vec(&a.data).unwrap()).unwrap();
+    b.data=serde_json::from_slice(&serde_json::to_vec(&b.data).unwrap()).unwrap();
     assert_eq!(a.data.revision, b.data.revision);
     assert_ne!(a.data.values["_operit_merge_map"], b.data.values["_operit_merge_map"]);
-    assert_eq!(PluginStorage::snapshotContentDigest(&a).unwrap(), PluginStorage::snapshotContentDigest(&b).unwrap());
+    assert_eq!(PluginStorage::snapshotContentSummary(&a).unwrap(), PluginStorage::snapshotContentSummary(&b).unwrap());
     let mut local_cas = b.clone();
     let values = local_cas.data.values.get_mut("_operit_values").unwrap();
     let version = values["columns"].as_array().unwrap().iter().position(|column| column == "version").unwrap();
     values["rows"][0][version] = json!({"Text":"another-local-cas-token"});
-    assert_eq!(PluginStorage::snapshotContentDigest(&a).unwrap(), PluginStorage::snapshotContentDigest(&local_cas).unwrap());
+    assert_eq!(PluginStorage::snapshotContentSummary(&a).unwrap(), PluginStorage::snapshotContentSummary(&local_cas).unwrap());
     assert_ne!(b.token().unwrap(), local_cas.token().unwrap());
     let map = local_cas.data.values.get_mut("_operit_merge_map").unwrap();
     let canonical = map["columns"].as_array().unwrap().iter().position(|column| column == "canonical_key").unwrap();
     map["rows"][0][canonical] = json!({"Text":"different-canonical-card"});
-    assert_ne!(PluginStorage::snapshotContentDigest(&a).unwrap(), PluginStorage::snapshotContentDigest(&local_cas).unwrap());
+    assert_ne!(PluginStorage::snapshotContentSummary(&a).unwrap(), PluginStorage::snapshotContentSummary(&local_cas).unwrap());
     let mut changed = b.clone();
     let values = changed.data.values.get_mut("_operit_values").unwrap();
     let value = values["columns"].as_array().unwrap().iter().position(|column| column == "value").unwrap();
     values["rows"][0][value] = json!({"Text":"changed business content"});
-    assert_ne!(PluginStorage::snapshotContentDigest(&a).unwrap(), PluginStorage::snapshotContentDigest(&changed).unwrap());
+    assert_ne!(PluginStorage::snapshotContentSummary(&a).unwrap(), PluginStorage::snapshotContentSummary(&changed).unwrap());
     source.dispose(); target.dispose();
 }
 
@@ -1975,7 +2073,7 @@ fn corrected_plugin_logs_collapse_on_both_peers_and_initialize_an_offline_peer()
     let b = PluginStorage::syncSnapshot(target.host.clone(),&target.path,target.device).unwrap();
     let mut authority = a.clone(); authority.covered.extend(b.covered.iter().cloned());
     for (f,snapshot) in [(&source,&a),(&target,&b)] {
-        assert!(PluginStorage::repairSyncedSnapshot(f.host.clone(),&snapshot.token().unwrap(),&authority,f.device).unwrap());
+        assert!(f.repair(&source,&snapshot.token().unwrap(),&authority).unwrap());
         let retained = f.export();
         assert_eq!(retained.len(),1);
         assert!(operit_store::Transaction::compaction::Initialization::decode(&retained[0]).unwrap().is_some());
@@ -1995,30 +2093,8 @@ fn corrected_plugin_logs_collapse_on_both_peers_and_initialize_an_offline_peer()
     assert_eq!(PluginStorage::syncSnapshot(empty.host.clone(),&empty.path,empty.device).unwrap().data,authority.data);
     let (receipt,errors) = PluginStorage::receipt(source.host.clone()).unwrap(); assert!(errors.is_empty());
     assert!(PluginStorage::operationsSince(source.host.clone(),&receipt,&[],100).unwrap().is_empty());
+    drop((a, b, authority));
     source.dispose(); target.dispose(); offline.dispose(); empty.dispose();
-}
-
-#[test]
-fn forced_plugin_recovery_rolls_back_as_one_transaction_and_can_discard_a_damaged_log() {
-    use operit_store::SqliteRowGet;
-    let source = Fixture::new("fault-authority"); let sh = source.open("objects");
-    source.call(json!({"op":"commit","handle":sh,"mutations":[put("x",json!("authority"))]})).unwrap();
-    let target = Fixture::new("fault-target"); let th = target.open("objects");
-    target.call(json!({"op":"commit","handle":th,"mutations":[put("x",json!("damaged"))]})).unwrap();
-    let original = PluginStorage::syncSnapshot(target.host.clone(),&target.path,target.device).unwrap();
-    let mut authority = PluginStorage::syncSnapshot(source.host.clone(),&source.path,source.device).unwrap();
-    authority.covered.extend(original.covered.iter().cloned());
-    let store = SqliteStore::openWithHost(target.host.clone(),&target.path).unwrap();
-    store.executeBatch("CREATE TRIGGER stop_retirement BEFORE UPDATE OF retired ON _operit_compacted BEGIN SELECT RAISE(ABORT,'injected retirement failure'); END").unwrap();
-    assert!(PluginStorage::repairSyncedSnapshot(target.host.clone(),&original.token().unwrap(),&authority,target.device).is_err());
-    assert_eq!(PluginStorage::syncSnapshot(target.host.clone(),&target.path,target.device).unwrap(),original);
-    assert_eq!(target.export().len(),1);
-    store.executeBatch("DROP TRIGGER stop_retirement; UPDATE _operit_log SET payload='{invalid'").unwrap();
-    assert!(PluginStorage::repairSyncedSnapshot(target.host.clone(),&original.token().unwrap(),&authority,target.device).unwrap());
-    assert_eq!(PluginStorage::syncSnapshot(target.host.clone(),&target.path,target.device).unwrap().data,authority.data);
-    assert_eq!(store.queryOne("SELECT count(*) FROM _operit_log",vec![]).unwrap().unwrap().get::<_,i64>(0).unwrap(),0);
-    assert_eq!(target.export().len(),1);
-    source.dispose(); target.dispose();
 }
 
 #[test]
@@ -2048,5 +2124,59 @@ fn opening_a_legacy_plugin_log_backfills_the_index_and_physically_compacts_old_p
     assert_eq!(f.get(&reopened,"x")["value"],json!(19));
     f.call(json!({"op":"commit","handle":reopened,"mutations":[put("x",json!(20))]})).unwrap();
     assert!(f.export()[0].sequence > 20);
+    drop(store);
     f.dispose();
+}
+
+/// A re-sealed checkpoint only ships when the receiver cannot rebuild it from records.
+#[test]
+fn initialization_export_waits_for_history_the_peer_cannot_rebuild() {
+    use operit_store::SyncOperationStore::SyncReceipt;
+    let source = Fixture::new("init-source");
+    let handle = source.open("objects");
+    source.call(json!({"op":"commit","handle":handle,"mutations":[put("a",json!(1))]})).unwrap();
+    source.call(json!({"op":"commit","handle":handle,"mutations":[put("b",json!(2))]})).unwrap();
+    let records = source.export();
+    assert_eq!(records.len(),2);
+
+    // Sealing replaces the record history with a checkpoint whose identity is
+    // the digest of its complete payload, so every future seal rotates it.
+    let seal = |fixture:&Fixture| {
+        let snapshot = PluginStorage::syncSnapshot(fixture.host.clone(), &fixture.path, fixture.device).unwrap();
+        let definition = PluginStorage::snapshotDefinition(fixture.host.clone(), &fixture.path).unwrap();
+        let token = snapshot.token().unwrap();
+        assert!(PluginStorage::repairSyncedSnapshot(fixture.host.clone(), &token, &snapshot, fixture.device, &definition).unwrap());
+    };
+    seal(&source);
+    let checkpoint = |export:&[SyncOperation]| export.iter().find(|op|op.originDeviceId.starts_with("~init:"))
+        .expect("missing checkpoint").clone();
+
+    // A peer that already covered the whole sealed history rebuilds every seal
+    // from records; re-shipping the checkpoint would repeat the full database.
+    let covering = Fixture::new("init-covering");
+    covering.replay(&records);
+    let clock = PluginStorage::receipt(covering.host.clone()).unwrap().0;
+    let (operations,errors) = PluginStorage::exportWithBudget(source.host.clone(), &clock, &[], 100, 1_000_000).unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(operations.is_empty(), "re-exported to a covering peer: {}", operations.len());
+
+    // Rotating the checkpoint identity without new history stays suppressed.
+    seal(&source);
+    let (operations,errors) = PluginStorage::exportWithBudget(source.host.clone(), &clock, &[], 100, 1_000_000).unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(operations.is_empty(), "identity rotation re-shipped the checkpoint");
+
+    // A receiver missing a sealed original cannot rebuild it and needs the checkpoint.
+    let mut gapped = SyncReceipt::default();
+    gapped.observe(&records[0].originDeviceId, records[0].sequence);
+    let (operations,errors) = PluginStorage::exportWithBudget(source.host.clone(), &gapped, &[], 100, 1_000_000).unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    checkpoint(&operations);
+
+    // Bootstrap receivers still receive the checkpoint.
+    let (operations,errors) = PluginStorage::exportWithBudget(source.host.clone(), &SyncReceipt::default(), &[], 100, 1_000_000).unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    checkpoint(&operations);
+    source.dispose();
+    covering.dispose();
 }

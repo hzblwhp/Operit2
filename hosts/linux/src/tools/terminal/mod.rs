@@ -430,6 +430,23 @@ impl TerminalHost for LinuxTerminalHost {
         })
     }
 
+    fn closeSessionIfIdle(&self, sessionId: &str, sessionName: &str) -> HostResult<TerminalCloseOutput> {
+        let id = nonBlank(sessionId, "session_id")?;
+        let name = nonBlank(sessionName, "session_name")?;
+        let mut state = self.lockState()?;
+        let session = state.ptySessions.get(&id)
+            .ok_or_else(|| HostError::new(format!("Terminal session does not exist: {id}")))?;
+        if !operit_host_api::terminalSessionNameMatches(&session.sessionName, &name) {
+            return Err(HostError::new("Terminal session name does not match"));
+        }
+        if session.commandRunning {
+            return Err(HostError::new("Terminal session has a command in progress"));
+        }
+        state.ptySessions.remove(&id);
+        removeSessionMappings(&mut state, &id);
+        Ok(TerminalCloseOutput { sessionId: id.clone(), success: true, message: format!("Idle terminal session closed: {id}") })
+    }
+
     fn getSessionScreen(&self, sessionId: &str) -> HostResult<TerminalScreenOutput> {
         let normalizedSessionId = nonBlank(sessionId, "session_id")?;
         let mut state = self.lockState()?;
@@ -746,14 +763,18 @@ fn executePtyCommandInSession(
     timeoutMs: u64,
     onOutput: &mut dyn FnMut(&[u8]) -> HostResult<()>,
 ) -> HostResult<SessionCommandResult> {
-    let deadline = Instant::now() + Duration::from_millis(timeoutMs);
+    let deadline = (timeoutMs != 0).then(|| Instant::now() + Duration::from_millis(timeoutMs));
     let mut collected = Vec::new();
     let mut promptSeenAt = None;
     let quietPeriod = Duration::from_millis(150);
     loop {
         let previousLength = collected.len();
-        let drained = drainPtyCommandOutput(&output, &mut collected, deadline)?;
+        let waitDeadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_millis(100));
+        let drained = drainPtyCommandOutput(&output, &mut collected, waitDeadline)?;
         onOutput(&collected[previousLength..])?;
+        if timeoutMs == 0 && collected.len() > PTY_OUTPUT_LIMIT {
+            collected.drain(..collected.len() - PTY_OUTPUT_LIMIT);
+        }
         if drained > 0 {
             promptSeenAt = None;
         }
@@ -762,7 +783,7 @@ fn executePtyCommandInSession(
                 promptSeenAt = Some(Instant::now());
             }
             if !promptSeenAt.is_some_and(|seenAt| seenAt.elapsed() >= quietPeriod) {
-                if Instant::now() < deadline {
+                if deadline.map_or(true, |deadline| Instant::now() < deadline) {
                     continue;
                 }
             }
@@ -774,7 +795,7 @@ fn executePtyCommandInSession(
                 workingDir: Some(marker.workingDir),
             });
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let output = ptyCommandOutputText(&collected, command, None);
             return Ok(SessionCommandResult {
                 output,

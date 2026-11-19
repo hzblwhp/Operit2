@@ -38,6 +38,7 @@ Widget buildComposeProgramLayoutForTest({
   required core_proxy.ToolPkgComposeDslTransaction update,
   required ComposeDslWebViewHostContext hostContext,
   required void Function(VoidCallback dispose) registerDispose,
+  ComposeDslWebViewActionDispatcher? onAction,
   void Function(void Function(core_proxy.ToolPkgComposeDslTransaction) apply)?
   registerApply,
 }) {
@@ -59,7 +60,7 @@ Widget buildComposeProgramLayoutForTest({
   );
   return _ComposeProgramExecutor(
     node: store.root,
-    onAction: dispatch,
+    onAction: onAction ?? dispatch,
     onTextInput: (id, text) async => null,
     webViewHostContext: resolvedHost,
     splitMarkdownContent: (_) async => [],
@@ -119,6 +120,20 @@ class _ComposeProgramExecutorState extends State<_ComposeProgramExecutor> {
     final target = _eventTargets[id];
     if (target == null) throw StateError('Unknown Compose event slot: $id');
     return widget.onAction(target, payload);
+  }
+
+  /// Resolves browser callbacks through the dispatcher that defers result delivery.
+  Future<Object?> _dispatchWebViewEvent(String id, [Object? payload]) {
+    if (!id.startsWith('@program:')) {
+      return widget.webViewHostContext.dispatchAction(id, payload);
+    }
+    if (!mounted || node.isDisposed) return Future<Object?>.value();
+    props;
+    final target = _eventTargets[id];
+    if (target == null) throw StateError('Unknown Compose event slot: $id');
+    // RPC results are delivered after the browser receives its response. The
+    // native-control dispatcher also notifies immediately and would attach twice.
+    return widget.webViewHostContext.dispatchAction(target, payload);
   }
 
   /// Binds callback addresses to this Flutter occurrence while sharing all callback-free values.
@@ -437,18 +452,19 @@ class _ComposeProgramExecutorState extends State<_ComposeProgramExecutor> {
         return _dialog(context, type == 'AlertDialog');
       case 'Row':
         final contentNodes = _slotNodes('content', useChildren: true);
+        final arrangement =
+            props['horizontalArrangement'] ?? props['mainAxisAlignment'];
         return _ComposeFlex(
           direction: Axis.horizontal,
           nodes: contentNodes,
-          mainAxisSize: _nodesRequireRowFlex(contentNodes)
+          mainAxisSize:
+              props['mainAxisSize'] == 'max' ||
+                  _nodesRequireRowFlex(contentNodes)
               ? MainAxisSize.max
               : MainAxisSize.min,
           crossAxisAlignment: _crossAxis(props['verticalAlignment']),
-          mainAxisAlignment: _mainAxis(props['horizontalArrangement']),
-          spacing: _flexSpacing(
-            props['horizontalArrangement'],
-            props['spacing'],
-          ),
+          mainAxisAlignment: _mainAxis(arrangement),
+          spacing: _flexSpacing(arrangement, props['spacing']),
           children: _buildRowChildren(
             contentNodes,
             pathPrefix: '$nodePath:content',
@@ -528,6 +544,7 @@ class _ComposeProgramExecutorState extends State<_ComposeProgramExecutor> {
       case 'RichText':
       case 'CodeText':
       case 'Tooltip':
+      case 'CodeEditor':
       case 'ScrollArea':
       case 'MenuAnchor':
       case 'InkWell':
@@ -735,7 +752,7 @@ class _ComposeProgramExecutorState extends State<_ComposeProgramExecutor> {
           ),
           props: props,
           onAction: onAction,
-          hostContext: webViewHostContext.withActionDispatcher(onAction),
+          hostContext: webViewHostContext.withActionDispatcher(_dispatchWebViewEvent),
         );
       case 'Image':
       case 'AsyncImage':

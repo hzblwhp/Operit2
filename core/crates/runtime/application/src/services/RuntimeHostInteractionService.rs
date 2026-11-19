@@ -1074,20 +1074,50 @@ mod runtimeImageBufferTests {
 impl RuntimeImageStream {
     /// Resolves image delivery through the host and bounds byte-stream downloads.
     async fn load(&self) -> Result<RuntimeImageData, String> {
+        if let Some(data) = self.url.strip_prefix("data:") {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            let (metadata, payload) = data.split_once(',').ok_or("Invalid image data URI")?;
+            if !metadata.split(';').any(|part| part == "base64") {
+                return Err("Image data URI must use base64 encoding".to_string());
+            }
+            if payload.len() > (16 * 1024 * 1024 + 2) / 3 * 4 {
+                return Err("Image exceeded 16 MiB size limit".to_string());
+            }
+            let bytes = STANDARD.decode(payload).map_err(|error| error.to_string())?;
+            let mimeType = metadata.split(';').next().ok_or("Image data URI must declare its MIME type")?;
+            if !mimeType.starts_with("image/") {
+                return Err("Image data URI must declare an image MIME type".to_string());
+            }
+            let bytes = match mimeType {
+                "image/heic" | "image/heif" | "image/heic-sequence" | "image/heif-sequence" => {
+                    crate::services::media::images::heif_display_bytes(&bytes)?
+                }
+                _ => bytes,
+            };
+            return Ok(RuntimeImageData {
+                bytes,
+                displayUrl: None,
+                error: None,
+            });
+        }
         let url = url::Url::parse(&self.url).map_err(|error| error.to_string())?;
         if !matches!(url.scheme(), "http" | "https") {
             return Err("Image URL must use HTTP or HTTPS".to_string());
         }
         let host = self.host.clone().ok_or("HTTP host is not registered")?;
+        let requiresDecode = matches!(
+            url.path().rsplit('.').next().map(str::to_ascii_lowercase).as_deref(),
+            Some("heic" | "heif")
+        );
         match host.imageDelivery() {
-            operit_host_api::HttpImageDelivery::DisplayUrl => {
+            operit_host_api::HttpImageDelivery::DisplayUrl if !requiresDecode => {
                 return Ok(RuntimeImageData {
                     bytes: Vec::new(),
                     displayUrl: Some(url.to_string()),
                     error: None,
                 });
             }
-            operit_host_api::HttpImageDelivery::Bytes => {}
+            _ => {}
         }
         let request = RuntimeImageRequest {
             id: format!("markdown-image-{}", Uuid::new_v4()),
@@ -1128,6 +1158,11 @@ impl RuntimeImageStream {
             result = receiver => result.map_err(|error| error.to_string())?,
             _ = timeout => Err("Image download timed out after 30 seconds".to_string()),
         }?;
+        let bytes = if requiresDecode {
+            crate::services::media::images::heif_display_bytes(&bytes)?
+        } else {
+            bytes
+        };
         Ok(RuntimeImageData {
             bytes,
             displayUrl: None,
@@ -1798,6 +1833,7 @@ impl RuntimeHostInteractionBroker {
         }
     }
 
+    /// Retires a pending operation atomically before making its result available.
     fn respond(
         &self,
         requestId: &str,
@@ -1816,6 +1852,7 @@ impl RuntimeHostInteractionBroker {
             ));
         }
         state.responses.insert(requestId.to_string(), response);
+        state.pending.remove(requestId);
         self.notifyChanged();
         Ok(())
     }
@@ -1864,12 +1901,37 @@ impl RuntimeHostInteractionBroker {
 mod tests {
     use super::*;
 
+    /// Verifies a real HEIC image becomes a Flutter-readable, nonempty PNG.
+    #[tokio::test]
+    async fn heifImagesDecodeToPng() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let service = RuntimeHostInteractionService::getInstance(&HostManager::new());
+        let source = include_bytes!("../../tests/fixtures/heif-checker-64.heic");
+        let data = service.imageBytes(format!("data:image/heic;base64,{}", STANDARD.encode(source)))
+            .load().await.expect("decode HEIC fixture through image delivery");
+        let png = data.bytes;
+        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("display bytes must be valid PNG");
+        assert_eq!((image.width(), image.height()), (64, 64));
+        let rgba = image.to_rgba8();
+        assert!(rgba.pixels().any(|pixel| pixel != rgba.get_pixel(0, 0)));
+        let unchanged = service.imageBytes(format!("data:image/png;base64,{}", STANDARD.encode(&png)))
+            .load().await.expect("read ordinary PNG");
+        assert_eq!(unchanged.bytes, png);
+        let mut invalid = source.to_vec();
+        invalid.truncate(32);
+        assert!(crate::services::media::images::heif_display_bytes(&invalid).is_err());
+    }
+
     /// Verifies image and audio/video pool entries are returned by pool id.
     #[test]
     fn mediaPoolDataIsReadByIdWithTypeValidation() {
         let service = RuntimeHostInteractionService::getInstance(&HostManager::new());
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png).unwrap();
         let imageId = ImagePoolManager::add_image_bytes(
-            b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01",
+            png.get_ref(),
             Some("image/png"),
             None,
         );
@@ -1900,9 +1962,50 @@ mod tests {
         MediaPoolManager::remove_media(&audioId);
         MediaPoolManager::remove_media(&videoId);
         MediaPoolManager::remove_media(&invalidAudioId);
+        ImagePoolManager::remove_image(&imageId);
     }
 
 
+
+    /// Verifies reconnects cannot replay an answered operation before its waiter resumes.
+    #[test]
+    fn brokerRetiresRespondedRequestsBeforeReplay() {
+        let broker = RuntimeHostInteractionBroker::default();
+        let request = RuntimeHostInteractionRequest::fileOpen(
+            RuntimeHostInteractionFileOpenPayload {
+                path: "/tmp/file".to_string(),
+            },
+        );
+        let requestId = request.requestId.clone();
+        broker.state.lock().unwrap().pending.insert(
+            requestId.clone(),
+            RuntimeHostInteractionPending {
+                target: RuntimeHostInteractionTarget::OwnerHost,
+                request,
+                sequence: 0,
+                awaitsResponse: true,
+            },
+        );
+        let mut response = RuntimeHostInteractionResponse::empty();
+        response.error = Some("native open failed".to_string());
+
+        broker.respond(&requestId, response).unwrap();
+
+        {
+            let state = broker.state.lock().unwrap();
+            assert!(!state.pending.contains_key(&requestId));
+            assert_eq!(
+                state.responses[&requestId].error.as_deref(),
+                Some("native open failed"),
+            );
+        }
+        assert_eq!(
+            broker
+                .respond(&requestId, RuntimeHostInteractionResponse::empty())
+                .unwrap_err(),
+            format!("host interaction request not found: {requestId}"),
+        );
+    }
 
     /// Verifies that a structured owner error returns without waiting for timeout.
     #[test]

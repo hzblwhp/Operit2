@@ -10,11 +10,14 @@ pub type AndroidSystemSettingReader =
     Arc<dyn Fn(&str, &str) -> HostResult<SystemSettingData> + Send + Sync>;
 pub type AndroidSystemSettingWriter =
     Arc<dyn Fn(&str, &str, &str) -> HostResult<SystemSettingData> + Send + Sync>;
+pub type AndroidPackageOperation =
+    Arc<dyn Fn(&str, serde_json::Value) -> HostResult<serde_json::Value> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AndroidSystemOperationHost {
     settingReader: AndroidSystemSettingReader,
     settingWriter: AndroidSystemSettingWriter,
+    packageOperation: AndroidPackageOperation,
     language: Option<String>,
 }
 
@@ -23,10 +26,12 @@ impl AndroidSystemOperationHost {
     pub fn new(
         settingReader: AndroidSystemSettingReader,
         settingWriter: AndroidSystemSettingWriter,
+        packageOperation: AndroidPackageOperation,
     ) -> Self {
         Self {
             settingReader,
             settingWriter,
+            packageOperation,
             language: None,
         }
     }
@@ -36,16 +41,65 @@ impl AndroidSystemOperationHost {
         language: String,
         settingReader: AndroidSystemSettingReader,
         settingWriter: AndroidSystemSettingWriter,
+        packageOperation: AndroidPackageOperation,
     ) -> Self {
         Self {
             settingReader,
             settingWriter,
+            packageOperation,
             language: Some(language),
         }
+    }
+
+    fn packageRequest<T: serde::de::DeserializeOwned>(
+        &self,
+        operation: &str,
+        params: serde_json::Value,
+    ) -> HostResult<T> {
+        let response = (self.packageOperation)(operation, params)?;
+        serde_json::from_value(response).map_err(|error| {
+            HostError::new(format!("Android {operation} response invalid: {error}"))
+        })
     }
 }
 
 impl SystemOperationHost for AndroidSystemOperationHost {
+    /// Transforms APK entries with the standard zlib codec owned by the Android Host.
+    fn transformApplicationUpdate(
+        &self,
+        source: &dyn operit_host_api::FileSource,
+        target: &dyn operit_host_api::FileTarget,
+        transform: operit_host_api::ApplicationUpdateTransform,
+        control: &operit_host_api::HttpDownloadControl,
+    ) -> HostResult<()> {
+        crate::update_apk::transform(source, target, transform, control)
+            .map_err(|error| HostError::new(error.to_string()))
+    }
+    /// Reads the package owner identity through the existing Android interaction channel.
+    fn applicationUpdateBase(&self) -> HostResult<operit_host_api::ApplicationUpdateBase> {
+        #[derive(serde::Deserialize)]
+        struct Base { path: Option<String> }
+        let base: Base = self.packageRequest("application_update_base", serde_json::json!({}))?;
+        Ok(match base.path {
+            Some(path) => operit_host_api::ApplicationUpdateBase::InstalledPackage(Box::new(crate::update_base::InstalledApk(path.into()))),
+            None => operit_host_api::ApplicationUpdateBase::Unavailable,
+        })
+    }
+    /// Selects the APK matching the runtime's Android ABI.
+    fn applicationUpdateTarget(
+        &self,
+    ) -> HostResult<Option<operit_host_api::ApplicationUpdateTarget>> {
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "arm64-v8a",
+            "arm" => "armeabi-v7a",
+            arch => arch,
+        };
+        Ok(Some(operit_host_api::ApplicationUpdateTarget {
+            installTiming: operit_host_api::AppInstallTiming::Immediate,
+            arch: arch.into(),
+            package: operit_host_api::ApplicationUpdatePackage::AndroidApk,
+        }))
+    }
     /// Reads the system language directly from the Android runtime host.
     fn getSystemLanguageCode(&self) -> HostResult<String> {
         if let Some(language) = &self.language {
@@ -83,34 +137,44 @@ impl SystemOperationHost for AndroidSystemOperationHost {
         (self.settingReader)(namespace, setting)
     }
 
-    fn installApp(&self, path: &str) -> HostResult<AppOperationData> {
-        Err(HostError::new(format!(
-            "Android install_app requires the Android package host bridge: {path}"
-        )))
+    /// Installs a VFS file reference using the requested platform execution timing.
+    fn installApp(&self, source: &dyn operit_host_api::FileSource, timing: operit_host_api::AppInstallTiming) -> HostResult<AppOperationData> {
+        timing.requireImmediate()?;
+        let path = source.nativePath()?;
+        self.packageRequest("install_app", serde_json::json!({"path": path}))
     }
 
     fn uninstallApp(&self, packageName: &str) -> HostResult<AppOperationData> {
-        Err(HostError::new(format!(
-            "Android uninstall_app requires the Android package host bridge: {packageName}"
-        )))
+        self.packageRequest(
+            "uninstall_app",
+            serde_json::json!({"packageName": packageName}),
+        )
     }
 
     fn listInstalledApps(&self, includeSystemApps: bool) -> HostResult<AppListData> {
-        Err(HostError::new(format!(
-            "Android list_installed_apps requires the Android package host bridge, include_system_apps={includeSystemApps}"
-        )))
+        self.packageRequest(
+            "list_installed_apps",
+            serde_json::json!({"includeSystemApps": includeSystemApps}),
+        )
     }
 
     fn startApp(&self, packageName: &str) -> HostResult<AppOperationData> {
-        Err(HostError::new(format!(
-            "Android start_app requires the Android package host bridge: {packageName}"
-        )))
+        self.startAppWithActivity(packageName, None)
+    }
+
+    fn startAppWithActivity(
+        &self,
+        packageName: &str,
+        activity: Option<&str>,
+    ) -> HostResult<AppOperationData> {
+        self.packageRequest(
+            "start_app",
+            serde_json::json!({"packageName": packageName, "activity": activity}),
+        )
     }
 
     fn stopApp(&self, packageName: &str) -> HostResult<AppOperationData> {
-        Err(HostError::new(format!(
-            "Android stop_app requires the Android package host bridge: {packageName}"
-        )))
+        self.packageRequest("stop_app", serde_json::json!({"packageName": packageName}))
     }
 
     fn getNotifications(&self, limit: i32, includeOngoing: bool) -> HostResult<NotificationData> {
@@ -126,9 +190,7 @@ impl SystemOperationHost for AndroidSystemOperationHost {
         limit: i32,
         includeSystemApps: bool,
     ) -> HostResult<AppUsageTimeResultData> {
-        Err(HostError::new(format!(
-            "Android get_app_usage_time requires the Android usage stats host bridge: package={packageName}, since_hours={sinceHours}, limit={limit}, include_system_apps={includeSystemApps}"
-        )))
+        self.packageRequest("get_app_usage_time", serde_json::json!({"packageName": packageName, "sinceHours": sinceHours, "limit": limit, "includeSystemApps": includeSystemApps}))
     }
 
     fn getDeviceLocation(
@@ -149,6 +211,15 @@ impl SystemOperationHost for AndroidSystemOperationHost {
         ))
     }
 
+    /// Writes image bytes through the selected VFS capability and removes native staging.
+    fn captureScreenshotTo(&self, target: &dyn operit_host_api::FileTarget) -> HostResult<()> {
+        let path = self.captureScreenshot()?;
+        let bytes = std::fs::read(&path).map_err(|error| operit_host_api::HostError::new(error.to_string()))?;
+        let written = target.writeBytes(&bytes);
+        std::fs::remove_file(&path).map_err(|error| operit_host_api::HostError::new(error.to_string()))?;
+        written
+    }
+
     fn captureScreenshot(&self) -> HostResult<String> {
         Err(HostError::new(
             "Android capture_screenshot requires the Android screen capture host bridge",
@@ -157,14 +228,89 @@ impl SystemOperationHost for AndroidSystemOperationHost {
 
     fn recognizeText(
         &self,
-        imagePath: &str,
+        imagePath: &dyn operit_host_api::FileSource,
         language: OCRLanguage,
         quality: OCRQuality,
     ) -> HostResult<String> {
         Err(HostError::new(format!(
-            "Android OCR requires the Android OCR host bridge: path={imagePath}, language={}, quality={}",
+            "Android OCR requires the Android OCR host bridge: path={}, language={}, quality={}",
+            imagePath.vfsPath(),
             language.asHostValue(),
             quality.asHostValue()
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn package_operations_forward_arguments_and_decode_responses() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let host = AndroidSystemOperationHost::new(
+            Arc::new(|_, _| Err(HostError::new("unused"))),
+            Arc::new(|_, _, _| Err(HostError::new("unused"))),
+            Arc::new(move |operation, params| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((operation.to_string(), params));
+                Ok(match operation {
+                    "list_installed_apps" => {
+                        serde_json::json!({"includesSystemApps": true, "packages": ["app.example"]})
+                    }
+                    "get_app_usage_time" => {
+                        serde_json::json!({"startTime": 1, "endTime": 2, "sinceHours": 3, "requestedPackageName": null, "includesSystemApps": false, "totalEntries": 0, "entries": []})
+                    }
+                    _ => {
+                        serde_json::json!({"operationType": operation, "packageName": "app.example", "success": true, "details": "requested"})
+                    }
+                })
+            }),
+        );
+        struct PackageSource;
+        impl operit_host_api::FileSource for PackageSource {
+            /// Identifies the package in its owning VFS.
+            fn vfsPath(&self) -> &str { "/operitapp/data/example.apk" }
+            /// Rejects file reads outside the package forwarding test.
+            fn readBytes(&self) -> HostResult<Vec<u8>> { unreachable!() }
+            /// Rejects ranged reads outside the package forwarding test.
+            fn readBytesRange(&self, _: u64, _: usize) -> HostResult<Vec<u8>> { unreachable!() }
+            /// Rejects metadata reads outside the package forwarding test.
+            fn fileInfo(&self) -> HostResult<operit_host_api::FileInfo> { unreachable!() }
+            /// Supplies the native file only when the Android provider consumes the reference.
+            fn nativePath(&self) -> HostResult<String> { Ok("/tmp/example.apk".into()) }
+        }
+        host.installApp(&PackageSource, operit_host_api::AppInstallTiming::Immediate).unwrap();
+        assert!(host.installApp(&PackageSource, operit_host_api::AppInstallTiming::AfterProcessExit).is_err());
+        host.uninstallApp("app.example").unwrap();
+        assert_eq!(
+            host.listInstalledApps(true).unwrap().packages,
+            ["app.example"]
+        );
+        host.startAppWithActivity("app.example", Some(".MainActivity"))
+            .unwrap();
+        host.stopApp("app.example").unwrap();
+        assert_eq!(
+            host.getAppUsageTime("", 3, 10, false).unwrap().totalEntries,
+            0
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 6);
+        assert_eq!(calls[3].1["activity"], ".MainActivity");
+        assert_eq!(calls[5].1["sinceHours"], 3);
+    }
+
+    #[test]
+    fn malformed_package_response_is_an_error() {
+        let host = AndroidSystemOperationHost::new(
+            Arc::new(|_, _| Err(HostError::new("unused"))),
+            Arc::new(|_, _, _| Err(HostError::new("unused"))),
+            Arc::new(|_, _| Ok(serde_json::json!({}))),
+        );
+        assert!(host.startApp("app.example").is_err());
     }
 }

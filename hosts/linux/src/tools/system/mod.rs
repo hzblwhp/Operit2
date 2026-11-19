@@ -1,3 +1,4 @@
+mod packages;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -6,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, path::PathBuf};
 
 use operit_host_api::{
-    AppListData, AppOperationData, AppUsageTimeEntry, AppUsageTimeResultData, DeviceInfoData,
+    AppListData, AppOperationData, AppUsageTimeResultData, DeviceInfoData,
     HostError, HostResult, LocationData, NotificationData, NotificationEntry, OCRLanguage,
     OCRQuality, SystemNotificationRequest, SystemOperationHost, SystemSettingData,
 };
@@ -24,6 +25,19 @@ impl LinuxSystemOperationHost {
 }
 
 impl SystemOperationHost for LinuxSystemOperationHost {
+    /// Selects the existing Linux portable application package.
+    fn applicationUpdateTarget(
+        &self,
+    ) -> HostResult<Option<operit_host_api::ApplicationUpdateTarget>> {
+        if !std::env::current_exe()?.parent().is_some_and(|parent| parent.join("data/flutter_assets").is_dir()) {
+            return Ok(None);
+        }
+        Ok(Some(operit_host_api::ApplicationUpdateTarget {
+            installTiming: operit_host_api::AppInstallTiming::Immediate,
+            arch: std::env::consts::ARCH.into(),
+            package: operit_host_api::ApplicationUpdatePackage::LinuxTarGz,
+        }))
+    }
     fn getSystemLanguageCode(&self) -> HostResult<String> {
         get_linux_system_language_code()
     }
@@ -70,71 +84,27 @@ impl SystemOperationHost for LinuxSystemOperationHost {
         get_linux_system_setting(namespace, setting)
     }
 
-    fn installApp(&self, path: &str) -> HostResult<AppOperationData> {
-        request_linux_install_app(path)
+    /// Installs a VFS file reference using the requested platform execution timing.
+    fn installApp(&self, source: &dyn operit_host_api::FileSource, timing: operit_host_api::AppInstallTiming) -> HostResult<AppOperationData> {
+        timing.requireImmediate()?;
+        let path = source.nativePath()?;
+        packages::install(&path)
     }
 
     fn uninstallApp(&self, packageName: &str) -> HostResult<AppOperationData> {
-        request_linux_uninstall_app(packageName)
+        packages::uninstall(packageName)
     }
 
     fn listInstalledApps(&self, includeSystemApps: bool) -> HostResult<AppListData> {
-        let mut packages = Vec::new();
-        let applicationsDir = Path::new("/usr/share/applications");
-        for entry in fs::read_dir(applicationsDir).map_err(|error| {
-            HostError::new(format!("Failed to list desktop applications: {error}"))
-        })? {
-            let entry = entry.map_err(|error| {
-                HostError::new(format!("Failed to read desktop entry: {error}"))
-            })?;
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("desktop") {
-                continue;
-            }
-            let content = fs::read_to_string(&path).map_err(|error| {
-                HostError::new(format!("Failed to read {}: {error}", path.display()))
-            })?;
-            if let Some(name) = parseDesktopName(&content) {
-                packages.push(name);
-            }
-        }
-        packages.sort();
-        packages.dedup();
-        Ok(AppListData {
-            includesSystemApps: includeSystemApps,
-            packages,
-        })
+        packages::list(includeSystemApps)
     }
 
     fn startApp(&self, packageName: &str) -> HostResult<AppOperationData> {
-        Command::new(packageName)
-            .spawn()
-            .map_err(|error| HostError::new(format!("Error starting app: {error}")))?;
-        Ok(AppOperationData {
-            operationType: "start".to_string(),
-            packageName: packageName.to_string(),
-            success: true,
-            details: "Start request sent".to_string(),
-        })
+        packages::start(packageName)
     }
 
     fn stopApp(&self, packageName: &str) -> HostResult<AppOperationData> {
-        let status = Command::new("pkill")
-            .arg("-f")
-            .arg(packageName)
-            .status()
-            .map_err(|error| HostError::new(format!("Error stopping app: {error}")))?;
-        if !status.success() {
-            return Err(HostError::new(format!(
-                "Error stopping app: pkill exited with {status}"
-            )));
-        }
-        Ok(AppOperationData {
-            operationType: "stop".to_string(),
-            packageName: packageName.to_string(),
-            success: true,
-            details: "Stop request sent".to_string(),
-        })
+        packages::stop(packageName)
     }
 
     fn getNotifications(&self, _limit: i32, _includeOngoing: bool) -> HostResult<NotificationData> {
@@ -164,17 +134,26 @@ impl SystemOperationHost for LinuxSystemOperationHost {
         get_linux_device_info()
     }
 
+    /// Writes image bytes through the selected VFS capability and removes native staging.
+    fn captureScreenshotTo(&self, target: &dyn operit_host_api::FileTarget) -> HostResult<()> {
+        let path = self.captureScreenshot()?;
+        let bytes = std::fs::read(&path).map_err(|error| operit_host_api::HostError::new(error.to_string()))?;
+        let written = target.writeBytes(&bytes);
+        std::fs::remove_file(&path).map_err(|error| operit_host_api::HostError::new(error.to_string()))?;
+        written
+    }
+
     fn captureScreenshot(&self) -> HostResult<String> {
         capture_linux_screenshot()
     }
 
     fn recognizeText(
         &self,
-        imagePath: &str,
+        imagePath: &dyn operit_host_api::FileSource,
         language: OCRLanguage,
         quality: OCRQuality,
     ) -> HostResult<String> {
-        recognize_linux_text(imagePath, language, quality)
+        recognize_linux_text(&imagePath.nativePath()?, language, quality)
     }
 }
 
@@ -458,75 +437,6 @@ fn dunst_data_i64(value: Option<&Value>) -> Option<i64> {
     value.get("data").and_then(Value::as_i64)
 }
 
-fn request_linux_install_app(path: &str) -> HostResult<AppOperationData> {
-    if path.trim().is_empty() {
-        return Err(HostError::new("path is required"));
-    }
-    let path = Path::new(path);
-    if !path.exists() {
-        return Err(HostError::new(format!(
-            "Installer path does not exist: {}",
-            path.display()
-        )));
-    }
-    Command::new("xdg-open")
-        .arg(path)
-        .spawn()
-        .map_err(|error| {
-            HostError::new(format!("Error requesting Linux app installation: {error}"))
-        })?;
-    Ok(AppOperationData {
-        operationType: "install".to_string(),
-        packageName: path.display().to_string(),
-        success: true,
-        details: "Install request opened with xdg-open".to_string(),
-    })
-}
-
-fn request_linux_uninstall_app(packageName: &str) -> HostResult<AppOperationData> {
-    let packageName = packageName.trim();
-    if packageName.is_empty() {
-        return Err(HostError::new("package_name is required"));
-    }
-    if packageName.ends_with(".desktop") {
-        let desktopPath = local_applications_dir()?.join(packageName);
-        if !desktopPath.exists() {
-            return Err(HostError::new(format!(
-                "Local desktop entry does not exist: {}",
-                desktopPath.display()
-            )));
-        }
-        fs::remove_file(&desktopPath).map_err(|error| {
-            HostError::new(format!(
-                "Failed to remove local desktop entry {}: {error}",
-                desktopPath.display()
-            ))
-        })?;
-        return Ok(AppOperationData {
-            operationType: "uninstall".to_string(),
-            packageName: packageName.to_string(),
-            success: true,
-            details: format!("Removed local desktop entry {}", desktopPath.display()),
-        });
-    }
-
-    let status = Command::new("flatpak")
-        .args(["uninstall", "-y", packageName])
-        .status()
-        .map_err(|error| HostError::new(format!("Failed to request Flatpak uninstall: {error}")))?;
-    if !status.success() {
-        return Err(HostError::new(format!(
-            "Flatpak uninstall exited with {status}. Linux host supports uninstall_app for Flatpak app IDs or local .desktop entries."
-        )));
-    }
-    Ok(AppOperationData {
-        operationType: "uninstall".to_string(),
-        packageName: packageName.to_string(),
-        success: true,
-        details: "Flatpak uninstall request completed".to_string(),
-    })
-}
-
 fn modify_linux_system_setting(
     namespace: &str,
     setting: &str,
@@ -599,79 +509,15 @@ fn linux_gsettings_target(setting: &str) -> HostResult<LinuxGSettingsTarget> {
 }
 
 fn get_linux_app_usage_time(
-    packageName: &str,
+    _packageName: &str,
     sinceHours: i32,
     limit: i32,
-    includeSystemApps: bool,
+    _includeSystemApps: bool,
 ) -> HostResult<AppUsageTimeResultData> {
-    if sinceHours <= 0 {
-        return Err(HostError::new("since_hours must be greater than 0"));
+    if sinceHours <= 0 || limit <= 0 {
+        return Err(HostError::new("since_hours and limit must be greater than 0"));
     }
-    if limit <= 0 {
-        return Err(HostError::new("limit must be greater than 0"));
-    }
-    let now = unix_time_millis()?;
-    let startTime = now - i64::from(sinceHours) * 60 * 60 * 1000;
-    let output = Command::new("ps")
-        .args(["-eo", "comm=,etimes=,args="])
-        .output()
-        .map_err(|error| HostError::new(format!("Failed to query Linux processes: {error}")))?;
-    if !output.status.success() {
-        return Err(HostError::new(format!(
-            "Failed to query Linux processes: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let mut entries = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let parts = line.split_whitespace().collect::<Vec<_>>();
-        if parts.len() < 2 {
-            continue;
-        }
-        let commandName = parts[0].to_string();
-        if !packageName.trim().is_empty() && !commandName.contains(packageName.trim()) {
-            continue;
-        }
-        let elapsedSeconds = match parts[1].parse::<i64>() {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let argsText = if parts.len() > 2 {
-            parts[2..].join(" ")
-        } else {
-            commandName.clone()
-        };
-        let isSystemApp = argsText.starts_with("/usr/sbin/")
-            || argsText.starts_with("/sbin/")
-            || argsText.starts_with('[');
-        if !includeSystemApps && isSystemApp {
-            continue;
-        }
-        let elapsedMs = elapsedSeconds.saturating_mul(1000);
-        let windowMs = i64::from(sinceHours) * 60 * 60 * 1000;
-        entries.push(AppUsageTimeEntry {
-            packageName: commandName.clone(),
-            appName: commandName,
-            totalForegroundTimeMs: elapsedMs.min(windowMs),
-            lastTimeUsed: now,
-            isSystemApp,
-        });
-    }
-    entries.sort_by(|left, right| right.totalForegroundTimeMs.cmp(&left.totalForegroundTimeMs));
-    entries.truncate(limit as usize);
-    Ok(AppUsageTimeResultData {
-        startTime,
-        endTime: now,
-        sinceHours,
-        requestedPackageName: if packageName.trim().is_empty() {
-            None
-        } else {
-            Some(packageName.trim().to_string())
-        },
-        includesSystemApps: includeSystemApps,
-        totalEntries: entries.len() as i32,
-        entries,
-    })
+    Err(HostError::new("Linux does not expose historical foreground usage to this host. No usage recorder is configured; process uptime is not foreground usage."))
 }
 
 fn get_linux_device_location(
@@ -918,9 +764,8 @@ fn linux_battery_info() -> HostResult<(i32, bool)> {
             return Ok((level, charging));
         }
     }
-    // Battery-less machines (desktops) expose no Battery entry; report the
-    // same 0/false default as the Windows host instead of failing device info.
-    Ok((0, false))
+    // Unknown/absent batteries must not be presented as an empty battery.
+    Ok((-1, false))
 }
 
 fn linux_network_type() -> HostResult<String> {
@@ -972,15 +817,6 @@ fn format_size(size: u64) -> String {
 }
 
 #[allow(non_snake_case)]
-fn parseDesktopName(content: &str) -> Option<String> {
-    content
-        .lines()
-        .find_map(|line| line.strip_prefix("Name="))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 fn parse_gdbus_double(text: &str, key: &str) -> HostResult<f64> {
     let pattern = format!(r"(?m)^{}=\(<([-+0-9.eE]+)>,\)", regex::escape(key));
     let regex = Regex::new(&pattern)
@@ -1010,11 +846,4 @@ fn unix_time_millis() -> HostResult<i64> {
         .duration_since(UNIX_EPOCH)
         .map_err(|error| HostError::new(format!("System clock is before UNIX_EPOCH: {error}")))?;
     i64::try_from(duration.as_millis()).map_err(|_| HostError::new("Current time is out of range"))
-}
-
-fn local_applications_dir() -> HostResult<PathBuf> {
-    let home = env::var_os("HOME").ok_or_else(|| {
-        HostError::new("HOME is required to resolve the local applications directory")
-    })?;
-    Ok(PathBuf::from(home).join(".local/share/applications"))
 }

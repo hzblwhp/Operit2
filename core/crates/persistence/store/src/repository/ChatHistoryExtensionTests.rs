@@ -39,6 +39,67 @@ fn chatTarget() -> PluginExtensionTarget {
     }
 }
 
+/// Preserves committed WAL rows and revisions in a standalone chat-only SQLite image.
+#[test]
+fn chat_database_snapshot_preserves_revisions_and_restores_without_other_data() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (manager, database) = fixture("daily-chat-backup");
+    database.store().execute(
+        "UPDATE chats SET workspaceId = ?1, pinned = 1 WHERE id = ?2",
+        sqliteParams!["private-workspace", "extensions-chat"],
+    ).unwrap();
+    database.store().executeBatch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE backup_private_data(value TEXT); INSERT INTO backup_private_data VALUES('private-data-before');").unwrap();
+    manager.updateChatTitle("extensions-chat".into(), "Committed in WAL".into()).unwrap();
+    let path = "/operitapp/data/temp/chat-snapshot-test.sqlite";
+    let info = crate::ChatDatabaseSnapshot::create(path, 1234).unwrap().unwrap();
+    assert_eq!((info.createdAt, info.chatCount, info.messageCount), (1234,1,1));
+    let image = crate::SqliteStore::SqliteStore::open(path.into()).unwrap();
+    assert_eq!(image.queryScalar::<String>("SELECT title FROM chats",vec![]).unwrap(), "Committed in WAL");
+    assert_eq!(image.queryScalar::<i64>("SELECT count(*) FROM backup_private_data",vec![]).unwrap(),0);
+    assert_eq!(image.queryScalar::<i64>("SELECT count(*) FROM sync_sql_operations",vec![]).unwrap(),0);
+    assert_eq!(image.queryScalar::<i64>("SELECT count(*) FROM message_variants",vec![]).unwrap(),3);
+    assert!(image.queryOne("SELECT workspaceId FROM chats",vec![]).unwrap().unwrap().get::<_,Option<String>>(0).unwrap().is_none());
+    let bytes = crate::RuntimeStorageHost::defaultRuntimeStorageHost().readBytes("runtime/temp/chat-snapshot-test.sqlite").unwrap();
+    assert!(bytes.starts_with(b"SQLite format 3\0"));
+    assert!(!bytes.windows(b"private-data-before".len()).any(|v|v==b"private-data-before"));
+    drop(image);
+    manager.updateChatTitle("extensions-chat".into(), "After backup".into()).unwrap();
+    let operations = manager.syncStore.operationsSince(&crate::SyncOperationStore::SyncClock::default(),&["chat".into()],100).unwrap();
+    database.store().execute("UPDATE backup_private_data SET value='private-data-now'",vec![]).unwrap();
+    database.chatDao().insertChat(ChatEntity::new("created-after-backup".into(),"New chat".into(),2)).unwrap();
+    database.store().executeBatch("CREATE TRIGGER reject_restore BEFORE INSERT ON chats BEGIN SELECT RAISE(ABORT,'injected restore failure'); END;").unwrap();
+    assert!(crate::ChatDatabaseSnapshot::restore(path).is_err());
+    assert_eq!(database.store().queryScalar::<String>("SELECT title FROM chats WHERE id='extensions-chat'",vec![]).unwrap(), "After backup");
+    assert_eq!(database.store().queryScalar::<i64>("SELECT count(*) FROM chats",vec![]).unwrap(),2);
+    database.store().executeBatch("DROP TRIGGER reject_restore").unwrap();
+    let lease = database.store().beginChatExecution("extensions-chat").unwrap();
+    assert!(crate::ChatDatabaseSnapshot::restore(path).is_err());
+    lease.release().unwrap();
+    crate::ChatDatabaseSnapshot::restore(path).unwrap();
+    assert_eq!(database.store().queryScalar::<i64>("SELECT count(*) FROM chats",vec![]).unwrap(),1);
+    assert_eq!(database.store().queryScalar::<String>("SELECT title FROM chats",vec![]).unwrap(), "Committed in WAL");
+    assert_eq!(database.store().queryScalar::<String>("SELECT value FROM backup_private_data",vec![]).unwrap(),"private-data-now");
+    manager.syncStore.applyOperations(&operations).unwrap();
+    assert_eq!(database.store().queryScalar::<String>("SELECT title FROM chats",vec![]).unwrap(), "Committed in WAL");
+    let variant = database.messageVariantDao().getVariantForMessage("extensions-chat",42,3).unwrap().unwrap();
+    assert_eq!(variant.pluginExtensions["actor"],json!({"revision":3}));
+    manager.deleteChatHistory("extensions-chat".into()).unwrap();
+    assert!(manager.chatIsDeleted("extensions-chat").unwrap());
+    let deletions = manager.syncStore.operationsSince(&crate::SyncOperationStore::SyncClock::default(),&["chat".into()],100).unwrap();
+    crate::ChatDatabaseSnapshot::restore(path).unwrap();
+    manager.syncStore.applyOperations(&deletions).unwrap();
+    assert!(!manager.chatIsDeleted("extensions-chat").unwrap());
+    assert!(manager.chatExists("extensions-chat".into()).unwrap());
+    assert!(crate::CoreNodeBindingStore::CoreNodeBindingStore::default().unwrap().binding("extensions-chat").is_ok());
+    let image = crate::SqliteStore::SqliteStore::open(path.into()).unwrap();
+    image.setUserVersion(crate::db::AppDatabase::DATABASE_VERSION+1).unwrap();
+    assert!(crate::ChatDatabaseSnapshot::restore(path).is_err());
+    assert_eq!(database.store().queryScalar::<String>("SELECT title FROM chats",vec![]).unwrap(), "Committed in WAL");
+    image.setUserVersion(crate::db::AppDatabase::DATABASE_VERSION).unwrap();
+    image.executeBatch("CREATE VIEW untrusted_view AS SELECT * FROM chats").unwrap();
+    assert!(crate::ChatDatabaseSnapshot::restore(path).is_err());
+}
+
 /// Selects an exact persisted message revision without implicit selected-state resolution.
 fn messageTarget(index: i32) -> PluginExtensionTarget {
     PluginExtensionTarget::Message {
@@ -46,6 +107,42 @@ fn messageTarget(index: i32) -> PluginExtensionTarget {
         messageTimestamp: 42,
         variantIndex: index,
     }
+}
+
+/// Verifies complete index coverage, bounded previews and exact positions without hydrating message bodies.
+#[test]
+fn locator_index_covers_full_history_with_bounded_content_and_global_positions() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (manager, _) = fixture("locator-index");
+    for index in 0..200 {
+        let mut message = ChatMessage::new_with_markdown_timestamp(
+            if index % 3 == 0 { "user".into() } else { "ai".into() },
+            format!("message-{index} {} {}", "x".repeat(4096), if index >= 180 { "needle" } else { "ordinary" }),
+            1000 + index,
+        );
+        message.isFavorite = index % 7 == 0;
+        manager.addMessage("extensions-chat".into(), message).unwrap();
+    }
+    let index = manager.loadChatMessageLocatorPreviews("extensions-chat".into(), "".into()).unwrap();
+    assert_eq!(index.len(), 201);
+    assert_eq!(index[0].timestamp, 42);
+    assert_eq!(index.last().unwrap().timestamp, 1199);
+    assert_eq!(index.last().unwrap().messageIndex, Some(200));
+    assert!(index.iter().all(|entry| entry.previewContent.chars().count() <= 48));
+    assert!(index[1..].iter().all(|entry| entry.contentLength > 4096));
+    assert_eq!(index.iter().filter(|entry| entry.isFavorite).count(), 29);
+    assert!(serde_json::to_vec(&index).unwrap().len() < 201 * 512);
+    let matches = manager.loadChatMessageLocatorPreviews("extensions-chat".into(), "needle".into()).unwrap();
+    assert_eq!(matches.len(), 20);
+    assert_eq!(matches[0].messageIndex, Some(181));
+    assert_eq!(matches.last().unwrap().timestamp, 1199);
+    assert!(matches.iter().all(|entry| entry.previewContent.contains("needle")));
+    assert_eq!(manager.loadChatMessageIndexPosition("extensions-chat", 1199).unwrap(), Some(200));
+    assert_eq!(manager.loadChatMessageIndexPosition("extensions-chat", 900).unwrap(), None);
+    assert_eq!(manager.loadChatMessageDepths("extensions-chat", &[1199, 1180, 1199]).unwrap(), [0, 19, 0]);
+    assert!(manager.hasUserMessageAfter("extensions-chat", 1197).unwrap());
+    assert!(!manager.hasUserMessageAfter("extensions-chat", 1198).unwrap());
+    assert!(!manager.hasUserMessageAfter("missing-chat", 0).unwrap());
 }
 
 /// Verifies simultaneous owner updates preserve both namespaces on every real record kind.
@@ -172,7 +269,7 @@ fn promotion_reordering_and_projection_follow_variant_snapshots() {
         .selectMessageVariant("extensions-chat".to_string(), 42, 1)
         .unwrap();
     assert_eq!(
-        manager.loadChatMessages("extensions-chat").unwrap()[0].pluginExtensions,
+        manager.loadChatMessagesRange("extensions-chat".to_string(), "asc".to_string(), 0, 79).unwrap()[0].pluginExtensions,
         promoted
     );
     manager
@@ -201,7 +298,7 @@ fn promotion_reordering_and_projection_follow_variant_snapshots() {
         .selectMessageVariant("extensions-chat".to_string(), 42, 1)
         .unwrap();
     assert_eq!(
-        manager.loadChatMessages("extensions-chat").unwrap()[0].pluginExtensions,
+        manager.loadChatMessagesRange("extensions-chat".to_string(), "asc".to_string(), 0, 79).unwrap()[0].pluginExtensions,
         last
     );
 }
@@ -387,7 +484,7 @@ fn draft_transaction_failure_leaves_no_chat_or_opening_record() {
     assert!(database.chatDao().getChatById(&id).unwrap().is_none());
     assert!(database
         .messageDao()
-        .getMessagesForChat(&id)
+        .getMessagesForChatAsc(&id, 80)
         .unwrap()
         .is_empty());
 }
@@ -556,8 +653,10 @@ fn assistant_presentation_survives_reload_and_final_commit() {
         PRESENTATION_EXTENSION.into(),
         serde_json::to_value(&presentation).unwrap(),
     );
+    message.inputTokens = 10;
+    message.outputTokens = 20;
     manager
-        .commitAssistantMessageSegment("extensions-chat".into(), message, Some((10, 20, 30)))
+        .commitAssistantMessageSegment("extensions-chat".into(), message, Some(30))
         .unwrap();
     let reloaded = manager
         .loadChatMessageVariant("extensions-chat", 42, 0)

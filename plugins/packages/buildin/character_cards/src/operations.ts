@@ -6,7 +6,8 @@ import { parseDomainPayload, resolveChatConfiguration } from "./domain";
 import { combineCharacterPrompt } from "./character-prompt";
 import { listBindableChats } from "./chat-binding-catalog";
 import { parseChatSelection } from "./chat-bindings";
-import { clearFailedCandidates, enqueueCandidate, retryFailedCandidates, startMemoryRebuild } from "./memory-jobs/scheduler";
+import { enqueueCandidate, startMemoryRebuild } from "./memory-jobs/scheduler";
+import { memoryJobProducer } from "./memory-jobs/producer";
 import { listMemoryChats, pruneMissingMemoryChats, requireChat } from "./memory-jobs/chat";
 import type { CharacterRepository } from "./canonical";
 import type { Card, Group, GroupValues, Memory, MemoryGraphResult, MemoryOwner, MemorySearchOptions, MemorySettings, MemorySearchConfig, Request, RequestOutput, Snapshot, Store, StoreValues, Tag, TagChanges, TagEdit, TagValues, MemoryLink } from "./model";
@@ -17,6 +18,7 @@ import { independentConfigurations } from "./selection-settings";
 import { uuid } from "./identity";
 import { autoCategorizeMemory, updateChatMemory } from "./memory-jobs/analysis";
 import { rebuildMemoryEmbeddings } from "./memory-jobs/embeddings";
+import { MEMORY_SEARCH_THRESHOLD } from "./memory-search";
 import { decodeCharacterBackup, decodeGroupBackup, decodeMemoryBackup, exportCharacterBackup, exportGroupBackup, exportMemoryBackup } from "./backup";
 
 interface TagPlan {
@@ -212,15 +214,6 @@ function normalizedCharacter(card: Card): Card {
     throw new Error("记忆绑定模式无效");
   if (card.ttsConfigId !== null) requireId(card.ttsConfigId, "TTS 配置");
   if (card.themeConfigId !== null) requireId(card.themeConfigId, "主题配置");
-  const policy = card.toolAccessConfig;
-  if (
-    policy.enabled &&
-    (policy.allowedPackages.length !== 0 ||
-      policy.allowedSkills.length !== 0 ||
-      policy.allowedMcpServers.length !== 0) &&
-    !new Set(normalizeNames(policy.allowedBuiltinTools)).has("use_package")
-  )
-    throw new Error("选择外部工具来源时必须允许 use_package");
   const mounts = [];
   const mountIds = new Set<string>();
   for (const mount of card.sharedMemoryMounts) {
@@ -588,14 +581,9 @@ export async function dispatch(
         host,
       );
     case "retryFailedCandidates":
-      return executeDomain(
-        "memory.candidates.retryFailed",
-        { ownerKey: "ownerKey" in request ? request.ownerKey : await menuMemoryOwner(request.chatId, host) },
-        host,
-      );
     case "clearFailedCandidates":
       return executeDomain(
-        "memory.candidates.clearFailed",
+        request.action === "retryFailedCandidates" ? "memory.candidates.retryFailed" : "memory.candidates.clearFailed",
         { ownerKey: "ownerKey" in request ? request.ownerKey : await menuMemoryOwner(request.chatId, host) },
         host,
       );
@@ -605,6 +593,14 @@ export async function dispatch(
       return host.readMemoryRecallSettings();
     case "writeMemoryRecallSettings":
       return host.writeMemoryRecallSettings(request.settings);
+    case "previewMemorySearch": {
+      await requireOwner(request.ownerKey, host);
+      const [config, recall] = await Promise.all([host.readMemorySearchConfig(request.ownerKey), host.readMemoryRecallSettings()]);
+      const result = await host.searchMemoryDebug({ ownerKey: request.ownerKey, query: request.query,
+        folderPath: request.folderPath, relevanceThreshold: MEMORY_SEARCH_THRESHOLD,
+        createdAtStartMs: null, createdAtEndMs: null, limit: recall.limit }, config, false);
+      return { ...result, candidates: result.candidates.filter(hit => hit.passedThreshold) };
+    }
     case "searchMemoryDebug": {
       await requireOwner(request.ownerKey, host);
       assertSearchConfig(request.config);
@@ -947,9 +943,9 @@ const handlers: DomainHandlers = {
   /** Enqueues only actual persisted message sources and genuine bound owners. */
   "memory.candidate.enqueue": (input, repository) => enqueueCandidate(input, repository),
   /** Returns genuine terminal failures to the pending queue for one later interval retry. */
-  "memory.candidates.retryFailed": (input, repository) => retryFailedCandidates(input.ownerKey, repository),
+  "memory.candidates.retryFailed": async (input, repository) => ({ retried: await repository.recoverFailedCandidates(input.ownerKey, await memoryJobProducer()) }),
   /** Removes genuine terminal failures from the owner queue. */
-  "memory.candidates.clearFailed": (input, repository) => clearFailedCandidates(input.ownerKey, repository),
+  "memory.candidates.clearFailed": async (input, repository) => ({ cleared: await repository.recoverFailedCandidates(input.ownerKey, null) }),
   /** Resolves chat configuration using this operation's existing repository snapshot. */
   "chat.configuration.resolve": (input, repository) => resolveConfiguration(input, {
     /** Reads only the requested character. */

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use operit_host_api::HostManager::{defaultHostRuntimeTaskSchedulerHost, HostManager};
+use operit_host_api::HostManager::HostManager;
 use operit_plugin_sdk::js_sdk::tool_types::BuiltinToolName;
 use operit_tools::tools::climode::CliToolModeSupport::{
     CliToolModeSupport, SEARCH_TOOL_NAME,
@@ -27,7 +27,8 @@ use operit_tools::tools::defaultTool::standard::StandardMusicTools::{
     MusicToolExecutor, MusicToolOperation, StandardMusicTools,
 };
 use operit_tools::tools::defaultTool::standard::StandardSystemOperationTools::{
-    StandardSystemOperationTools, SystemOperationToolExecutor, SystemOperationToolOperation,
+    InstallAppToolExecutor, StandardSystemOperationTools, SystemOperationToolExecutor,
+    SystemOperationToolOperation,
 };
 use operit_tools::tools::defaultTool::standard::StandardTerminalTools::{
     StandardTerminalTools, TerminalToolExecutor, TerminalToolOperation,
@@ -44,6 +45,8 @@ use operit_tools::tools::ToolResultDataClasses::{
 use operit_tools::ConversationMarkupManager::ToolResult;
 use operit_tools::ToolExecutionManager::{
     AITool, ToolEffect, ToolExecutionManager, ToolParameter, ToolValidationResult, RegisteredToolExecutor,
+    PreparedToolInvocation, SharedToolExecutor, ToolAccessSpec, ToolBoundary, ToolCall,
+    ToolInvocationContext,
 };
 
 use crate::tools::defaultTool::standard::{
@@ -108,55 +111,60 @@ pub(crate) fn registerPackageActivationTool(handler: &mut AIToolHandler) {
     );
 }
 
+/// Parses the documented sleep duration and rejects invalid explicit values.
+fn sleepDurationMs(tool: &AITool) -> Result<i32, String> {
+    match tool.parameters.iter().find(|parameter| parameter.name == "duration_ms") {
+        None => Ok(1000),
+        Some(parameter) => parameter.value.parse::<i32>()
+            .ok()
+            .filter(|duration| *duration >= 0)
+            .ok_or_else(|| "duration_ms must be an integer between 0 and 2147483647".to_string()),
+    }
+}
+
+/// Awaits the caller's Host timer before reporting the measured sleep duration.
+async fn executeSleep(tool: &AITool, context: &HostManager) -> ToolResult {
+    let durationMs = match sleepDurationMs(tool) {
+        Ok(duration) => duration,
+        Err(error) => return toolErrorResult(tool, error),
+    };
+    let Some(scheduler) = context.hostRuntimeTaskSchedulerHost.as_ref() else {
+        return toolErrorResult(tool, "HostRuntimeTaskSchedulerHost is required for sleep".to_string());
+    };
+    let started = match scheduler.monotonicTimeMillis() {
+        Ok(time) => time,
+        Err(error) => return toolErrorResult(tool, error.to_string()),
+    };
+    if let Err(error) = scheduler.waitForHostRuntimeDelay(durationMs as u64).await {
+        return toolErrorResult(tool, error.to_string());
+    }
+    let elapsed = match scheduler.monotonicTimeMillis() {
+        Ok(time) => time.saturating_sub(started),
+        Err(error) => return toolErrorResult(tool, error.to_string()),
+    };
+    ToolResult {
+        toolName: tool.name.clone(),
+        success: true,
+        result: ToolResultData::SleepResultData(SleepResultData {
+            requestedMs: durationMs,
+            sleptMs: elapsed.min(i32::MAX as u64) as i32,
+        }),
+        error: None,
+    }
+}
+
+/// Registers the public tools with their explicit execution contracts.
 #[allow(non_snake_case)]
 fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
+    for name in [BuiltinToolName::ListWindows, BuiltinToolName::FocusWindow, BuiltinToolName::GetPageInfo, BuiltinToolName::Tap, BuiltinToolName::LongPress,
+        BuiltinToolName::ClickElement, BuiltinToolName::SetInputText, BuiltinToolName::PressKey, BuiltinToolName::Swipe] {
+        handler.registerBuiltinTool(name, Box::new(
+            crate::tools::defaultTool::standard::StandardUiTools::UiToolExecutor { host: context.uiAutomationHost.clone() }
+        ), ToolRegistrationVisibility::PUBLIC);
+    }
     handler.registerBuiltinTool(
         BuiltinToolName::Sleep,
-        Box::new(FnToolExecutor {
-            effect: ToolEffect::READ,
-            validate: Arc::new(|_| ToolValidationResult {
-                valid: true,
-                errorMessage: String::new(),
-            }),
-            invoke: Arc::new(|tool| {
-                // duration_ms 的 value 是字符串：可能是 "100"、带引号的 "\"100\""、
-                // 浮点 "100.0"，也可能带单位。原来直接 parse::<i32>() 太严格，
-                // 遇到非纯整数就静默落回 1000ms —— 表现出来就是"传 100 却睡了 1000"。
-                let durationMs = tool
-                    .parameters
-                    .iter()
-                    .find(|parameter| parameter.name == "duration_ms")
-                    .and_then(|parameter| {
-                        let raw = parameter.value.trim().trim_matches('"').trim();
-                        if raw.is_empty() {
-                            return None;
-                        }
-                        raw.parse::<i64>()
-                            .ok()
-                            .or_else(|| raw.parse::<f64>().ok().map(|value| value.round() as i64))
-                    })
-                    .unwrap_or(1000)
-                    // 上限保护：单次最多等 10 分钟，避免模型传个巨大值把线程占死
-                    .clamp(0, 600_000);
-                // 真正等待。原来用的是 scheduleDelayedHostRuntimeTask，它只是把延迟
-                // 任务投递进调度器就立即返回，sleep 因此从不真正生效却回报 success
-                //（静默失效）。这里改成阻塞等待，并把实测时长回报给调用方。
-                let startedAt = std::time::Instant::now();
-                if durationMs > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(durationMs as u64));
-                }
-                let sleptMs = i32::try_from(startedAt.elapsed().as_millis()).unwrap_or(i32::MAX);
-                ToolResult {
-                    toolName: tool.name.clone(),
-                    success: true,
-                    result: ToolResultData::SleepResultData(SleepResultData {
-                        requestedMs: i32::try_from(durationMs).unwrap_or(i32::MAX),
-                        sleptMs,
-                    }),
-                    error: None,
-                }
-            }),
-        }),
+        RegisteredToolExecutor::Shared(Arc::new(SleepToolExecutor)),
         ToolRegistrationVisibility::PUBLIC,
     );
     let coreNodeRuntimeSupport = handler.runtimeSupport();
@@ -272,7 +280,10 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
         Box::new(ToolGetter::getWebVisitTool(context)),
         ToolRegistrationVisibility::PUBLIC,
     );
-    registerSystemOperationTools(handler, ToolGetter::getSystemOperationTools(context));
+    registerSystemOperationTools(
+        handler,
+        ToolGetter::getSystemOperationTools(context, handler.runtimeSupport()),
+    );
     registerMusicTools(handler, ToolGetter::getMusicTools(context));
     registerBluetoothTools(handler, ToolGetter::getBluetoothTools(context));
     registerChatTools(
@@ -492,6 +503,26 @@ fn registerChatTools(handler: &mut AIToolHandler, chatTools: StandardChatManager
         ToolRegistrationVisibility::INTERNAL,
     );
     handler.registerBuiltinTool(
+        BuiltinToolName::ChatListScheduledMessages,
+        RegisteredToolExecutor::Shared(Arc::new(PluginChatToolExecutor { operation: PluginChatToolOperation::ListScheduledMessages })),
+        ToolRegistrationVisibility::INTERNAL,
+    );
+    handler.registerBuiltinTool(
+        BuiltinToolName::ChatDeliverPrepared,
+        RegisteredToolExecutor::Shared(Arc::new(PluginChatToolExecutor { operation: PluginChatToolOperation::DeliverPrepared })),
+        ToolRegistrationVisibility::INTERNAL,
+    );
+    handler.registerBuiltinTool(
+        BuiltinToolName::ChatScheduleMessage,
+        RegisteredToolExecutor::Shared(Arc::new(PluginChatToolExecutor { operation: PluginChatToolOperation::ScheduleMessage })),
+        ToolRegistrationVisibility::INTERNAL,
+    );
+    handler.registerBuiltinTool(
+        BuiltinToolName::ChatCancelScheduledMessage,
+        RegisteredToolExecutor::Shared(Arc::new(PluginChatToolExecutor { operation: PluginChatToolOperation::CancelScheduledMessage })),
+        ToolRegistrationVisibility::INTERNAL,
+    );
+    handler.registerBuiltinTool(
         BuiltinToolName::ChatCancel,
         RegisteredToolExecutor::Shared(Arc::new(PluginChatToolExecutor { operation: PluginChatToolOperation::Cancel })),
         ToolRegistrationVisibility::INTERNAL,
@@ -568,11 +599,12 @@ fn registerSystemOperationTools(
         BuiltinToolName::GetSystemSetting,
         SystemOperationToolOperation::GetSystemSetting,
     );
-    registerSystemOperationTool(
-        handler,
-        &systemOperationTools,
+    handler.registerBuiltinTool(
         BuiltinToolName::InstallApp,
-        SystemOperationToolOperation::InstallApp,
+        RegisteredToolExecutor::Asynchronous(Box::new(InstallAppToolExecutor {
+            tools: systemOperationTools.clone(),
+        })),
+        ToolRegistrationVisibility::INTERNAL,
     );
     registerSystemOperationTool(
         handler,
@@ -650,14 +682,27 @@ fn registerSystemOperationTool(
 /// Registers terminal tools with the same host execution and scheduling context.
 #[allow(non_snake_case)]
 fn registerTerminalTools(handler: &mut AIToolHandler, terminalTools: StandardTerminalTools) {
+    use operit_tools::tools::defaultTool::standard::StandardTerminalStreaming::{
+        TerminalCloseExecutor, TerminalExecutionExecutor, TerminalStreamExecutor,
+    };
+    use operit_tools::ToolExecutionManager::RegisteredToolExecutor;
+    let streams = TerminalStreamExecutor::shared(
+        terminalTools.clone(),
+        handler.getContext().hostRuntimeTaskSchedulerHost.clone(),
+    );
     handler.registerBuiltinTool(
         BuiltinToolName::TerminalObserve,
-        operit_tools::ToolExecutionManager::RegisteredToolExecutor::Shared(Arc::new(
-            operit_tools::tools::defaultTool::standard::StandardTerminalStreaming::TerminalStreamExecutor::new(
-                terminalTools.terminalHost.clone(),
-                handler.getContext().hostRuntimeTaskSchedulerHost.clone(),
-            ),
-        )),
+        RegisteredToolExecutor::Shared(streams.clone()),
+        ToolRegistrationVisibility::PUBLIC,
+    );
+    handler.registerBuiltinTool(
+        BuiltinToolName::ExecuteInTerminalSession,
+        RegisteredToolExecutor::Shared(Arc::new(TerminalExecutionExecutor(streams.clone()))),
+        ToolRegistrationVisibility::PUBLIC,
+    );
+    handler.registerBuiltinTool(
+        BuiltinToolName::ExecuteInTerminalSessionStreaming,
+        RegisteredToolExecutor::Shared(Arc::new(TerminalExecutionExecutor(streams.clone()))),
         ToolRegistrationVisibility::PUBLIC,
     );
     registerTerminalTool(
@@ -675,26 +720,13 @@ fn registerTerminalTools(handler: &mut AIToolHandler, terminalTools: StandardTer
     registerTerminalTool(
         handler,
         &terminalTools,
-        BuiltinToolName::ExecuteInTerminalSession,
-        TerminalToolOperation::ExecuteInSession,
-    );
-    registerTerminalTool(
-        handler,
-        &terminalTools,
-        BuiltinToolName::ExecuteInTerminalSessionStreaming,
-        TerminalToolOperation::ExecuteInSessionStreaming,
-    );
-    registerTerminalTool(
-        handler,
-        &terminalTools,
         BuiltinToolName::ExecuteHiddenTerminalCommand,
         TerminalToolOperation::ExecuteHiddenCommand,
     );
-    registerTerminalTool(
-        handler,
-        &terminalTools,
+    handler.registerBuiltinTool(
         BuiltinToolName::CloseTerminalSession,
-        TerminalToolOperation::CloseSession,
+        RegisteredToolExecutor::Shared(Arc::new(TerminalCloseExecutor(streams))),
+        ToolRegistrationVisibility::PUBLIC,
     );
     registerTerminalTool(
         handler,
@@ -1583,6 +1615,109 @@ fn resolveSwitchCoreTarget<'a>(
             "switch_core target is ambiguous: {targetReference}; candidates: {}",
             formatCoreNodeReferenceCandidates(&candidates)
         )),
+    }
+}
+
+/// Allows independent sleep invocations to wait concurrently without a registry lease.
+struct SleepToolExecutor;
+
+impl SharedToolExecutor for SleepToolExecutor {
+    /// Validates the duration before admission and awaits the invocation's own Host timer.
+    fn prepare<'a>(
+        &'a self,
+        request: &'a ToolCall,
+        context: &'a ToolInvocationContext,
+        checkAccess: bool,
+    ) -> Result<PreparedToolInvocation<'a>, String> {
+        let tool = request.toLegacyTool();
+        sleepDurationMs(&tool)?;
+        let host = context.host().getContext();
+        Ok(PreparedToolInvocation {
+            access: checkAccess.then_some(ToolAccessSpec {
+                effect: ToolEffect::READ,
+                boundary: ToolBoundary::None,
+            }),
+            invoke: Box::pin(async move { vec![executeSleep(&tool, &host).await] }),
+        })
+    }
+}
+
+#[cfg(test)]
+mod sleep_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Builds a sleep request without involving global runtime state.
+    fn sleepTool(duration: Option<&str>) -> AITool {
+        AITool {
+            name: "sleep".to_string(),
+            parameters: duration.into_iter().map(|value| ToolParameter {
+                name: "duration_ms".to_string(),
+                value: value.to_string(),
+            }).collect(),
+        }
+    }
+
+    /// Supplies the production native Host timer for elapsed-time assertions.
+    fn sleepContext() -> HostManager {
+        HostManager {
+            hostRuntimeTaskSchedulerHost: Some(Arc::new(
+                operit_host_native_scheduler::NativeHostRuntimeTaskSchedulerHost::new(),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// Preserves the documented default and rejects malformed, negative or overflowing durations.
+    #[test]
+    fn sleep_duration_validation() {
+        assert_eq!(sleepDurationMs(&sleepTool(None)), Ok(1000));
+        for (value, expected) in [("0", 0), ("37", 37), ("2147483647", i32::MAX)] {
+            assert_eq!(sleepDurationMs(&sleepTool(Some(value))), Ok(expected));
+        }
+        for value in ["", "invalid", "-1", "1.5", "2147483648"] {
+            assert!(sleepDurationMs(&sleepTool(Some(value))).is_err(), "{value}");
+        }
+    }
+
+    /// Requires the sleep future to remain pending and the caller to wait for the requested interval.
+    #[tokio::test]
+    async fn sleep_waits_before_returning_success() {
+        let host = sleepContext();
+        let tool = sleepTool(Some("40"));
+        let started = Instant::now();
+        let mut invocation = Box::pin(executeSleep(&tool, &host));
+        assert!(futures_util::poll!(invocation.as_mut()).is_pending());
+        let result = invocation.await;
+        assert!(result.success, "{:?}", result.error);
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        let ToolResultData::SleepResultData(data) = result.result else {
+            panic!("sleep must return its structured duration result");
+        };
+        assert_eq!(data.requestedMs, 40);
+        assert!(data.sleptMs >= 40);
+    }
+
+    /// Allows an outstanding sleep to be dropped while an independent zero-duration call completes.
+    #[tokio::test]
+    async fn sleep_can_be_cancelled_without_blocking_other_calls() {
+        let host = sleepContext();
+        let longTool = sleepTool(Some("10000"));
+        let mut pending = Box::pin(executeSleep(&longTool, &host));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        let result = tokio::time::timeout(
+            Duration::from_secs(1), executeSleep(&sleepTool(Some("0")), &host),
+        ).await.expect("independent sleep must complete while the long sleep is pending");
+        assert!(result.success);
+        drop(pending);
+    }
+
+    /// Returns an explicit failure when the caller has no scheduler capability.
+    #[tokio::test]
+    async fn sleep_rejects_missing_host_scheduler() {
+        let result = executeSleep(&sleepTool(Some("0")), &HostManager::default()).await;
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("HostRuntimeTaskSchedulerHost is required for sleep"));
     }
 }
 

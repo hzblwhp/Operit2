@@ -8,6 +8,9 @@ import 'package:operit_ui/operit_ui.dart';
 
 import '../../../../../../../core/chat/ChatScopedModelBinding.dart';
 import '../../../../../../../core/logging/ClientLogger.dart';
+import '../../../../../../../core/application/PluginHotReload.dart';
+import '../../../../../../common/contributions/ToolPkgChatUiCatalog.dart';
+import '../../../../../../main/navigation/ToolPkgCatalogChangeBus.dart';
 import '../../../../../../../core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
 import '../../../../../../../l10n/generated/app_localizations.dart';
@@ -24,6 +27,7 @@ import '../common/ChatComposerSlotHost.dart';
 import '../common/ChatInputEnterShortcuts.dart';
 import '../common/ChatPendingMessageQueuePanel.dart';
 import '../common/ChatPastedImageHandler.dart';
+import '../common/InputProcessingStatusLane.dart';
 import '../common/PendingQueueMessageItem.dart';
 import 'AgentInputMenuPopup.dart';
 import 'AgentModelSelectorPopup.dart';
@@ -58,7 +62,7 @@ class AgentChatInputSection extends StatefulWidget {
     this.onGuidePendingQueueMessage,
     this.attachments = const <AttachmentInfo>[],
     this.onRemoveAttachment,
-    this.onInsertAttachment,
+    this.onPreviewAttachment,
     this.onAttachImage,
     this.onTakePhoto,
     this.onPluginAttachment,
@@ -99,7 +103,7 @@ class AgentChatInputSection extends StatefulWidget {
   final ValueChanged<int>? onGuidePendingQueueMessage;
   final List<AttachmentInfo> attachments;
   final ValueChanged<String>? onRemoveAttachment;
-  final ValueChanged<AttachmentInfo>? onInsertAttachment;
+  final ValueChanged<AttachmentInfo>? onPreviewAttachment;
   final VoidCallback? onAttachImage;
   final VoidCallback? onTakePhoto;
   final ChatAttachmentCompletion? onPluginAttachment;
@@ -137,9 +141,8 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
   _modelBindingSubscription;
   StreamSubscription<List<core_proxy.ProviderProfile>>?
   _modelProfilesSubscription;
-  core_proxy.FunctionModelBinding? _currentModelBinding;
-  ChatScopedModelBinding? _scopedModelBinding;
-  StreamSubscription<ChatScopedModelBinding?>? _scopedModelSubscription;
+  StreamSubscription<void>? _modelCatalogSubscription;
+  int _modelLabelGeneration = 0;
   List<core_proxy.ProviderProfile> _modelProfiles = const [];
   bool _draggingFiles = false;
   bool _inputExpanded = false;
@@ -154,6 +157,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     WidgetsBinding.instance.addObserver(this);
     widget.controller.addListener(_handleInputChanged);
     _watchCurrentModelLabel();
+    PluginHotReload.revision.addListener(_requestModelRefresh);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _syncMentionSuggestionPopup();
     });
@@ -167,8 +171,14 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
         oldWidget.viewModel != widget.viewModel) {
       _inputMenuContextGeneration++;
       _dismissInputMenuPopup();
-      // 换会话后必须重新订阅新的 chatId，否则标签还停在旧会话的模型上
-      _watchCurrentModelLabel();
+      _dismissModelSettingsPopup();
+      if (oldWidget.viewModel != widget.viewModel) {
+        _modelBindingSubscription?.cancel();
+        _modelProfilesSubscription?.cancel();
+        _modelCatalogSubscription?.cancel();
+        _watchCurrentModelLabel();
+      }
+      _requestModelRefresh();
     }
     if (oldWidget.controller != widget.controller) {
       oldWidget.controller.removeListener(_handleInputChanged);
@@ -222,6 +232,8 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     final overlay = Overlay.of(context);
     _mentionPopupEntry = OverlayEntry(
       builder: (context) {
+        final panel = widget.mentionSuggestionPanel;
+        if (!mounted || panel == null) return const SizedBox.shrink();
         final placement = _popupPlacement(
           context,
           targetKey: _mentionPopupTargetKey,
@@ -246,7 +258,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
                 onTap: () {},
                 child: ConstrainedBox(
                   constraints: BoxConstraints(maxHeight: placement.maxHeight),
-                  child: widget.mentionSuggestionPanel!,
+                  child: panel,
                 ),
               ),
             ),
@@ -329,7 +341,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
                   child: AgentModelSelectorPopup(
                     key: _modelPopupWidgetKey,
                     viewModel: widget.viewModel,
-                    chatId: widget.currentChatId,
+                    currentChatId: widget.currentChatId,
                     onDismiss: _dismissModelSettingsPopup,
                     onModelChanged: _handleModelChanged,
                   ),
@@ -471,29 +483,27 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
       _modelBindingSubscription = clients.preferencesFunctionalConfigManager
           .functionModelBindingFlow()
           .listen((bindings) {
-            _currentModelBinding = bindings[core_proxy.FunctionType.chat];
-            _refreshCurrentModelLabel();
+            _requestModelRefresh();
           }, onError: _logModelLabelError);
       _modelProfilesSubscription = clients.preferencesModelConfigManager
           .getProviderProfilesFlow()
           .listen((profiles) {
             _modelProfiles = profiles;
-            _refreshCurrentModelLabel();
+            _requestModelRefresh();
           }, onError: _logModelLabelError);
-      // 本会话单独配了模型时，标签要显示那个模型而不是全局默认
-      _scopedModelSubscription?.cancel();
-      final chatId = widget.currentChatId?.trim() ?? '';
-      _scopedModelBinding = null;
-      if (chatId.isNotEmpty) {
-        _scopedModelSubscription = ChatScopedModelBinding.watch(clients, chatId)
-            .listen((binding) {
-              _scopedModelBinding = binding;
-              _refreshCurrentModelLabel();
-            }, onError: _logModelLabelError);
-      }
+      _modelCatalogSubscription = ToolPkgCatalogChangeBus.listen(
+        _requestModelRefresh,
+      );
+      _requestModelRefresh();
     } catch (error, stackTrace) {
       _logModelLabelError(error, stackTrace);
     }
+  }
+
+  /// Invalidates open model controls and reloads the actual chat binding.
+  void _requestModelRefresh() {
+    _dismissModelSettingsPopup();
+    unawaited(_refreshCurrentModelLabel());
   }
 
   void _logModelLabelError(Object error, StackTrace stackTrace) {
@@ -505,57 +515,52 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     );
   }
 
-  /// Derives cosmetic metadata from snapshots rather than resolving a runtime
-  /// config. A binding may temporarily precede its provider during sync.
-  void _refreshCurrentModelLabel() {
-    if (!mounted) {
-      return;
-    }
-    // 会话级绑定优先，保证标签显示的就是这个会话实际会用的模型
-    final scoped = _scopedModelBinding;
-    final binding = scoped == null
-        ? _currentModelBinding
-        : core_proxy.FunctionModelBinding(
-            providerId: scoped.providerId,
-            modelId: scoped.modelId,
-            followsChat: false,
-          );
-    core_proxy.ProviderProfile? boundProvider;
-    if (binding != null) {
+  /// Resolves display metadata from the same owner and model rule as execution.
+  Future<void> _refreshCurrentModelLabel() async {
+    final generation = ++_modelLabelGeneration;
+    if (!mounted) return;
+    setState(() {
+      _modelLabel = '加载中...';
+      _modelProviderTypeId = '';
+      _modelProviderName = '';
+    });
+    try {
+      final selection = await ToolPkgChatUiCatalog(
+        clients: widget.viewModel.clients,
+      ).loadModelSelection(chatId: widget.currentChatId);
+      if (!mounted || generation != _modelLabelGeneration) return;
+      final binding = selection.singleBinding;
+      core_proxy.ProviderProfile? boundProvider;
       for (final provider in _modelProfiles) {
-        if (provider.id == binding.providerId &&
-            provider.models.any((model) => model.id == binding.modelId)) {
+        if (provider.id == binding?.providerId &&
+            provider.models.any((model) => model.id == binding?.modelId)) {
           boundProvider = provider;
           break;
         }
       }
+      setState(() {
+        _modelLabel = selection.label;
+        _modelProviderTypeId = boundProvider?.providerTypeId ?? '';
+        _modelProviderName = boundProvider?.name ?? '';
+      });
+    } catch (error, stackTrace) {
+      if (!mounted || generation != _modelLabelGeneration) return;
+      setState(() {
+        _modelLabel = '模型配置不可用';
+        _modelProviderTypeId = '';
+        _modelProviderName = '';
+      });
+      _logModelLabelError(error, stackTrace);
     }
-    setState(() {
-      // Keep the original model ID visible; never silently choose a fallback.
-      _modelLabel = _formatModelLabel(binding?.modelId ?? '');
-      _modelProviderTypeId = boundProvider?.providerTypeId ?? '';
-      _modelProviderName = boundProvider?.name ?? '';
-    });
   }
 
+  /// Reloads authoritative selection after the global model changes.
   void _handleModelChanged(
     String modelId, {
     String? providerTypeId,
     String? providerName,
   }) {
-    setState(() {
-      _modelLabel = _formatModelLabel(modelId);
-      if (providerTypeId != null) {
-        _modelProviderTypeId = providerTypeId;
-      }
-      if (providerName != null) {
-        _modelProviderName = providerName;
-      }
-    });
-  }
-
-  String _formatModelLabel(String modelId) {
-    return modelId.length > 26 ? '${modelId.substring(0, 26)}...' : modelId;
+    _requestModelRefresh();
   }
 
   VoidCallback? _runAttachmentAction(VoidCallback? action) {
@@ -658,7 +663,9 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     widget.controller.removeListener(_handleInputChanged);
     _modelBindingSubscription?.cancel();
     _modelProfilesSubscription?.cancel();
-    _scopedModelSubscription?.cancel();
+    _modelCatalogSubscription?.cancel();
+    PluginHotReload.revision.removeListener(_requestModelRefresh);
+    _modelLabelGeneration++;
     _dismissModelSettingsPopup();
     _dismissInputMenuPopup();
     _dismissMentionSuggestionPopup();
@@ -756,7 +763,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
                     onToggleInputExpansion: _toggleInputExpansion,
                     attachments: widget.attachments,
                     onRemoveAttachment: widget.onRemoveAttachment,
-                    onInsertAttachment: widget.onInsertAttachment,
+                    onPreviewAttachment: widget.onPreviewAttachment,
                     onAttachFiles: widget.onAttachFiles,
                     onPasteImages: widget.onPasteImages,
                     draggingFiles: _draggingFiles,
@@ -843,7 +850,7 @@ class _InputBody extends StatelessWidget {
     required this.onToggleInputExpansion,
     required this.attachments,
     required this.onRemoveAttachment,
-    required this.onInsertAttachment,
+    required this.onPreviewAttachment,
     required this.onAttachFiles,
     required this.onPasteImages,
     required this.draggingFiles,
@@ -885,7 +892,7 @@ class _InputBody extends StatelessWidget {
   final VoidCallback onToggleInputExpansion;
   final List<AttachmentInfo> attachments;
   final ValueChanged<String>? onRemoveAttachment;
-  final ValueChanged<AttachmentInfo>? onInsertAttachment;
+  final ValueChanged<AttachmentInfo>? onPreviewAttachment;
   final ValueChanged<List<String>>? onAttachFiles;
   final ValueChanged<List<PastedImageAttachmentPayload>>? onPasteImages;
   final bool draggingFiles;
@@ -924,7 +931,7 @@ class _InputBody extends StatelessWidget {
           _AttachmentStrip(
             attachments: attachments,
             onRemoveAttachment: onRemoveAttachment,
-            onInsertAttachment: onInsertAttachment,
+            onPreviewAttachment: onPreviewAttachment,
           ),
       ],
       editor: ChatInputEnterShortcuts(
@@ -1462,12 +1469,12 @@ class _AttachmentStrip extends StatelessWidget {
   const _AttachmentStrip({
     required this.attachments,
     required this.onRemoveAttachment,
-    required this.onInsertAttachment,
+    required this.onPreviewAttachment,
   });
 
   final List<AttachmentInfo> attachments;
   final ValueChanged<String>? onRemoveAttachment;
-  final ValueChanged<AttachmentInfo>? onInsertAttachment;
+  final ValueChanged<AttachmentInfo>? onPreviewAttachment;
 
   @override
   Widget build(BuildContext context) {
@@ -1488,7 +1495,7 @@ class _AttachmentStrip extends StatelessWidget {
             attachment: attachment,
             colorScheme: colorScheme,
             onRemoveAttachment: onRemoveAttachment,
-            onInsertAttachment: onInsertAttachment,
+            onPreviewAttachment: onPreviewAttachment,
           );
         },
       ),
@@ -1501,13 +1508,13 @@ class _AttachmentChip extends StatelessWidget {
     required this.attachment,
     required this.colorScheme,
     required this.onRemoveAttachment,
-    required this.onInsertAttachment,
+    required this.onPreviewAttachment,
   });
 
   final AttachmentInfo attachment;
   final ColorScheme colorScheme;
   final ValueChanged<String>? onRemoveAttachment;
-  final ValueChanged<AttachmentInfo>? onInsertAttachment;
+  final ValueChanged<AttachmentInfo>? onPreviewAttachment;
 
   @override
   Widget build(BuildContext context) {
@@ -1527,9 +1534,9 @@ class _AttachmentChip extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                   clipBehavior: Clip.antiAlias,
                   child: InkWell(
-                    onTap: onInsertAttachment == null
+                    onTap: onPreviewAttachment == null
                         ? null
-                        : () => onInsertAttachment!(attachment),
+                        : () => onPreviewAttachment!(attachment),
                     child: ChatAttachmentImagePreview(
                       attachmentPath: attachment.filePath,
                       fileName: attachment.fileName,
@@ -1563,9 +1570,9 @@ class _AttachmentChip extends StatelessWidget {
         ),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: onInsertAttachment == null
+          onTap: onPreviewAttachment == null
               ? null
-              : () => onInsertAttachment!(attachment),
+              : () => onPreviewAttachment!(attachment),
           child: SizedBox(
             height: 26,
             child: Row(
@@ -1774,7 +1781,7 @@ double _progressFor(core_proxy.InputProcessingState state) {
   return switch (state.kind) {
     'Processing' => 0.3,
     'Connecting' => 0.6,
-    'Summarizing' => 0.05,
+    'Summarizing' => summaryStageProgress(state.message),
     'ToolProgress' => state.progress.clamp(0, 1),
     _ => 1,
   };

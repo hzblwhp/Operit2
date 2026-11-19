@@ -308,7 +308,14 @@ bool Webview::AttachVisual(IUnknown* visual) {
 
 // Shows or hides native browser content without suspending page state.
 void Webview::SetVisible(bool visible) {
-  webview_controller_->put_IsVisible(visible);
+  content_visible_ = visible;
+  webview_controller_->put_IsVisible(content_visible_ && host_visible_);
+}
+
+/// Applies native window visibility independently of Flutter surface ownership.
+void Webview::SetHostVisible(bool visible) {
+  host_visible_ = visible;
+  webview_controller_->put_IsVisible(content_visible_ && host_visible_);
 }
 
 // Gives native IME support to the browser only while Flutter grants focus.
@@ -1326,6 +1333,7 @@ void Webview::SetPointerUpdate(int32_t pointer,
     event = COREWEBVIEW2_POINTER_EVENT_KIND_ACTIVATE;
     break;
   case WebviewPointerEventKind::Down:
+    SetNativeFocus(true);
     event = COREWEBVIEW2_POINTER_EVENT_KIND_DOWN;
     pointerFlags =
         POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
@@ -1382,6 +1390,10 @@ void Webview::SetPointerButtonState(WebviewPointerButton button, bool is_down) {
   if (!IsValid()) {
     return;
   }
+  // The Flutter HWND reclaims focus before hit testing every click. Transfer it
+  // back only when that click is actually forwarded to this browser, even if
+  // Flutter's existing WebView FocusNode did not change.
+  if (is_down && button != WebviewPointerButton::None) SetNativeFocus(true);
 
   COREWEBVIEW2_MOUSE_EVENT_KIND kind;
   switch (button) {
@@ -1594,7 +1606,7 @@ bool Webview::Suspend() {
     return false;
   }
 
-  webview_controller_->put_IsVisible(false);
+  SetVisible(false);
   return webview->TrySuspend(
              Callback<ICoreWebView2TrySuspendCompletedHandler>(
                  [](HRESULT error_code, BOOL is_successful) -> HRESULT {
@@ -1613,8 +1625,9 @@ bool Webview::Resume() {
   if (!webview) {
     return false;
   }
-  return webview->Resume() == S_OK &&
-         webview_controller_->put_IsVisible(true) == S_OK;
+  if (webview->Resume() != S_OK) return false;
+  content_visible_ = true;
+  return webview_controller_->put_IsVisible(host_visible_) == S_OK;
 }
 
 bool Webview::SetVirtualHostNameMapping(

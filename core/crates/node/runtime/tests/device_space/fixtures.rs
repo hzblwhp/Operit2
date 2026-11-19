@@ -10,6 +10,7 @@ fn approvalService(node: &str) -> (CoreNodeRouter, RuntimeRemoteLinkService) {
         .spaceStore
         .writeLocalDeviceProfile(node.into(), "test".into(), "test".into(), "1".into(), Some(incarnation))
         .unwrap();
+    router.spaceStore.writeLocalProtocol(crate::PeerProtocol::VERSION).unwrap();
     router.networkControlStore.initializeCurrentSpace().unwrap();
     let service =
         RuntimeRemoteLinkService::newWithRouter((*router.localCore).clone(), router.clone());
@@ -25,6 +26,7 @@ struct ApprovalMeshPeer {
     local: String,
     endpoints: StdMutex<BTreeMap<String, Arc<dyn TestRouteTarget>>>,
     active: StdMutex<BTreeSet<String>>,
+    inboundOnly: StdMutex<BTreeSet<String>>,
     /// The peer's announced pairing generation per paired node, captured at the
     /// modeled handshake exactly like a real pairing record does.
     incarnations: StdMutex<BTreeMap<String, Option<String>>>,
@@ -40,6 +42,7 @@ impl ApprovalMeshPeer {
             local,
             endpoints: StdMutex::new(BTreeMap::new()),
             active: StdMutex::new(BTreeSet::new()),
+            inboundOnly: StdMutex::new(BTreeSet::new()),
             incarnations: StdMutex::new(BTreeMap::new()),
             changes: tokio::sync::broadcast::channel(16).0,
             faults: StdMutex::new(BTreeMap::new()),
@@ -116,14 +119,14 @@ impl RuntimePeerService for ApprovalMeshPeer {
         if !self.active.lock().unwrap().contains(node) {
             return CoreCallResponse::err(
                 id,
-                CoreLinkError::new("TEST_OFFLINE", "Offline mesh link"),
+                CoreLinkError::new("PEER_LINK_CLOSED", "Offline mesh link"),
             );
         }
         let fault = self.faults.lock().unwrap().remove(&method);
         if matches!(fault, Some(CallFault::BeforeDelivery)) {
             return CoreCallResponse::err(
                 id,
-                CoreLinkError::new("TEST_BEFORE_DELIVERY", "Request not delivered"),
+                CoreLinkError::new("PEER_SEND_FAILED", "Request not delivered"),
             );
         }
         if matches!(fault, Some(CallFault::MethodDenied)) {
@@ -140,7 +143,7 @@ impl RuntimePeerService for ApprovalMeshPeer {
         match fault {
             Some(CallFault::AfterDelivery) => CoreCallResponse::err(
                 id,
-                CoreLinkError::new("TEST_LOST_RESPONSE", "Receiver committed; response lost"),
+                CoreLinkError::new("PEER_RESPONSE_CLOSED", "Receiver committed; response lost"),
             ),
             Some(CallFault::PausedResponse { arrived, release }) => {
                 arrived
@@ -189,14 +192,15 @@ impl RuntimePeerService for ApprovalMeshPeer {
                 nodeId: node.clone(),
                 displayName: node.clone(),
                 inbound: true,
-                outbound: true,
+                outbound: !self.inboundOnly.lock().unwrap().contains(node),
                 pairingIncarnation: self.incarnations.lock().unwrap().get(node).cloned().flatten(),
             })
             .collect())
     }
     /// Exercises outboundPeerNodeIds through the device-space contract fixture.
     fn outboundPeerNodeIds(&self) -> Result<BTreeSet<String>, CoreLinkError> {
-        Ok(self.endpoints.lock().unwrap().keys().cloned().collect())
+        Ok(self.endpoints.lock().unwrap().keys()
+            .filter(|node| !self.inboundOnly.lock().unwrap().contains(*node)).cloned().collect())
     }
     /// Exercises activePeerNodeIds through the device-space contract fixture.
     fn activePeerNodeIds(&self) -> Result<BTreeSet<String>, CoreLinkError> {

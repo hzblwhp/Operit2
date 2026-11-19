@@ -2,7 +2,7 @@ import { createTerminal9p } from "./terminal_9p.js";
 import { createBrowserJavaScriptHost } from "./operit_javascript_runtime.js";
 import { createBrowserHttpStreamHost } from "./browser_http_stream.js";
 import { openBrowserFile } from "./browser_file_open.js";
-import { captureBrowserScreen, readBrowserLocation, recognizeBrowserText,
+import { captureBrowserScreen, readBrowserLocation, recognizeBrowserText, requireBrowserSharedMemory,
   type BrowserOcrEngine } from "./browser_system_capabilities.js";
 
 type JsonValue =
@@ -464,6 +464,9 @@ interface LinuxVmSession {
   progressVisible: boolean;
   activeCommand: LinuxVmCommand | null;
   pendingCommands: LinuxVmCommand[];
+  managedExecution: { output: number[]; result: LinuxVmCommandResult | null; error: string | null } | null;
+  screen: number[];
+  workingDir: string;
 }
 
 interface LinuxVmCommandResult {
@@ -1795,8 +1798,8 @@ interface ModelInstallWorkerError {
     return key(runtimePrefix, path);
   }
 
-  /** Persists SQLite bytes while restoring the real foreign-key setting reset by sql.js export. */
-  function saveSqliteDatabase(connection: SqliteConnection): void {
+  /** Exports SQLite pages while restoring the foreign-key setting reset by sql.js export. */
+  function exportSqliteDatabase(connection: SqliteConnection): Uint8Array {
     const rows = querySqlite(connection.db, "PRAGMA foreign_keys", []);
     if (rows.length !== 1 || rows[0].values.length !== 1) {
       throw new Error("sqlite foreign_keys query did not return one value");
@@ -1807,7 +1810,12 @@ interface ModelInstallWorkerError {
     }
     const bytes = connection.db.export();
     connection.db.run(`PRAGMA foreign_keys = ${foreignKeys.value}`);
-    storageWrite(runtimePrefix, connection.path, bytes);
+    return bytes;
+  }
+
+  /** Persists a standalone image without altering the live connection's foreign-key policy. */
+  function saveSqliteDatabase(connection: SqliteConnection): void {
+    storageWrite(runtimePrefix, connection.path, exportSqliteDatabase(connection));
   }
 
   function sqliteConnection(id: string): SqliteConnection {
@@ -2643,7 +2651,7 @@ interface ModelInstallWorkerError {
     paths: AsrBundlePaths,
     state: WebLocalInferenceState,
   ): Promise<WebAsrBundle> {
-    requireCrossOriginIsolation("ASR");
+    requireBrowserSharedMemory();
     const urls = {
       recognizerScript: runtimeJavaScriptUrl(
         paths.recognizerScript,
@@ -2696,7 +2704,7 @@ interface ModelInstallWorkerError {
     paths: TtsBundlePaths,
     state: WebLocalInferenceState,
   ): Promise<WebTtsBundle> {
-    requireCrossOriginIsolation("TTS");
+    requireBrowserSharedMemory();
     const urls = {
       ttsScript: runtimeBlobUrl(paths.ttsScript, "text/javascript", state),
       runtimeScript: runtimeBlobUrl(paths.runtimeScript, "text/javascript", state),
@@ -2927,16 +2935,6 @@ self.onmessage = (event) => {
       if (performance.now() >= deadline) {
         throw new Error("Web TTS worker command timed out");
       }
-    }
-  }
-
-  // Requires the response isolation headers needed by threaded Sherpa WASM.
-  function requireCrossOriginIsolation(capability: string): void {
-    if (globalThis.crossOriginIsolated !== true) {
-      throw new Error(
-        `Web local ${capability} requires Cross-Origin-Opener-Policy: same-origin and ` +
-          "Cross-Origin-Embedder-Policy: require-corp",
-      );
     }
   }
 
@@ -3203,7 +3201,7 @@ self.onmessage = (event) => {
 
   /** Creates one worker-backed guest process and schedules its serial deployment frames. */
   function startManagedRuntimeProcess(request: ManagedRuntimeRequest): string {
-    requireCrossOriginIsolation("managed Node/Python runtime");
+    requireBrowserSharedMemory();
     validateManagedRuntimeRequest(request);
     const runtime = guestRuntimeExecutable(request.program);
     const executablePath = request.executablePath?.trim();
@@ -3456,13 +3454,16 @@ self.onmessage = (event) => {
     return session;
   }
 
-  /** Adds bytes to one session's terminal output buffer without dropping data. */
+  /** Retains bounded output tails independently for the renderer and screen snapshots. */
   function appendLinuxVmOutput(session: LinuxVmSession, bytes: Uint8Array): void {
-    const requiredLength = session.outputLength + bytes.length;
-    if (requiredLength > linuxVmOutputLimit) {
-      failLinuxVmSession(session, new Error("Linux VM terminal output exceeded 4 MiB"));
-      return;
+    for (const byte of bytes) session.screen.push(byte);
+    if (session.screen.length > 65536) session.screen.splice(0, 32768);
+    if (session.outputLength + bytes.length > linuxVmOutputLimit) {
+      const drop = Math.max(linuxVmOutputLimit / 2, session.outputLength + bytes.length - linuxVmOutputLimit);
+      session.output.copyWithin(0, drop, session.outputLength);
+      session.outputLength -= drop;
     }
+    const requiredLength = session.outputLength + bytes.length;
     if (requiredLength > session.output.length) {
       const nextLength = Math.min(
         linuxVmOutputLimit,
@@ -3478,10 +3479,11 @@ self.onmessage = (event) => {
 
   /** Appends one command-output byte while enforcing the terminal output limit. */
   function appendLinuxVmCommandOutput(command: LinuxVmCommand, byte: number): void {
-    const requiredLength = command.outputLength + 1;
-    if (requiredLength > linuxVmOutputLimit) {
-      throw new Error("Linux VM command output exceeded 4 MiB");
+    if (command.outputLength === linuxVmOutputLimit) {
+      command.output.copyWithin(0, linuxVmOutputLimit / 2);
+      command.outputLength = linuxVmOutputLimit / 2;
     }
+    const requiredLength = command.outputLength + 1;
     if (requiredLength > command.output.length) {
       const expanded = new Uint8Array(Math.min(
         linuxVmOutputLimit,
@@ -3503,6 +3505,11 @@ self.onmessage = (event) => {
     appendLinuxVmOutput(session, Uint8Array.of(byte));
     if (command.collectingOutput) {
       appendLinuxVmCommandOutput(command, byte);
+      const execution = session.managedExecution;
+      if (execution !== null) {
+        execution.output.push(byte);
+        if (execution.output.length >= 1048576) execution.output.splice(0, 524288);
+      }
     }
   }
 
@@ -3546,6 +3553,7 @@ self.onmessage = (event) => {
     }
     clearTimeout(command.timeoutHandle);
     session.activeCommand = null;
+    session.workingDir = result.workingDir;
     command.resolve(result);
     startNextLinuxVmCommand(session);
   }
@@ -3661,8 +3669,8 @@ self.onmessage = (event) => {
     if (typeof command !== "string" || command.trim().length === 0) {
       throw new Error("Linux VM terminal command must not be blank");
     }
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
-      throw new Error("Linux VM terminal timeout must be a positive integer");
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0) {
+      throw new Error("Linux VM terminal timeout must be a nonnegative integer");
     }
     if (session.state === "failed" || session.state === "closed") {
       throw new Error(`Linux VM terminal is not running: ${sessionId}`);
@@ -3672,7 +3680,7 @@ self.onmessage = (event) => {
       const commandState: LinuxVmCommand = {
         token,
         command,
-        timeoutHandle: globalThis.setTimeout(() => {
+        timeoutHandle: timeoutMs === 0 ? 0 : globalThis.setTimeout(() => {
           if (session.activeCommand !== commandState) {
             return;
           }
@@ -3887,6 +3895,9 @@ self.onmessage = (event) => {
       progressVisible: false,
       activeCommand: null,
       pendingCommands: [],
+      managedExecution: null,
+      screen: [],
+      workingDir: "/",
     };
     linuxVmSessions.set(sessionId, session);
     void startLinuxVm(session);
@@ -4015,6 +4026,31 @@ self.onmessage = (event) => {
         timeoutMs: number,
       ): Promise<LinuxVmCommandResult> {
         return executeLinuxVmCommand(sessionId, command, timeoutMs);
+      },
+      /** Starts a command without holding the synchronous Rust bridge until completion. */
+      startPtyCommand(sessionId: string, command: string): void {
+        const session = linuxVmSession(sessionId);
+        if (session.activeCommand !== null || session.pendingCommands.length > 0) throw new Error("Terminal session is busy");
+        const execution = { output: [] as number[], result: null as LinuxVmCommandResult | null, error: null as string | null };
+        session.managedExecution = execution;
+        void executeLinuxVmCommand(sessionId, command, 0).then(
+          result => { execution.result = result; },
+          error => { execution.error = String(error); },
+        );
+      },
+      /** Drains command output and reads its original receipt without sending terminal input. */
+      pollPtyCommand(sessionId: string) {
+        const session = linuxVmSession(sessionId);
+        const execution = session.managedExecution;
+        if (execution === null) throw new Error("Terminal has no managed command");
+        const output = Uint8Array.from(execution.output.splice(0, 65536));
+        return { output, result: execution.output.length === 0 ? execution.result : null, error: execution.error };
+      },
+      /** Exposes current session activity and retained visible output independently of PTY drains. */
+      sessionState(sessionId: string) {
+        const session = linuxVmSession(sessionId);
+        return { commandRunning: session.activeCommand !== null || session.pendingCommands.length > 0,
+          workingDir: session.workingDir, content: textDecoder.decode(Uint8Array.from(session.screen)) };
       },
       /** Records terminal dimensions requested for one browser-local Linux VM terminal. */
       resizePty(sessionId: string, rows: number, cols: number): void {
@@ -4241,6 +4277,16 @@ self.onmessage = (event) => {
       },
     }),
     sqlite: registerWorkerHostModule({
+      /** Releases the database image retained by a Rust-owned connection. */
+      close(id: string): void {
+        sqliteConnection(id).db.close();
+        sqliteConnections.delete(id);
+      },
+      /** Publishes a standalone SQLite image without translating tables or records. */
+      snapshotDatabase(id: string, destination: string): void {
+        if (storageHasFile(runtimePrefix, destination)) throw new Error("SQLite snapshot destination already exists");
+        storageWrite(runtimePrefix, destination, exportSqliteDatabase(sqliteConnection(id)));
+      },
       open(path: string): string {
         if (!SQLite) {
           throw new Error("sqlite host is not initialized");
@@ -4626,40 +4672,26 @@ self.onmessage = (event) => {
       getSystemSetting(namespace: string, setting: string) {
         return { namespace, setting, value: "" };
       },
-      installApp(path: string) {
-        return { operationType: "install", packageName: path, success: false, details: "" };
+      installApp(_path: string) {
+        throw new Error("Browser security does not allow installing native application packages. Download the package and use your system installer.");
       },
-      uninstallApp(packageName: string) {
-        return { operationType: "uninstall", packageName, success: false, details: "" };
+      uninstallApp(_packageName: string) {
+        throw new Error("Browser security does not allow uninstalling native applications. Use your system application settings.");
       },
-      listInstalledApps(includeSystemApps: boolean) {
-        return { includesSystemApps: includeSystemApps, packages: [] as string[] };
+      listInstalledApps(_includeSystemApps: boolean) {
+        throw new Error("Browsers cannot enumerate installed native applications.");
       },
-      startApp(packageName: string) {
-        return { operationType: "start", packageName, success: false, details: "" };
+      startApp(_packageName: string) {
+        throw new Error("Browsers cannot launch arbitrary native application identifiers.");
       },
-      stopApp(packageName: string) {
-        return { operationType: "stop", packageName, success: false, details: "" };
+      stopApp(_packageName: string) {
+        throw new Error("Browsers cannot stop native application processes.");
       },
-      /** Rejects notification history that browsers do not expose to applications. */
       getNotifications() {
         throw new Error("Browsers do not expose other applications' system notifications");
       },
-      getAppUsageTime(
-        packageName: string,
-        sinceHours: number,
-        limit: number,
-        includeSystemApps: boolean,
-      ) {
-        return {
-          startTime: Date.now(),
-          endTime: Date.now(),
-          sinceHours,
-          requestedPackageName: packageName,
-          includesSystemApps: includeSystemApps,
-          totalEntries: 0,
-          entries: [] as string[],
-        };
+      getAppUsageTime(_packageName: string, _sinceHours: number, _limit: number, _includeSystemApps: boolean) {
+        throw new Error("Browsers do not expose native application foreground usage history.");
       },
       /** Acquires a current user-authorized position from the browser. */
       getDeviceLocation(timeout: number, highAccuracy: boolean, includeAddress: boolean) {
@@ -4689,7 +4721,7 @@ self.onmessage = (event) => {
           availableMemory: "",
           totalStorage: "",
           availableStorage: "",
-          batteryLevel: 0,
+          batteryLevel: -1,
           batteryCharging: false,
           cpuInfo: "",
           networkType: navigator.onLine ? "online" : "offline",

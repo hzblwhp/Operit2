@@ -6,7 +6,7 @@ use crate::core::chat::plugins::MessageProcessingPluginRegistry::{
     MessageProcessingHookParams, MessageProcessingPluginRegistry,
 };
 use crate::data::preferences::ApiPreferences::ApiPreferences;
-use operit_host_api::FileSystemHost;
+use operit_vfs::VisualFileSystem::VisualFileSystem;
 use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
 use operit_model::AttachmentInfo::AttachmentInfo;
 use operit_model::ChatMessage::ChatMessage;
@@ -29,12 +29,16 @@ use operit_util::stream::RevisableTextStream::with_event_channel_shared;
 use operit_util::stream::Stream::Stream;
 use operit_util::AppLogger::AppLogger;
 use operit_util::ChainLogger::{self, PLUGIN_CHAIN, RECEIVE_CHAIN, SEND_CHAIN};
+use operit_util::ChatMarkupRegex::ChatMarkupRegex;
 use operit_util::ImagePoolManager::ImagePoolManager;
 use operit_util::MediaLinkBuilder::MediaLinkBuilder;
 use operit_util::MediaPoolManager::MediaPoolManager;
 
 const DEFAULT_CHAT_KEY: &str = "__DEFAULT_CHAT__";
 const MESSAGE_PROCESS_TIMING_TAG: &str = "MessageProcessTiming";
+/// Bounds the appended review independently of the model-generated summary.
+const MAX_CONVERSATION_REVIEW_ENTRIES: usize = 100;
+const CONVERSATION_REVIEW_HEAD_ENTRIES: usize = 30;
 
 pub struct AIMessageManager;
 
@@ -48,7 +52,7 @@ pub struct BuildUserMessageContentRequest {
     pub messageText: String,
     pub proxySenderName: Option<String>,
     pub attachments: Vec<AttachmentInfo>,
-    pub fileSystemHost: Option<Arc<dyn FileSystemHost>>,
+    pub filesystem: Option<VisualFileSystem>,
     pub workspacePath: Option<String>,
     pub replyToMessage: Option<ChatMessage>,
     pub enableDirectImageProcessing: bool,
@@ -270,7 +274,7 @@ impl AIMessageManager {
             .map(|attachment| {
                 Self::buildAttachmentTag(
                     attachment,
-                    request.fileSystemHost.as_deref(),
+                    request.filesystem.as_ref(),
                     request.enableDirectImageProcessing,
                     request.enableDirectAudioProcessing,
                     request.enableDirectVideoProcessing,
@@ -547,7 +551,7 @@ impl AIMessageManager {
                         }),
                     )
                 {
-                    Self::cancelOperationForId(&chatKey, Some(operationId)).await;
+                    Self::cancelOperationForId(&chatKey, Some(operationId)).await?;
                     return Err(AiServiceError::RequestFailed(error.to_string()));
                 }
                 ChainLogger::verbose_with_level(
@@ -577,6 +581,8 @@ impl AIMessageManager {
         autoContinue: bool,
         chatId: String,
         configuration: &ChatConfigurationResult,
+        progress: Option<operit_providers::chat::enhance::ConversationService::SummaryProgressCallback>,
+        trigger: Option<operit_providers::chat::enhance::ConversationService::SummaryTriggerContext>,
     ) -> Result<Option<ChatMessage>, operit_providers::chat::llmprovider::AIService::AiServiceError>
     {
         let lastSummaryIndex = messages
@@ -625,8 +631,8 @@ impl AIMessageManager {
         }).collect::<Vec<_>>();
 
         let startTime = ChatMessageTimestampAllocator::currentTimeMillis();
-        let summary = enhancedAiService
-            .generateSummaryForConfiguration(conversationToSummarize, previousSummary, chatId, configuration)
+        let (summary, usage) = enhancedAiService
+            .generateSummaryForConfiguration(conversationToSummarize, previousSummary, chatId, configuration, progress, trigger)
             .await?;
         let endTime = ChatMessageTimestampAllocator::currentTimeMillis();
         if summary.trim().is_empty() {
@@ -655,16 +661,8 @@ impl AIMessageManager {
         keptReviewEntries.reverse();
 
         let mut summaryWithQuotes = summary.trim().to_string();
-        if !keptReviewEntries.is_empty() {
-            summaryWithQuotes.push_str("\n\n【对话回顾】\n");
-            for (speaker, content) in keptReviewEntries {
-                summaryWithQuotes.push_str("- ");
-                summaryWithQuotes.push_str(&speaker);
-                summaryWithQuotes.push_str(": ");
-                summaryWithQuotes.push_str(&content);
-                summaryWithQuotes.push('\n');
-            }
-        }
+        // Keep the review in the same language as the summary prompt.
+        appendConversationReview(&mut summaryWithQuotes, &conversationReviewEntries, false);
 
         let finalSummary = if autoContinue {
             format!(
@@ -675,9 +673,6 @@ impl AIMessageManager {
             summaryWithQuotes.trim_end().to_string()
         };
 
-        let estimatedInputTokens = (summaryWithQuotes.len() * 3 / 2).max(1) as i64;
-        let estimatedOutputTokens = (finalSummary.len() / 2).max(1) as i64;
-
         Ok(Some(ChatMessage {
             sender: "summary".to_string(),
             parts: vec![operit_model::MessagePart::MessagePart::markdown(
@@ -687,8 +682,9 @@ impl AIMessageManager {
             )],
             timestamp: ChatMessageTimestampAllocator::next(),
             roleName: "system".to_string(),
-            inputTokens: estimatedInputTokens,
-            outputTokens: estimatedOutputTokens,
+            inputTokens: usage.input,
+            outputTokens: usage.output,
+            cachedInputTokens: usage.cached_input,
             waitDurationMs: (endTime - startTime).max(1),
             sentAt: startTime,
             completedAt: endTime,
@@ -725,84 +721,16 @@ impl AIMessageManager {
     }
 
     #[allow(non_snake_case)]
+    /// Automatic summaries depend only on the configured context token threshold.
     pub fn shouldGenerateSummary(
-        messages: Vec<ChatMessage>,
         currentTokens: i64,
         maxTokens: i32,
         tokenUsageThreshold: f64,
         enableSummary: bool,
-        _enableSummaryByMessageCount: bool,
-        _summaryMessageCountThreshold: i32,
-        // 仅用于日志：TokenCacheManager 是 provider 级（按模型缓存），多个会话共用一个实例，
-        // 没 chatId 就没法把 estimate/judge 记录归到具体会话，会看成"同一序列忽高忽低"。
-        chatId: &str,
     ) -> bool {
-        if !enableSummary {
-            return false;
-        }
-        if maxTokens <= 0 {
-            return false;
-        }
-
-        // 落盘（写摘要）只认一个指标：当前窗口已用 token 占上限的比例。
-        //
-        // **刻意不按消息条数判断。** 条数与上下文压力没有对应关系：
-        // 几十条短消息可能只占几个百分点，而两三段长代码就能顶满窗口。
-        // 按条数触发在两端都会判错 —— 空转的时候频繁重写摘要、
-        // 真快爆窗的时候反而迟迟不动。
-        //
-        // 水位的含义：历史截取起点是「最后一条 summary 之后」，
-        // 每写一次摘要，起点就往前挪一次，provider 的 prefix cache 前缀
-        // 随之整段作废。所以落盘必须足够稀疏 —— 用 90% 这个高位，
-        // 让中间绝大多数轮次共享同一段前缀。
-        // 摘要水位必须衡量真实历史总量，而不是任何残余值。
-        //
-        // 现在历史已不再做 token 预算裁剪，这里的总量就是最终发出去的量。
-        // 仍保留「从原始消息重算一遍」是有意的防御：将来若有人在别处重新引入
-        // 截断，水位也必须按真实体量判断，不能被残余值骗过。
-        //
-        // 历史教训：曾用裁剪后的 currentTokens 判水位，只要裁剪先发生，
-        // currentTokens 就永远低于水位，摘要一次都不会触发 —— 历史无限膨胀。
-        // 实测 totalChars=1,396,833（约 499K token）被裁到 336,000 字符
-        // （约 113K token），水位 180K 永远达不到，turns 只涨不降。
-        //
-        // 因此这里直接从原始消息算一遍总量，与裁剪前的历史对齐。
-        // 范围与裁剪一致：从最后一条 summary 开始（更早的消息本来就不发送）。
-        let lastSummaryIndex = messages.iter().rposition(|message| message.sender == "summary");
-        let relevantMessages = match lastSummaryIndex {
-            Some(index) => &messages[index..],
-            None => messages.as_slice(),
-        };
-        let historyChars: usize = relevantMessages
-            .iter()
-            .map(|message| {
-                MessagePartCodec::orderedParts(&message.parts)
-                    .iter()
-                    .map(|part| part.content.chars().count())
-                    .sum::<usize>()
-            })
-            .sum();
-        let historyTokens = (historyChars as f64 / Self::CHARS_PER_TOKEN_ESTIMATE) as i64;
-        // 取较大者：未裁剪时 currentTokens 就是真实值；被裁剪过则 historyTokens 更接近真实量。
-        let effectiveTokens = currentTokens.max(historyTokens);
-        let usageRatio = effectiveTokens as f64 / f64::from(maxTokens);
-
-        // 配置里的阈值可能被存成更小的历史值（旧默认是 0.70），
-        // 但落盘水位不允许低于 90%；配置只能把它调得更保守。
-        let watermark = if tokenUsageThreshold > 0.0 {
-            tokenUsageThreshold.max(Self::SUMMARIZE_TOKEN_WATERMARK)
-        } else {
-            Self::SUMMARIZE_TOKEN_WATERMARK
-        };
-
-        AppLogger::w(
-            "SummaryGate",
-            &format!(
-                "watermark chatId={} currentTokens={} historyChars={} historyTokens={} effective={} maxTokens={} ratio={:.3} wm={:.3}",
-                chatId, currentTokens, historyChars, historyTokens, effectiveTokens, maxTokens, usageRatio, watermark,
-            ),
-        );
-        usageRatio >= watermark
+        enableSummary
+            && maxTokens > 0
+            && currentTokens as f64 / f64::from(maxTokens) >= tokenUsageThreshold
     }
 
     /// 写入摘要（落盘）的 token 水位。
@@ -978,22 +906,33 @@ impl AIMessageManager {
     /// Builds the serialized markup for one attachment.
     fn buildAttachmentTag(
         attachment: &AttachmentInfo,
-        fileSystemHost: Option<&dyn FileSystemHost>,
+        filesystem: Option<&VisualFileSystem>,
         enableDirectImageProcessing: bool,
         enableDirectAudioProcessing: bool,
         enableDirectVideoProcessing: bool,
     ) -> Result<String, String> {
+        if attachment.vfsPath.is_none()
+            && attachment.nodeId.is_none()
+            && attachment.filePath.starts_with("pasted_text_")
+            && attachment.mimeType == "text/plain"
+        {
+            let attributes = Self::buildAttachmentAttributes(attachment);
+            // Selected document text is data and must not close or introduce markup.
+            let content = attachment
+                .content
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            return Ok(format!("<attachment {attributes}>{content}</attachment>"));
+        }
         // A synchronized attachment has a device-independent VFS locator. Resolve
         // that exact shared path locally before considering its original host path.
-        let replica = fileSystemHost.and_then(|host| {
+        let replica = filesystem.and_then(|files| {
             let path = attachment.fileToolPath();
             if !["/operitapp/outputs/", "/operitapp/workspaces/", "/operitapp/data/data/chat_attachments/", "/app/workspaces/", "/app/outputs/", "/app/data/data/chat_attachments/"].iter().any(|root| path.starts_with(root)) { return None; }
-            let storage = operit_store::RuntimeStorageHost::defaultRuntimeStorageHostOption()?;
-            let mapper = operit_tools::files::PathMapper::PathMapper::new(storage.runtimeRootDir()?, storage.workspaceRootDir()?, storage);
-            let physical = mapper.resolve(&path).ok()?.nativePath().ok()?;
-            let found = host.fileExists(&physical).ok()?;
+            let found = files.fileExists(&path).ok()?;
             if !found.exists || found.isDirectory || found.size != attachment.fileSize { return None; }
-            let mut local = attachment.clone(); local.filePath = physical;
+            let mut local = attachment.clone(); local.filePath = path;
             Some(local)
         });
         let attachment = replica.as_ref().unwrap_or(attachment);
@@ -1013,7 +952,7 @@ impl AIMessageManager {
                 .to_ascii_lowercase()
                 .starts_with("image/")
         {
-            match Self::buildDirectImageAttachmentTag(attachment, fileSystemHost) {
+            match Self::buildDirectImageAttachmentTag(attachment, filesystem) {
                 Ok(tag) => return Ok(tag),
                 Err(error) => {
                     // Match the Kotlin chain: a failed image-pool registration must fall
@@ -1034,7 +973,7 @@ impl AIMessageManager {
                 .to_ascii_lowercase()
                 .starts_with("audio/")
         {
-            return Self::buildDirectMediaAttachmentTag(attachment, fileSystemHost, "audio");
+            return Self::buildDirectMediaAttachmentTag(attachment, filesystem, "audio");
         }
         if enableDirectVideoProcessing
             && attachment
@@ -1042,7 +981,7 @@ impl AIMessageManager {
                 .to_ascii_lowercase()
                 .starts_with("video/")
         {
-            return Self::buildDirectMediaAttachmentTag(attachment, fileSystemHost, "video");
+            return Self::buildDirectMediaAttachmentTag(attachment, filesystem, "video");
         }
 
         let attributes = Self::buildAttachmentAttributes(attachment);
@@ -1055,10 +994,10 @@ impl AIMessageManager {
     /// Builds an attachment tag and media link for a direct image attachment.
     fn buildDirectImageAttachmentTag(
         attachment: &AttachmentInfo,
-        fileSystemHost: Option<&dyn FileSystemHost>,
+        filesystem: Option<&VisualFileSystem>,
     ) -> Result<String, String> {
         let attributes = Self::buildAttachmentAttributes(attachment);
-        let imageId = Self::registerDirectImageAttachment(attachment, fileSystemHost)?;
+        let imageId = Self::registerDirectImageAttachment(attachment, filesystem)?;
         let imageLink = MediaLinkBuilder::image(&imageId);
         let mut attachedContent = "Image content has been attached as multimodal input with this message. Do not call file reading tools to read this path.".to_string();
         if !attachment.content.trim().is_empty() {
@@ -1073,14 +1012,13 @@ impl AIMessageManager {
     /// Registers an image attachment in the process image pool.
     fn registerDirectImageAttachment(
         attachment: &AttachmentInfo,
-        fileSystemHost: Option<&dyn FileSystemHost>,
+        filesystem: Option<&VisualFileSystem>,
     ) -> Result<String, String> {
-        let Some(fileSystemHost) = fileSystemHost else {
-            return Err("FileSystemHost is required for direct image attachment".to_string());
+        let Some(filesystem) = filesystem else {
+            return Err("VFS is required for direct image attachment".to_string());
         };
-        let bytes = fileSystemHost
-            .readFileBytes(&attachment.filePath)
-            .map_err(|error| error.message)?;
+        let source = filesystem.fileResource(None, &attachment.filePath)?;
+        let bytes = operit_host_api::FileSource::readBytes(&source).map_err(|error| error.message)?;
         if bytes.is_empty() {
             return Err(format!(
                 "image attachment is empty: {}",
@@ -1100,10 +1038,10 @@ impl AIMessageManager {
     /// Builds a canonical audio or video media link backed by the process media pool.
     fn buildDirectMediaAttachmentTag(
         attachment: &AttachmentInfo,
-        fileSystemHost: Option<&dyn FileSystemHost>,
+        filesystem: Option<&VisualFileSystem>,
         mediaType: &str,
     ) -> Result<String, String> {
-        let mediaId = Self::registerDirectMediaAttachment(attachment, fileSystemHost, mediaType)?;
+        let mediaId = Self::registerDirectMediaAttachment(attachment, filesystem, mediaType)?;
         let mediaLink = match mediaType {
             "audio" => MediaLinkBuilder::audio(&mediaId),
             "video" => MediaLinkBuilder::video(&mediaId),
@@ -1118,17 +1056,16 @@ impl AIMessageManager {
     /// Registers an audio or video attachment in the process media pool.
     fn registerDirectMediaAttachment(
         attachment: &AttachmentInfo,
-        fileSystemHost: Option<&dyn FileSystemHost>,
+        filesystem: Option<&VisualFileSystem>,
         mediaType: &str,
     ) -> Result<String, String> {
-        let Some(fileSystemHost) = fileSystemHost else {
+        let Some(filesystem) = filesystem else {
             return Err(format!(
-                "FileSystemHost is required for direct {mediaType} attachment"
+                "VFS is required for direct {mediaType} attachment"
             ));
         };
-        let bytes = fileSystemHost
-            .readFileBytes(&attachment.filePath)
-            .map_err(|error| error.message)?;
+        let source = filesystem.fileResource(None, &attachment.filePath)?;
+        let bytes = operit_host_api::FileSource::readBytes(&source).map_err(|error| error.message)?;
         if bytes.is_empty() {
             return Err(format!(
                 "{mediaType} attachment is empty: {}",
@@ -1264,27 +1201,27 @@ impl AIMessageManager {
     }
 
     #[allow(non_snake_case)]
-    pub async fn cancelCurrentOperation() {
+    pub async fn cancelCurrentOperation() -> Result<(), AiServiceError> {
         let lock = LAST_ACTIVE_CHAT_KEY.get_or_init(|| Mutex::new(DEFAULT_CHAT_KEY.to_string()));
         let chatKey = lock
             .lock()
             .expect("last active chat key mutex poisoned")
             .clone();
-        Self::cancelOperation(chatKey).await;
+        Self::cancelOperation(chatKey).await
     }
 
     #[allow(non_snake_case)]
-    pub async fn cancelOperation(chatId: String) {
+    pub async fn cancelOperation(chatId: String) -> Result<(), AiServiceError> {
         let chatKey = if chatId.trim().is_empty() {
             DEFAULT_CHAT_KEY.to_string()
         } else {
             chatId
         };
-        Self::cancelOperationForId(&chatKey, None).await;
+        Self::cancelOperationForId(&chatKey, None).await
     }
 
     /// Takes ownership of the service before anything can close the response stream.
-    async fn cancelOperationForId(chatKey: &str, expectedOperationId: Option<u64>) {
+    async fn cancelOperationForId(chatKey: &str, expectedOperationId: Option<u64>) -> Result<(), AiServiceError> {
         let operation = {
             let mut operations = activeChatOperations()
                 .lock()
@@ -1297,7 +1234,7 @@ impl AIMessageManager {
             }
         };
         let Some((operationId, mut operation)) = operation else {
-            return;
+            return Ok(());
         };
         // Close the per-send gate immediately, including a send that has not yet
         // entered the provider or registered its execution context.
@@ -1316,7 +1253,7 @@ impl AIMessageManager {
         if let Some(stream) = operation.responseStream {
             stream.close();
         }
-        operation.enhancedAiService.cancelConversation().await;
+        let usageResult = operation.enhancedAiService.cancelConversation().await;
         ChainLogger::info(
             SEND_CHAIN,
             "send.cancel.done",
@@ -1325,16 +1262,23 @@ impl AIMessageManager {
                 ("operationId", operationId.to_string()),
             ],
         );
+        usageResult
     }
 
     #[allow(non_snake_case)]
-    pub async fn cancelAllOperations() {
+    pub async fn cancelAllOperations() -> Result<(), AiServiceError> {
         let operations = activeChatOperations()
             .lock()
             .expect("active chat operations mutex poisoned")
             .snapshot();
+        let mut errors = Vec::new();
         for (chatKey, operationId) in operations {
-            Self::cancelOperationForId(&chatKey, Some(operationId)).await;
+            if let Err(error) = Self::cancelOperationForId(&chatKey, Some(operationId)).await {
+                errors.push(format!("{chatKey}: {error}"));
+            }
+        }
+        if errors.is_empty() { Ok(()) } else {
+            Err(AiServiceError::RequestFailed(errors.join("; ")))
         }
     }
 }
@@ -1377,6 +1321,43 @@ fn remove_status_tags(input: &str) -> String {
         .to_string()
 }
 
+/// Keeps the earliest context and the latest exchanges, omitting the middle of long reviews.
+#[allow(non_snake_case)]
+fn appendConversationReview(summary: &mut String, entries: &[(String, String)], useEnglish: bool) {
+    if entries.is_empty() {
+        return;
+    }
+    summary.push_str(if useEnglish {
+        "\n\n【Conversation Review】\n"
+    } else {
+        "\n\n【对话回顾】\n"
+    });
+    let appendEntries = |summary: &mut String, entries: &[(String, String)]| {
+        for (speaker, content) in entries {
+            summary.push_str("- ");
+            summary.push_str(speaker);
+            summary.push_str(": ");
+            summary.push_str(content);
+            summary.push('\n');
+        }
+    };
+    if entries.len() <= MAX_CONVERSATION_REVIEW_ENTRIES {
+        appendEntries(summary, entries);
+        return;
+    }
+    let tailCount = MAX_CONVERSATION_REVIEW_ENTRIES - CONVERSATION_REVIEW_HEAD_ENTRIES;
+    appendEntries(summary, &entries[..CONVERSATION_REVIEW_HEAD_ENTRIES]);
+    let omittedCount = entries.len() - MAX_CONVERSATION_REVIEW_ENTRIES;
+    if useEnglish {
+        summary.push_str(&format!(
+            "- [...Middle messages omitted: {omittedCount}...]\n"
+        ));
+    } else {
+        summary.push_str(&format!("- [...中间省略 {omittedCount} 条消息...]\n"));
+    }
+    appendEntries(summary, &entries[entries.len() - tailCount..]);
+}
+
 #[allow(non_snake_case)]
 fn cleanSummarySourceMessage(message: &ChatMessage) -> String {
     let source = if message.sender == "ai" {
@@ -1384,7 +1365,7 @@ fn cleanSummarySourceMessage(message: &ChatMessage) -> String {
     } else {
         message.displayText()
     };
-    let mut cleaned = strip_tag_blocks(&source, "memory");
+    let mut cleaned = strip_tag_blocks(&ChatMarkupRegex::remove_meta_tags(&source), "memory");
     if message.sender == "ai" {
         cleaned = remove_thinking_content(&cleaned);
     }
@@ -1406,7 +1387,10 @@ fn summarySpeakerLabel(message: &ChatMessage) -> String {
 fn condenseUserForReview(text: &str) -> String {
     let pruned = strip_tag_blocks(
         &strip_tag_blocks(
-            &strip_tag_blocks(text, "workspace_attachment"),
+            &strip_tag_blocks(
+                &ChatMarkupRegex::remove_meta_tags(text),
+                "workspace_attachment",
+            ),
             "attachment",
         ),
         "reply_to",
@@ -1419,10 +1403,11 @@ fn condenseUserForReview(text: &str) -> String {
 fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
     let mut segments = Vec::<String>::new();
     for part in MessagePartCodec::orderedParts(&message.parts) {
+        let content = ChatMarkupRegex::remove_meta_tags(&part.content);
         let segment = match part.kind {
             MessagePartKind::Markdown | MessagePartKind::Status => {
                 let cleaned = strip_xml_tags(&strip_media_links(&strip_tag_blocks(
-                    &part.content,
+                    &content,
                     "memory",
                 )));
                 let condensed = condense_head_tail(&cleaned, 120, 48);
@@ -1442,7 +1427,11 @@ fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
                         format!(
                             "{}={}",
                             name,
-                            condense_head_tail(&strip_xml_tags(value), 72, 32)
+                            condense_head_tail(
+                                &strip_xml_tags(&ChatMarkupRegex::remove_meta_tags(value)),
+                                72,
+                                32,
+                            )
                         )
                     })
                     .collect::<Vec<_>>();
@@ -1467,7 +1456,7 @@ fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
                         _ => value.as_str(),
                     })
                     .unwrap_or("");
-                let result = condense_head_tail(&strip_xml_tags(&part.content), 140, 56);
+                let result = condense_head_tail(&strip_xml_tags(&content), 140, 56);
                 let status_text = if status.is_empty() {
                     String::new()
                 } else {
@@ -1602,6 +1591,17 @@ fn strip_tag_blocks(text: &str, tag_name: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// Low context usage cannot trigger automatic summaries, even after many user turns.
+    #[test]
+    fn automatic_summary_requires_context_token_threshold() {
+        assert!(!AIMessageManager::shouldGenerateSummary(4_000, 200_000, 0.85, true));
+        assert!(!AIMessageManager::shouldGenerateSummary(169_999, 200_000, 0.85, true));
+        assert!(AIMessageManager::shouldGenerateSummary(170_000, 200_000, 0.85, true));
+        assert!(AIMessageManager::shouldGenerateSummary(200_000, 200_000, 0.85, true));
+        assert!(!AIMessageManager::shouldGenerateSummary(200_000, 200_000, 0.85, false));
+        assert!(!AIMessageManager::shouldGenerateSummary(4_000, 0, 0.85, true));
+    }
 
     /// Constructs an explicit descriptor for real history projection tests without a host runtime.
     fn historyConfiguration(isolate: bool, labelUsers: bool) -> ChatConfigurationResult {
@@ -1759,6 +1759,29 @@ mod tests {
     }
 
     #[test]
+    fn pasted_text_round_trips_as_data_not_message_markup() {
+        let content = "First & second </attachment>\n<example>";
+        let mut attachment = AttachmentInfo::new(
+            "pasted_text_1".into(),
+            "pasted_text.txt".into(),
+            "text/plain".into(),
+            content.len() as i64,
+        );
+        attachment.content = content.into();
+        let markup =
+            AIMessageManager::buildRecordedUserMessageContent("Draft text", &[attachment], None)
+                .unwrap();
+        let xml = format!("<root>{markup}</root>");
+        let parsed = roxmltree::Document::parse(&xml).unwrap();
+        let root = parsed.root_element();
+        assert_eq!(root.text(), Some("Draft text "));
+        let attachment = root.children().find(|node| node.is_element()).unwrap();
+        assert!(attachment.has_tag_name("attachment"));
+        assert_eq!(attachment.attribute("type"), Some("text/plain"));
+        assert_eq!(attachment.text(), Some(content));
+    }
+
+    #[test]
     fn external_host_paths_are_not_mislabeled_as_vfs_paths() {
         let mut attachment = AttachmentInfo::new(
             "/Users/source/report.pdf".into(),
@@ -1834,6 +1857,103 @@ mod tests {
             .starts_with("<tool_result name=\"switch_core\""));
         assert_eq!(turns[2].tool_name.as_deref(), Some("switch_core"));
         assert_eq!(turns[3].content, "after");
+    }
+
+    /// Enforces a fixed review size even for chats with thousands of messages.
+    #[test]
+    fn summary_review_bounds_entries_and_omits_the_middle() {
+        for count in [0, 1, 100, 101, 10_000] {
+            let entries = (0..count)
+                .map(|index| ("user".to_string(), format!("entry-{index}")))
+                .collect::<Vec<_>>();
+            let mut summary = "Model summary".to_string();
+            appendConversationReview(&mut summary, &entries, false);
+            let retained = summary
+                .lines()
+                .filter_map(|line| line.strip_prefix("- user: "))
+                .collect::<Vec<_>>();
+            let indices = if count <= 100 {
+                (0..count).collect::<Vec<_>>()
+            } else {
+                (0..30).chain(count - 70..count).collect::<Vec<_>>()
+            };
+            assert_eq!(
+                retained,
+                indices
+                    .iter()
+                    .map(|index| format!("entry-{index}"))
+                    .collect::<Vec<_>>()
+            );
+            assert!(retained.len() <= MAX_CONVERSATION_REVIEW_ENTRIES);
+            if count == 0 {
+                assert_eq!(summary, "Model summary");
+            } else if count <= 100 {
+                assert!(!summary.contains("中间省略"));
+            } else {
+                assert!(summary.contains(&format!("中间省略 {} 条消息", count - 100)));
+                assert!(
+                    summary.len() < 3000,
+                    "the review must stay bounded at {count} entries"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn summary_review_localizes_the_omission_marker() {
+        let entries = vec![("AI".to_string(), "reply".to_string()); 101];
+        let mut summary = String::new();
+        appendConversationReview(&mut summary, &entries, true);
+        assert!(summary.contains("【Conversation Review】"));
+        assert!(summary.contains("Middle messages omitted: 1"));
+        assert!(!summary.contains("对话回顾"));
+        assert!(!summary.contains("省略"));
+    }
+
+    #[test]
+    fn summary_source_and_review_remove_meta_payloads_before_truncation() {
+        let payload = "SECRET".repeat(100);
+        let text = format!("前文<meta provider=\"openai:reasoning\">{payload}</meta>后文");
+        let assistant = ChatMessage::new_with_markdown("ai".to_string(), text.clone());
+        let user = ChatMessage::new_with_markdown("user".to_string(), text.clone());
+        assert_eq!(cleanSummarySourceMessage(&assistant), "前文 后文");
+        assert_eq!(cleanSummarySourceMessage(&user), "前文 后文");
+        assert_eq!(condenseAssistantMessageForReview(&assistant), "前文 后文");
+        assert_eq!(condenseUserForReview(&text), "前文 后文");
+        assert!(assistant.displayText().contains(&payload));
+    }
+
+    #[test]
+    fn summary_review_removes_meta_in_tool_parameters_and_results() {
+        let mut params = BTreeMap::new();
+        params.insert(
+            "query".to_string(),
+            "before<meta>SECRET_PARAM</meta>after".to_string(),
+        );
+        let message = ChatMessage::new_with_parts(
+            "ai".to_string(),
+            vec![
+                MessagePart::toolCall(
+                    "call".to_string(),
+                    0,
+                    "tool".to_string(),
+                    "search".to_string(),
+                    params,
+                ),
+                MessagePart::toolResult(
+                    "result".to_string(),
+                    1,
+                    Some("call".to_string()),
+                    "search".to_string(),
+                    "success".to_string(),
+                    "answer<meta>SECRET_RESULT</meta>done".to_string(),
+                ),
+            ],
+        );
+        let review = condenseAssistantMessageForReview(&message);
+        assert!(review.contains("query=before after"));
+        assert!(review.contains("answer done"));
+        assert!(!review.contains("SECRET"));
     }
 
     /// Verifies summary review condenses structured tool results instead of dumping payloads.

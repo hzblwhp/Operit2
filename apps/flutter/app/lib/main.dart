@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:desktop_widgets/desktop_widgets.dart';
 import 'package:floating_windows/floating_windows.dart';
+import 'package:fvp/fvp.dart' as fvp;
 import 'package:operit_keep_alive/operit_keep_alive.dart';
 import 'package:operit_ui/operit_ui.dart'
     show prepareLiquidGlass, OperitDesignCaptureScope;
@@ -16,6 +17,7 @@ import 'core/errors/UnhandledErrorReporter.dart';
 import 'core/logging/ClientLogger.dart';
 import 'core/mcp/McpHttpServer.dart';
 import 'core/notifications/NotificationActivationService.dart';
+import 'core/host/IncomingAttachmentService.dart';
 import 'core/runtime/RuntimeBootstrapManager.dart';
 import 'ui/features/packages/screens/GitHubOAuthLoginCallback.dart';
 import 'ui/main/OperitApp.dart';
@@ -52,12 +54,14 @@ void main(List<String> arguments) async {
             name: 'Operit Data Rescue',
             child: DataRescueApp(
               canStopNormalProcess: launch['canStopNormalProcess'] == true,
+              canManageFiles: launch['canManageFiles'] == true,
             ),
           ),
         );
         applicationStarted = true;
         return;
       }
+      fvp.registerWith();
       await platformCoreProxy.dataRescue({'operation': 'runtimeLease'});
       consumeGitHubOAuthWebCallbackAtStartup();
       final bindingElapsedMs = bindingStopwatch.elapsedMilliseconds;
@@ -98,6 +102,7 @@ void main(List<String> arguments) async {
         );
       } else {
         NotificationActivationService.instance.initialize(arguments);
+        IncomingAttachmentService.instance.initialize();
         final runtimeStopwatch = Stopwatch()..start();
         await RuntimeBootstrapManager.instance.initialize();
         ClientLogger.v(
@@ -163,7 +168,6 @@ void main(List<String> arguments) async {
                         androidServiceClassName: 'app.operit.OperitCoreService',
                         openLabel: '打开 Operit2',
                         exitLabel: '退出 Operit2',
-                        quitMessage: '退出将停止后台任务。确定退出 Operit2？',
                       ),
                     );
                   }

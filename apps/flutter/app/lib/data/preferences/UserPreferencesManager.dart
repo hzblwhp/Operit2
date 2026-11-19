@@ -49,6 +49,7 @@ class UserPreferencesManager {
   static const String ON_COLOR_MODE_DARK = 'dark';
   static const String FONT_TYPE_SYSTEM = 'system';
   static const String FONT_TYPE_FILE = 'file';
+  static const String FONT_TYPE_DEVICE = 'device';
   static const String SYSTEM_FONT_DEFAULT = 'default';
   static const String SYSTEM_FONT_SERIF = 'serif';
   static const String SYSTEM_FONT_SANS_SERIF = 'sans-serif';
@@ -307,6 +308,38 @@ class UserPreferencesManager {
       ..._appearancePreferenceKeys.values,
       'use_system_theme',
     ]);
+    final resolved = _themeSnapshotFromPreferences(preferences);
+    if (preferences['use_system_theme'] == null) return resolved;
+    await _clients.application.themeConfigManager().patchAppearance(
+      initialSnapshot: defaultThemePreferenceSnapshot.toJson(),
+      values: <String, Object?>{'theme_mode': resolved.themeMode.name},
+      removeKeys: const <String>[],
+    );
+    return resolved;
+  }
+
+  /// Projects committed watch payloads without rereading storage for every event.
+  Stream<ThemePreferenceSnapshot> themePreferenceSnapshotFlow() =>
+      preferencesFlow()
+          .map(_appearancePreferences)
+          .distinct(mapEquals)
+          .map(_themeSnapshotFromPreferences);
+
+  /// Filters unrelated settings before appearance validation and change detection.
+  static Map<String, Object?> _appearancePreferences(
+    Map<String, Object?> preferences,
+  ) => <String, Object?>{
+    for (final key in <String>[
+      ..._appearancePreferenceKeys.values,
+      'use_system_theme',
+    ])
+      if (preferences.containsKey(key)) key: preferences[key],
+  };
+
+  /// Decodes only appearance keys, including the released system-theme flag.
+  static ThemePreferenceSnapshot _themeSnapshotFromPreferences(
+    Map<String, Object?> preferences,
+  ) {
     final snapshot = defaultThemePreferenceSnapshot.toJson();
     for (final entry in _appearancePreferenceKeys.entries) {
       final value = preferences[entry.value];
@@ -318,11 +351,6 @@ class UserPreferencesManager {
     if (_decodeBool(legacySystemTheme)) {
       snapshot['themeMode'] = ThemeMode.system.name;
     }
-    await _clients.application.themeConfigManager().patchAppearance(
-      initialSnapshot: defaultThemePreferenceSnapshot.toJson(),
-      values: <String, Object?>{'theme_mode': snapshot['themeMode']},
-      removeKeys: const <String>[],
-    );
     return ThemePreferenceSnapshot.fromJson(snapshot);
   }
 
@@ -428,6 +456,8 @@ class UserPreferencesManager {
     String? bubbleAiSystemFontName,
     String? bubbleAiCustomFontPath,
   }) async {
+    final changesGlobalFont =
+        fontType != null || systemFontName != null || customFontPath != null;
     await saveAppearanceFields(<String, Object?>{
       if (useCustomColors != null ||
           customPrimaryColor != null ||
@@ -545,15 +575,19 @@ class UserPreferencesManager {
       if (systemFontName != null) 'systemFontName': systemFontName,
       if (customFontPath != null) 'customFontPath': customFontPath,
       if (fontScale != null) 'fontScale': fontScale,
-      if (bubbleUserUseCustomFont != null)
-        'bubbleUserUseCustomFont': bubbleUserUseCustomFont,
+      if (changesGlobalFont || bubbleUserUseCustomFont != null)
+        'bubbleUserUseCustomFont': changesGlobalFont
+            ? false
+            : bubbleUserUseCustomFont,
       if (bubbleUserFontType != null) 'bubbleUserFontType': bubbleUserFontType,
       if (bubbleUserSystemFontName != null)
         'bubbleUserSystemFontName': bubbleUserSystemFontName,
       if (bubbleUserCustomFontPath != null)
         'bubbleUserCustomFontPath': bubbleUserCustomFontPath,
-      if (bubbleAiUseCustomFont != null)
-        'bubbleAiUseCustomFont': bubbleAiUseCustomFont,
+      if (changesGlobalFont || bubbleAiUseCustomFont != null)
+        'bubbleAiUseCustomFont': changesGlobalFont
+            ? false
+            : bubbleAiUseCustomFont,
       if (bubbleAiFontType != null) 'bubbleAiFontType': bubbleAiFontType,
       if (bubbleAiSystemFontName != null)
         'bubbleAiSystemFontName': bubbleAiSystemFontName,

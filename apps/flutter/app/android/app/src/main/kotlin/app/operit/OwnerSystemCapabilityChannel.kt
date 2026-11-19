@@ -89,6 +89,7 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
     }
 
     private var cachedMediaProjectionCaptureManager: MediaProjectionCaptureManager? = null
+    private val uiAutomation = AndroidUiAutomation(activity.applicationContext)
     private var cachedMediaProjection: MediaProjection? = null
     private val ttsPlaybackLock = Any()
     private val ttsPlaybackSynthesisLock = Any()
@@ -116,6 +117,7 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
     private var musicLoopPlayback: Boolean = false
     private var musicMessage: String = "android music player idle"
     private val locationReader = AndroidLocationReader(activity)
+    private val packageOperations = AndroidPackageOperations(activity)
     private val bluetoothClassicSockets = ConcurrentHashMap<String, BluetoothSocket>()
     private val bluetoothClassicServers = ConcurrentHashMap<String, BluetoothServerSocket>()
     private val bluetoothBleSessions = ConcurrentHashMap<String, BluetoothBleSession>()
@@ -146,6 +148,9 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
             "ownerSystemLanguageCode" -> ownerSystemLanguageCode(result)
             "ownerSystemRecognizeText" -> ownerSystemRecognizeText(call, result)
             "ownerSystemOperation" -> ownerSystemOperation(call, result)
+            "ownerFileOpen" -> ownerFilePresentation(call, result, "openFile")
+            "ownerFileShare" -> ownerFilePresentation(call, result, "shareFile")
+            "ownerLocalInference" -> ownerLocalInference(call, result)
             "ownerAudioPlay" -> ownerAudioPlay(call, result)
             "ownerMusicPlayback" -> ownerMusicPlayback(call, result)
             "ownerBluetooth" -> ownerBluetooth(call, result)
@@ -156,8 +161,32 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
         return true
     }
 
+    private fun ownerLocalInference(call: MethodCall, result: MethodChannel.Result) {
+        val payload = call.arguments as? Map<*, *>
+        val method = payload?.get("method") as? String
+        val request = payload?.get("requestJson") as? String
+        if (method == null || request == null) {
+            result.error("INVALID_ARGS", "ownerLocalInference expects method and requestJson", null)
+            return
+        }
+        runtimeHost.runBackground {
+            try {
+                val response = when (method) {
+                    "transcribeLocalSpeech" -> runtimeHost.transcribeLocalSpeech(request)
+                    "synthesizeLocalSpeech" -> runtimeHost.synthesizeLocalSpeech(request)
+                    else -> throw IllegalArgumentException("unsupported local inference method: $method")
+                }
+                activity.runOnUiThread { result.success(mapOf("resultJson" to response)) }
+            } catch (error: Throwable) {
+                activity.runOnUiThread { result.error("OWNER_LOCAL_INFERENCE_ERROR", error.message, null) }
+            }
+        }
+    }
+
     /** Releases owner-host resources and invalidates every active TTS generation. */
     fun release() {
+        uiAutomation.release()
+        packageOperations.release()
         cachedMediaProjectionCaptureManager?.release()
         cachedMediaProjectionCaptureManager = null
         cachedMediaProjection = null
@@ -248,10 +277,33 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
         }
     }
 
-    /** Executes one generic Core-owned system operation. */
+    /** Delivers system uninstall confirmation to the package operation that owns it. */
+    fun onActivityResult(requestCode: Int, resultCode: Int): Boolean =
+        packageOperations.onActivityResult(requestCode, resultCode)
+
     /** Delivers the permission result to the location request that owns it. */
     fun onRequestPermissionsResult(requestCode: Int): Boolean =
         locationReader.onRequestPermissionsResult(requestCode)
+
+    /** Presents files through the same typed owner capability used by other platforms. */
+    private fun ownerFilePresentation(call: MethodCall, result: MethodChannel.Result, operation: String) {
+        runtimeHost.runBackground {
+            val response = try {
+                val payload = call.arguments as? Map<*, *>
+                    ?: throw IllegalArgumentException("File presentation expects a map")
+                val path = payload["path"] as? String
+                    ?: throw IllegalArgumentException("File presentation requires a path")
+                val request = JSONObject().put("operation", operation).put("path", path)
+                if (operation == "shareFile") request.put("title", payload["title"] as? String
+                    ?: throw IllegalArgumentException("File sharing requires a title"))
+                val opened = JSONObject(runtimeHost.fileSystemResourceOperation(request.toString()))
+                mapOf("success" to opened.getBoolean("ok"), "error" to opened.optString("error"))
+            } catch (error: Exception) {
+                mapOf("success" to false, "error" to AndroidFileOpener.safeFailureMessage(error))
+            }
+            activity.runOnUiThread { result.success(response) }
+        }
+    }
 
     /** Dispatches owner system operations on the runtime worker. */
     private fun ownerSystemOperation(call: MethodCall, result: MethodChannel.Result) {
@@ -270,6 +322,7 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
                         ?: throw IllegalArgumentException("system operation paramsJson is required")
                 val response =
                     when (operation) {
+                        "ui_automation" -> mapOf("resultJson" to uiAutomation.execute(JSONObject(paramsJson)).toString())
                         "send_notification" -> systemSendNotification(JSONObject(paramsJson))
                         "get_device_location" -> mapOf(
                             "resultJson" to JSONObject(locationReader.read(JSONObject(paramsJson))).toString(),
@@ -289,6 +342,8 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
                         "get_app_usage_time" -> systemGetAppUsageTime(JSONObject(paramsJson))
                         "get_system_setting" -> systemGetSystemSetting(JSONObject(paramsJson))
                         "modify_system_setting" -> systemModifySystemSetting(JSONObject(paramsJson))
+                        "application_update_base", "install_app", "uninstall_app", "list_installed_apps", "start_app", "stop_app", "get_app_usage_time" ->
+                            mapOf("resultJson" to packageOperations.execute(operation, JSONObject(paramsJson)).toString())
                         "execute_privileged_command" -> systemExecutePrivilegedCommand(JSONObject(paramsJson))
                         else -> throw IllegalArgumentException("unsupported system operation: $operation")
                     }
@@ -556,6 +611,7 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
         requirePrivilegedCommandAuthorization(target)
         val result =
             AndroidPrivilegedCommandExecutor.execute(
+                context = activity,
                 target = target,
                 command = params.getString("command"),
                 timeoutMillis = params.getLong("timeoutMillis"),
@@ -2284,6 +2340,7 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
     private fun captureScreenshotWithRoot(file: File) {
         val result =
             AndroidPrivilegedCommandExecutor.execute(
+                context = activity,
                 target = AndroidPrivilegedCommandTarget.RootAuto,
                 command = "/system/bin/screencap -p ${shellQuote(file.absolutePath)}",
                 rootSettings = AndroidPrivilegeAuthorization.rootExecutionSettings(activity),
@@ -2299,6 +2356,7 @@ private const val TTS_SYNTHESIS_TIMEOUT_MS = 60_000L
     private fun captureScreenshotWithShizuku(file: File) {
         val result =
             AndroidPrivilegedCommandExecutor.execute(
+                context = activity,
                 target = AndroidPrivilegedCommandTarget.Shizuku,
                 command = "/system/bin/screencap -p",
             )

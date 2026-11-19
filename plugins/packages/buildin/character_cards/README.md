@@ -124,14 +124,21 @@ Read-only previews use `src/ui-entity-preview.ts` for a continuous reading layou
 portrait and identity, attached tags, opening statement and populated text sections,
 with named configuration summaries behind one expandable row. Group previews show
 ordered member portraits and descriptions. Edit mode retains the main-style tabs.
-Management's WebView list delegates via `openEntity`; its old entity dialog
-renderers and contracts have been removed. Closing the native surface emits
-`character-entity-closed` so management reloads genuine records, retaining its
-WebView instance. Memory/import dialogs remain independent. Browser tests can run with
+Management lists, shared-library controls, USER.md, memory editors, imports,
+exports, attachment selection and owner settings are ordinary Compose DSL in
+`src/ui-management.ts` and `src/ui-memory-*.ts`. The original sections, separate
+owner graph/profile/settings entries, modal forms and graph inspector are retained.
+The character toolbar combines creation and import in the compact “添加” native
+menu beside “绑定对话”. Management reuses the same native entity editor and refreshes
+canonical records when a local transaction completes.
+
+Only the memory graph canvas uses an offline WebView. Its display-only bridge has
+exactly `load` and `select`; native DSL owns search, folder selection, overflow,
+inspector, camera controls and all mutations. Opening an editor/settings form removes
+the canvas platform view from the composition. Chat identity previews remain scoped
+by `identity.avatarAction`; application/chat title text is display-only.
+Browser tests exercise this canvas with
 `CHARACTER_CARDS_UI_BROWSER=webkit node --test tests/ui.test.mjs`.
-Chat identity previews remain available from avatars through the explicitly
-scoped `identity.avatarAction`. Application/chat title text is display-only and
-never opens that preview. The independent memory page is unchanged.
 
 ## Current Chat integration review
 
@@ -151,6 +158,21 @@ The main registration does **not** yet mount `GroupExecutionController` in a cha
 input-submit hook. Installed production archives also remain different from
 current source until packaging is explicitly performed. Neither gap is described
 as completed integration.
+
+## Composer model selection
+
+The host-only `chat.model.selection` API accepts `{ chatId, defaultModelBinding }`
+and returns `{ participants: [{ id, name, binding: { providerId, modelId }, followsGlobal }] }`.
+It reads the same persisted conversation selection and character model-binding rule
+as execution. A null chat ID projects the active draft selection. Conversations
+without a role association use the existing ordinary model mode. Invalid stored
+bindings remain errors; presentation does not select another model.
+
+Flutter shows the actual bound model and marks fixed roles. Fixed or mixed groups
+list every sender's model and direct edits to character settings. The global picker
+is available when all senders follow global selection, and checks that rule again
+before saving. Thinking controls use the actual single model and are omitted for
+groups with different models. Presentation reads no voice, memory or tool catalogs.
 
 ## Plugin-owned group prompts and configuration deletion
 
@@ -258,18 +280,35 @@ resolves the explicit participant's actual memory binding and reuses the
 plugin's existing query implementation. Results contain complete typed
 matches and document chunks; snapshots remain in the provider's main runtime.
 A `null` snapshot ID requests a fresh query. An explicit snapshot ID retains
-owner-scoped deduplication across calls.
+owner-scoped deduplication across calls. Calls sharing an owner and snapshot
+serialize exclusion reads, page retrieval and successful result registration,
+so concurrent callers receive disjoint pages without losing available matches.
+A failed query releases the snapshot and does not consume its memory IDs;
+other owners and snapshots remain independent. Like Operit1, snapshots are
+in memory only and each owner retains at most 32, evicting the least recently
+used. A runtime restart or snapshot eviction can allow previously returned
+memories to be recalled again in a later user turn.
 
 ## Built-in memory recall
 
-The plugin owns per-turn memory recall through its prompt finalize hook
-(`src/memory-recall.ts`). On every main character or group turn it strips host
-markup from the authored input, queries the speaking participant's primary
+The plugin owns per-turn memory recall through its `before_process` input hook
+(`src/memory-recall.ts`). When preprocessing input with an explicit character
+participant, it strips host markup from the authored input and queries that
+participant's primary
 memory owner with a per-chat snapshot for owner-scoped deduplication, and
-appends the configured number of matches as a transient `<memory_context>`
-block to the final model request. Injections never persist into chat history,
-an empty result injects nothing, and provider failures fail closed without
-blocking the send.
+appends the configured number of matches as an inline `<attachment>` with
+`id="character_memory_recall"`, `filename="相关记忆"`, and `type="text/plain"`
+before the host commits the user message. Its XML-escaped text is recognized
+by the Dart UI as supplementary information. The block persists with that user message
+and is reused in later history and regeneration requests, preserving the
+previous prompt prefix for model caching. Input that already contains the
+block skips retrieval, including after a plugin restart. Legacy
+`<memory_context source="character-memory">` blocks also skip retrieval to
+preserve stored prompts. An empty result
+injects nothing. Retrieval exceptions are logged and skip injection; host hook
+timeouts still follow the shared pre-hook timeout policy. Group `record_only`
+submissions and their empty-input continuations bypass this input hook; the
+previous finalize hook also skipped these empty-input continuation requests.
 
 The memory menu's expanded section controls the persisted `memoryRecall` state
 field: the 自动检索注入记忆 switch, a numeric input for the per-turn injection
@@ -352,7 +391,8 @@ vectors. Source text and its vector occupy one synchronized, versioned row; quer
 vectors are ephemeral. SQL applies owner/folder/time scope, scoring, graph expansion,
 snapshot exclusions and result limits before returning records. There is no retained
 TypeScript corpus or query-time construction of historical vectors. HTTP batches
-contain at most 64 inputs and use at most four concurrent workers. Failed jobs stay
+use the owner's saved input batch size (20 by default) and at most four concurrent workers.
+The history rebuild window size is also saved per owner (32 by default, range 8–48). Failed jobs stay
 terminal without automatic retry. Merge removes source
 chunks and internal links that would become self-links under this domain's invariant.
 
@@ -363,7 +403,7 @@ requires running the updated application.
 
 ### 原生实体弹窗
 
-从头像或角色侧栏打开的角色卡/群组预览和编辑由 `src/ui-entity-native.ts` 使用普通 Compose DSL 控件生成，不加载 WebView/HTML，也不复用宿主的角色业务控件。预览、编辑、删除确认和标签草稿在同一个原生 Dialog 中切换；保存使用原有主运行时请求，完成/取消仍使用真实的 PresentationV1 接收方。全屏/还原使用通用 `Dialog.properties.fullscreen`，全屏时移除平台弹窗边距并铺满可用窗口，而非扩大 WebView 内部元素。管理页列表仍保留 WebView，但创建、编辑、预览统一通过 `openEntity` 调用这一套原生实现；旧 WebView 角色卡/群组弹窗及其绑定、标签编辑实现已删除。记忆功能仍保留原有独立入口。
+从头像或角色侧栏打开的角色卡/群组预览和编辑由 `src/ui-entity-native.ts` 使用普通 Compose DSL 控件生成，不加载 WebView/HTML，也不复用宿主的角色业务控件。预览、编辑、删除确认和标签草稿在同一个原生 Dialog 中切换；保存使用原有主运行时请求，完成/取消仍使用真实的 PresentationV1 接收方。全屏/还原使用通用 `Dialog.properties.fullscreen`，全屏时移除平台弹窗边距并铺满可用窗口，而非扩大 WebView 内部元素。管理页列表、批量绑定、导入导出、共享记忆库、USER.md、记忆编辑与设置、记忆附件全部使用 DSL；角色页顶部“添加”菜单保留新建和导入两个入口。记忆页仍按全局设置、共享库、角色库排列，每个库保留图谱、用户资料、设置独立入口。只有图谱画布使用网页，其桥仅提供加载展示数据和节点/关系选择；所有按钮、表单与数据写入由 DSL 和主运行时负责。打开编辑或设置弹窗时移除画布 WebView，避免平台视图与原生表单叠加。
 
 ### 可选角色插件与普通模型聊天
 

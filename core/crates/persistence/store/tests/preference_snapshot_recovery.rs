@@ -95,6 +95,30 @@ impl Drop for Fixture {
     fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); }
 }
 
+/// Forced correction accepts an older, larger file and seals the smaller peer's newer history.
+#[test]
+fn registry_restores_larger_older_contents_and_accepts_subsequent_edits() {
+    let f = Fixture::new();
+    let store = f.store();
+    let key = stringPreferencesKey("retained_models");
+    store.edit(|values| values.set(&key, json!(["phone-model".repeat(100)]))).unwrap();
+    let mut source = store.syncSnapshot().unwrap();
+    store.edit(|values| values.set(&key, json!([]))).unwrap();
+    let current = store.syncSnapshot().unwrap();
+    assert!(source.data.revision < current.data.revision);
+    assert!(source.manifest().unwrap().contentBytes > current.manifest().unwrap().contentBytes);
+    source.covered.extend(current.covered.iter().cloned());
+    let schema = PreferenceMergeSchema::default();
+    let registry = PreferenceMerge::registry(f.host.clone(), &schema, [], |_,_|true).unwrap();
+    assert!(registry.repair(&source.data.owner, &current.token().unwrap(), &source).unwrap());
+    assert_eq!(store.syncSnapshot().unwrap().data, source.data);
+    let restored = store.syncSnapshot().unwrap();
+    assert!(registry.repair(&source.data.owner, &restored.token().unwrap(), &current).unwrap_err().contains("ranks below"));
+    assert_eq!(store.syncSnapshot().unwrap(), restored);
+    store.edit(|values| values.set(&key, json!(["phone-model".repeat(100), "new-model"]))).unwrap();
+    assert_eq!(store.data().unwrap().get(&key).unwrap().as_array().unwrap().len(), 2);
+}
+
 #[test]
 fn comparison_restores_a_missing_space_projection_without_publishing_an_empty_record() {
     let f = Fixture::new();
@@ -140,6 +164,27 @@ fn a_schema_only_file_can_be_corrected_with_its_observed_token() {
     let initialization = operit_store::Transaction::compaction::Initialization::decode(&compacted[0]).unwrap().unwrap();
     assert_eq!(initialization.data, original.data);
     assert!(history.iter().all(|op|initialization.covered.contains(&op.opId)));
+}
+
+/// A broken projection remains a versioned correction target rather than becoming an authority or blocking prepare.
+#[test]
+fn malformed_preferences_are_force_corrected_with_raw_file_cas() {
+    let f = Fixture::new(); let store = f.store();
+    let source = store.syncSnapshot().unwrap();
+    let file = operit_store::Transaction::preference::file_snapshot(&store, &source.token().unwrap()).unwrap();
+    f.host.native.writeBytes(&f.path, b"{broken").unwrap();
+    let capture = store.syncSnapshot().unwrap();
+    assert!(capture.manifest().unwrap().damaged);
+    let schema = PreferenceMergeSchema::default();
+    let registry = PreferenceMerge::registry(f.host.clone(), &schema, [], |_,_|true).unwrap();
+    assert!(registry.manifests().unwrap().0.iter().any(|manifest|manifest.owner == source.data.owner && manifest.damaged));
+    f.host.native.writeBytes(&f.path, b"{changed").unwrap();
+    assert!(!registry.repair_file(&source.data.owner, &capture.token().unwrap(), &source, Some(&file), None).unwrap());
+    let current = store.syncSnapshot().unwrap();
+    assert!(registry.repair_file(&source.data.owner, &current.token().unwrap(), &source, Some(&file), None).unwrap());
+    assert_eq!(f.host.readBytes(&f.path).unwrap(), file.as_bytes());
+    assert_eq!(store.syncSnapshot().unwrap().data, source.data);
+    assert!(!store.syncSnapshot().unwrap().manifest().unwrap().damaged);
 }
 
 #[test]
@@ -228,7 +273,7 @@ fn a_missing_generic_preference_installs_the_source_format_and_exact_file() {
     let mut schema = PreferenceMergeSchema::default();
     schema.stores.push(schema.owner(path).unwrap().unwrap());
     let registry = PreferenceMerge::registry(target.host.clone(), &schema, [], |_, _| true).unwrap();
-    assert!(registry.repair_file(&snapshot.data.owner, "", &snapshot, Some(&file)).unwrap());
+    assert!(registry.repair_file(&snapshot.data.owner, "", &snapshot, Some(&file), None).unwrap());
     assert_eq!(target.host.readBytes(path).unwrap(), file.as_bytes());
     assert_eq!(registry.snapshot(&snapshot.data.owner).unwrap().data, snapshot.data);
     let reopened = Arc::new(NativeRuntimeStorageHost::new(target.root.join("runtime"), target.root.join("workspaces")));
@@ -262,7 +307,7 @@ fn a_rejected_missing_file_copy_does_not_create_a_placeholder_checkpoint() {
     let f = Fixture::new();
     let path = "runtime/plugin_data/space/com.operit.test/invalid.preferences.json";
     let store = PreferencesDataStore::newWithStorage(f.host.clone(), path);
-    let source = operit_store::Transaction::Snapshot { node: "peer".into(), data: operit_store::Transaction::Data::empty(
+    let source = operit_store::Transaction::Snapshot { damage: None, node: "peer".into(), data: operit_store::Transaction::Data::empty(
         operit_store::Transaction::Owner { backend: operit_store::Transaction::Backend::DataStore, path: path.into(), format: 1, layout: 1 }
     ), covered: Default::default(), generation: 0 };
     assert!(preference::repair_file(&store, "", &source, Some("{} ")).is_err());

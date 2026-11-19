@@ -1,12 +1,14 @@
+mod battery;
+#[cfg(target_os = "macos")]
+mod packages;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use operit_host_api::{
-    AppListData, AppOperationData, AppUsageTimeEntry, AppUsageTimeResultData, DeviceInfoData,
+    AppListData, AppOperationData, AppUsageTimeResultData, DeviceInfoData,
     HostError, HostResult, LocationData, NotificationData, OCRLanguage, OCRQuality,
     SystemNotificationRequest, SystemOperationHost, SystemSettingData,
 };
@@ -16,12 +18,52 @@ use uuid::Uuid;
 pub struct AppleSystemOperationHost;
 
 impl AppleSystemOperationHost {
+    /// Retains current UIKit battery readings delivered by the iOS owner event channel.
+    #[cfg(target_os = "ios")]
+    pub fn observeBatteryEventJson(encoded: &str) {
+        battery::observe_ios_event(encoded);
+    }
+
     pub fn new() -> Self {
         Self
     }
 }
 
 impl SystemOperationHost for AppleSystemOperationHost {
+    /// Reads the installed macOS distribution without exposing bundle paths to clients.
+    fn applicationUpdateTarget(
+        &self,
+    ) -> HostResult<Option<operit_host_api::ApplicationUpdateTarget>> {
+        #[cfg(target_os = "macos")]
+        {
+            let executable = std::env::current_exe()?;
+            let contents = executable
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| HostError::new("Application bundle metadata is unavailable"))?;
+            if !contents.join("Info.plist").is_file() { return Ok(None); }
+            let metadata = Command::new("/usr/bin/plutil")
+                .args(["-extract", "OperitDistributionType", "raw", "-o", "-"])
+                .arg(contents.join("Info.plist"))
+                .output()?;
+            if !metadata.status.success() {
+                return Err(HostError::new(
+                    "Cannot read this macOS application's distribution metadata",
+                ));
+            }
+            let buildType = String::from_utf8(metadata.stdout)
+                .map_err(|error| HostError::new(error.to_string()))?
+                .trim()
+                .to_owned();
+            return Ok(Some(operit_host_api::ApplicationUpdateTarget {
+                installTiming: operit_host_api::AppInstallTiming::Immediate,
+                arch: "universal".into(),
+                package: operit_host_api::ApplicationUpdatePackage::MacosPkg { buildType },
+            }));
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ok(None)
+    }
     fn getSystemLanguageCode(&self) -> HostResult<String> {
         use core_foundation::base::TCFType;
         use core_foundation::string::CFString;
@@ -161,25 +203,13 @@ impl SystemOperationHost for AppleSystemOperationHost {
         }
     }
 
-    fn installApp(&self, path: &str) -> HostResult<AppOperationData> {
-        let path = non_blank(path, "path")?;
+    /// Installs a VFS file reference using the requested platform execution timing.
+    fn installApp(&self, source: &dyn operit_host_api::FileSource, timing: operit_host_api::AppInstallTiming) -> HostResult<AppOperationData> {
+        timing.requireImmediate()?;
+        let path = source.nativePath()?;
+        let path = non_blank(&path, "path")?;
         #[cfg(target_os = "macos")]
-        {
-            let status = Command::new("open").arg(&path).status().map_err(|error| {
-                HostError::new(format!("Failed to open macOS installer: {error}"))
-            })?;
-            if !status.success() {
-                return Err(HostError::new(format!(
-                    "macOS installer open exited with {status}"
-                )));
-            }
-            Ok(AppOperationData {
-                operationType: "install".to_string(),
-                packageName: path,
-                success: true,
-                details: "Installer opened with macOS open".to_string(),
-            })
-        }
+        { packages::install(&path) }
         #[cfg(target_os = "ios")]
         {
             Err(HostError::new(format!(
@@ -195,27 +225,15 @@ impl SystemOperationHost for AppleSystemOperationHost {
     }
 
     fn uninstallApp(&self, packageName: &str) -> HostResult<AppOperationData> {
-        Err(HostError::new(format!(
-            "Apple app uninstall requires user-controlled system UI: {}",
-            non_blank(packageName, "package_name")?
-        )))
+        #[cfg(target_os = "macos")]
+        { packages::uninstall(packageName) }
+        #[cfg(not(target_os = "macos"))]
+        { Err(HostError::new("iOS public APIs do not allow uninstalling arbitrary applications; use system application settings")) }
     }
 
     fn listInstalledApps(&self, includeSystemApps: bool) -> HostResult<AppListData> {
         #[cfg(target_os = "macos")]
-        {
-            let mut packages = Vec::new();
-            collect_app_names(Path::new("/Applications"), &mut packages)?;
-            if includeSystemApps {
-                collect_app_names(Path::new("/System/Applications"), &mut packages)?;
-            }
-            packages.sort();
-            packages.dedup();
-            Ok(AppListData {
-                includesSystemApps: includeSystemApps,
-                packages,
-            })
-        }
+        { packages::list(includeSystemApps) }
         #[cfg(target_os = "ios")]
         {
             let _ = includeSystemApps;
@@ -235,24 +253,7 @@ impl SystemOperationHost for AppleSystemOperationHost {
     fn startApp(&self, packageName: &str) -> HostResult<AppOperationData> {
         let packageName = non_blank(packageName, "package_name")?;
         #[cfg(target_os = "macos")]
-        {
-            let status = Command::new("open")
-                .arg("-a")
-                .arg(&packageName)
-                .status()
-                .map_err(|error| HostError::new(format!("Failed to start macOS app: {error}")))?;
-            if !status.success() {
-                return Err(HostError::new(format!(
-                    "macOS open -a exited with {status}"
-                )));
-            }
-            Ok(AppOperationData {
-                operationType: "start".to_string(),
-                packageName,
-                success: true,
-                details: "Start request sent with macOS open".to_string(),
-            })
-        }
+        { packages::start(&packageName) }
         #[cfg(target_os = "ios")]
         {
             Err(HostError::new(format!(
@@ -270,24 +271,7 @@ impl SystemOperationHost for AppleSystemOperationHost {
     fn stopApp(&self, packageName: &str) -> HostResult<AppOperationData> {
         let packageName = non_blank(packageName, "package_name")?;
         #[cfg(target_os = "macos")]
-        {
-            let status = Command::new("osascript")
-                .arg("-e")
-                .arg(format!("quit app {}", apple_script_string(&packageName)))
-                .status()
-                .map_err(|error| HostError::new(format!("Failed to stop macOS app: {error}")))?;
-            if !status.success() {
-                return Err(HostError::new(format!(
-                    "macOS quit app command exited with {status}"
-                )));
-            }
-            Ok(AppOperationData {
-                operationType: "stop".to_string(),
-                packageName,
-                success: true,
-                details: "Stop request sent with AppleScript".to_string(),
-            })
-        }
+        { packages::stop(&packageName) }
         #[cfg(target_os = "ios")]
         {
             Err(HostError::new(format!(
@@ -323,64 +307,8 @@ impl SystemOperationHost for AppleSystemOperationHost {
         }
         #[cfg(target_os = "macos")]
         {
-            let now = unix_time_millis()?;
-            let startTime = now - i64::from(sinceHours) * 60 * 60 * 1000;
-            let output = run_command_output("ps", &["-axo", "comm=,etimes="])?;
-            let mut entries = Vec::new();
-            for line in output.lines() {
-                let mut parts = line.split_whitespace().collect::<Vec<_>>();
-                if parts.len() < 2 {
-                    continue;
-                }
-                let elapsedText = match parts.pop() {
-                    Some(value) => value,
-                    None => continue,
-                };
-                let elapsed = match elapsedText.parse::<i64>() {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                };
-                let command = parts.join(" ");
-                let name = match Path::new(&command)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                {
-                    Some(value) => value.to_string(),
-                    None => command.clone(),
-                };
-                if !packageName.trim().is_empty() && name != packageName {
-                    continue;
-                }
-                let isSystemApp = command.starts_with("/System/");
-                if !includeSystemApps && isSystemApp {
-                    continue;
-                }
-                let totalForegroundTimeMs = elapsed.saturating_mul(1000);
-                entries.push(AppUsageTimeEntry {
-                    packageName: name.clone(),
-                    appName: name,
-                    totalForegroundTimeMs,
-                    lastTimeUsed: now,
-                    isSystemApp,
-                });
-            }
-            entries.sort_by(|left, right| {
-                right.totalForegroundTimeMs.cmp(&left.totalForegroundTimeMs)
-            });
-            entries.truncate(limit as usize);
-            Ok(AppUsageTimeResultData {
-                startTime,
-                endTime: now,
-                sinceHours,
-                requestedPackageName: if packageName.trim().is_empty() {
-                    None
-                } else {
-                    Some(packageName.to_string())
-                },
-                includesSystemApps: includeSystemApps,
-                totalEntries: entries.len() as i32,
-                entries,
-            })
+            let _ = (packageName, includeSystemApps);
+            Err(HostError::new("macOS does not expose historical foreground usage to this host. Screen Time requires a separately authorized integration; process uptime is not foreground usage."))
         }
         #[cfg(target_os = "ios")]
         {
@@ -413,6 +341,15 @@ impl SystemOperationHost for AppleSystemOperationHost {
 
     fn getDeviceInfo(&self) -> HostResult<DeviceInfoData> {
         get_apple_device_info()
+    }
+
+    /// Writes image bytes through the selected VFS capability and removes native staging.
+    fn captureScreenshotTo(&self, target: &dyn operit_host_api::FileTarget) -> HostResult<()> {
+        let path = self.captureScreenshot()?;
+        let bytes = std::fs::read(&path).map_err(|error| operit_host_api::HostError::new(error.to_string()))?;
+        let written = target.writeBytes(&bytes);
+        std::fs::remove_file(&path).map_err(|error| operit_host_api::HostError::new(error.to_string()))?;
+        written
     }
 
     fn captureScreenshot(&self) -> HostResult<String> {
@@ -449,13 +386,13 @@ impl SystemOperationHost for AppleSystemOperationHost {
 
     fn recognizeText(
         &self,
-        imagePath: &str,
+        imagePath: &dyn operit_host_api::FileSource,
         language: OCRLanguage,
         _quality: OCRQuality,
     ) -> HostResult<String> {
         #[cfg(target_os = "macos")]
         {
-            let imagePath = non_blank(imagePath, "image_path")?;
+            let imagePath = non_blank(&imagePath.nativePath()?, "image_path")?;
             let languageHint = match language {
                 OCRLanguage::Latin => "en-US",
                 OCRLanguage::Chinese => "zh-Hans",
@@ -536,6 +473,7 @@ fn get_apple_device_info() -> HostResult<DeviceInfoData> {
     let mut additionalInfo = BTreeMap::new();
     additionalInfo.insert("Platform".to_string(), apple_platform_name().to_string());
     additionalInfo.insert("Host name".to_string(), hostName.clone());
+    let (batteryLevel, batteryCharging) = battery::current_battery();
     Ok(DeviceInfoData {
         deviceId: hostName,
         model: model.clone(),
@@ -548,28 +486,12 @@ fn get_apple_device_info() -> HostResult<DeviceInfoData> {
         availableMemory: String::new(),
         totalStorage: String::new(),
         availableStorage: String::new(),
-        batteryLevel: 0,
-        batteryCharging: false,
+        batteryLevel,
+        batteryCharging,
         cpuInfo: model,
         networkType: String::new(),
         additionalInfo,
     })
-}
-
-fn collect_app_names(dir: &Path, packages: &mut Vec<String>) -> HostResult<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("app") {
-            if let Some(name) = path.file_stem().and_then(|value| value.to_str()) {
-                packages.push(name.to_string());
-            }
-        }
-    }
-    Ok(())
 }
 
 fn run_command_output(program: &str, args: &[&str]) -> HostResult<String> {
@@ -654,11 +576,4 @@ fn validate_file_path(path: &Path, operation: &str) -> HostResult<String> {
         )));
     }
     Ok(path.to_string_lossy().into_owned())
-}
-
-fn unix_time_millis() -> HostResult<i64> {
-    Ok(SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| HostError::new(error.to_string()))?
-        .as_millis() as i64)
 }

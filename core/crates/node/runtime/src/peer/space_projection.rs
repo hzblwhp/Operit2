@@ -14,6 +14,8 @@ pub(crate) const ENVELOPE_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ProjectionProtocol {
+    #[serde(default)]
+    pub protocol: Option<crate::PeerProtocol::PeerProtocol>,
     pub version: u32,
     pub nodeId: String,
     pub endpoint: bool,
@@ -26,6 +28,7 @@ pub(crate) struct ProjectionProtocol {
 impl ProjectionProtocol {
     /// Validates peer identity and the explicitly advertised projection capabilities.
     pub fn validate(&self, peer: &str) -> Result<(), String> {
+        crate::PeerProtocol::PeerProtocol::requireAdvertised(self.protocol.as_ref(), "space projection reply").map_err(|error| error.to_string())?;
         if self.version != VERSION || self.nodeId != peer || self.authorityMode != "localReplay"
             || self.maxMessageBytes <= ENVELOPE_BYTES || (self.endpoint && !self.snapshotPaging)
             || (self.projectionReference && !self.snapshotPaging) {
@@ -60,7 +63,7 @@ pub(crate) fn negotiate(service: &dyn NodeSpaceContext, args: CoreValue) -> Resu
         return Err("SPACE_PROTOCOL_INCOMPATIBLE: Unsupported projection protocol version".into());
     }
     let peers = service.peers()?;
-    let protocol = ProjectionProtocol { version: VERSION, nodeId: service.localNodeId(),
+    let protocol = ProjectionProtocol { protocol: Some(crate::PeerProtocol::PeerProtocol::current()), version: VERSION, nodeId: service.localNodeId(),
         endpoint: service.isSpaceEndpoint(), authorityMode: "localReplay".into(),
         maxMessageBytes: peers.maxMessageBytes(), snapshotPaging: true,
         projectionReference: service.isSpaceEndpoint() };
@@ -284,6 +287,37 @@ impl SnapshotCollector {
     }
 }
 
+/// Restarts only the read-only authority export when a control edit races its pages.
+pub(crate) async fn readSnapshot(service: &dyn NodeSpaceContext, node: &str) -> Result<(String, PeerSpaceSnapshot), String> {
+    for attempt in 0..3 {
+        let result: Result<(String, PeerSpaceSnapshot), String> = async {
+            let header: SnapshotHeader = callPeerSpace(service, node, "snapshotHeader", CoreValue::Null).await?;
+            let revision = header.controlRevision.clone();
+            let mut collector = SnapshotCollector::new(header)?;
+            loop {
+                let page = callPeerSpace(service, node, "snapshotControlPage",
+                    toCoreValue(collector.request()).map_err(|e| e.to_string())?).await?;
+                if collector.push(page)? { break; }
+            }
+            let current = callPeerSpace(service, node, "snapshotHeader", CoreValue::Null).await?;
+            Ok((revision, collector.finish(current)?))
+        }.await;
+        match result {
+            Err(error) if attempt < 2 && error.starts_with("SPACE_EXPORT_CHANGED:") => continue,
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
+/// Calls one explicit Space method through the caller's authenticated routing context.
+pub(super) async fn callPeerSpace<T: serde::de::DeserializeOwned>(service: &dyn NodeSpaceContext, node: &str, method: &str, args: CoreValue) -> Result<T, String> {
+    let response = service.callNode(node.to_owned(), operit_link::CoreCallRequest::new(
+        format!("node-space-{method}-{}", operit_host_api::TimeUtils::currentTimeMillis()), super::NODE_SPACE_TARGET, method, args,
+    )).await;
+    fromCoreValue(response.result.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,7 +354,7 @@ mod tests {
     }
     #[test]
     fn old_protocol_omission_does_not_enable_projection_references() {
-        let old = serde_json::json!({"version":1,"nodeId":"peer","endpoint":true,
+        let old = serde_json::json!({"protocol": crate::PeerProtocol::PeerProtocol::current(), "version":1,"nodeId":"peer","endpoint":true,
             "authorityMode":"localReplay","maxMessageBytes":8192,"snapshotPaging":true});
         let mut protocol: ProjectionProtocol = serde_json::from_value(old).unwrap();
         assert!(!protocol.projectionReference);
@@ -337,7 +371,7 @@ mod tests {
             assert!(decodeProtocolResponse("peer", Err(CoreLinkError::new(code, "failure"))).is_err());
         }
         assert!(decodeProtocolResponse("peer", Ok(CoreValue::Null)).is_err());
-        let mut protocol = ProjectionProtocol { version: VERSION, nodeId: "peer".into(), endpoint: true,
+        let mut protocol = ProjectionProtocol { protocol: Some(crate::PeerProtocol::PeerProtocol::current()), version: VERSION, nodeId: "peer".into(), endpoint: true,
             authorityMode: "localReplay".into(), maxMessageBytes: 8192, snapshotPaging: true, projectionReference: true };
         assert!(protocol.validate("peer").is_ok());
         protocol.endpoint = false;
@@ -381,6 +415,7 @@ mod tests {
         collector.push(page(0, None)).unwrap();
         let mut current = manifest(0);
         current.deviceProfiles.push(CoreSpaceDeviceProfile {
+            protocolVersion: None,
             nodeId: "core".into(), displayName: "Updated Core".into(), userName: "User".into(),
             platform: "test".into(), model: "test".into(), coreVersion: None, pairingIncarnation: None, updatedAt: 2,
         });
