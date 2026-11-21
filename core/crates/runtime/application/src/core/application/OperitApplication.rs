@@ -453,6 +453,9 @@ impl OperitApplication {
         let startup = move || {
             Box::pin(async move {
                 let loadingGeneration = showPluginLoading();
+                AppLogger::trace("PluginStartup", &format!(
+                    "event=registry_start generation={loadingGeneration}",
+                ));
                 let loadOutcome = RuntimePackageManager::reloadRegistry(packageManager).await;
                 if let Err(error) = loadOutcome {
                     taskReadiness.fail(error.clone());
@@ -460,13 +463,22 @@ impl OperitApplication {
                     AppLogger::e("OperitApplication", &error);
                     return;
                 }
+                AppLogger::trace("PluginStartup", &format!(
+                    "event=registry_ready generation={loadingGeneration}",
+                ));
                 let starter = MCPStarter::new(hostManager);
                 let timeoutSeconds = ApiPreferences::getInstance()
                     .getMcpStartupTimeoutSeconds()
                     .expect("api preferences must provide mcp startup timeout seconds");
-                let _ = starter
+                AppLogger::trace("PluginStartup", &format!(
+                    "event=mcp_start generation={loadingGeneration} timeoutSeconds={timeoutSeconds}",
+                ));
+                let (started, total, status) = starter
                     .startAllDeployedPluginsWithTimeout(timeoutSeconds)
                     .await;
+                AppLogger::trace("PluginStartup", &format!(
+                    "event=mcp_complete generation={loadingGeneration} started={started} total={total} status={status:?}",
+                ));
                 completePluginLoadingSession(loadingGeneration);
             }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>
         };
@@ -945,8 +957,6 @@ impl OperitApplication {
             }
         }
         let mut result = serde_json::to_value(receipt).map_err(|error| error.to_string())?;
-        result["protocolVersion"] = serde_json::json!(1);
-        result["consistencyVersion"] = serde_json::json!(8);
         result["stateSummary"] = serde_json::json!(format!("digest:{summary}"));
         result["pending"] = serde_json::json!(pending.len());
         result["pendingOperationIds"] = serde_json::json!(pending.into_iter().map(|op|op.opId).collect::<Vec<_>>());
@@ -992,7 +1002,7 @@ impl OperitApplication {
     #[allow(non_snake_case)]
     pub fn syncClockDigest(&self) -> Result<serde_json::Value, String> {
         let digest = self.runtimeSyncOperationStore()?.synchronizationSummary().map_err(|e|e.to_string())?;
-        Ok(serde_json::json!({"protocolVersion":1,"digest":digest}))
+        Ok(serde_json::json!({"digest":digest}))
     }
 
     /// Exports missing operations while reporting independently unavailable storage engines.

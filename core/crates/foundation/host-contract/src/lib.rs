@@ -2289,10 +2289,6 @@ fn visit_sqlite_pages(sql:&str, params:Vec<SqliteValue>, mut query:impl FnMut(&s
 }
 
 pub trait RuntimeSqliteConnection: Send {
-    /// Writes a consistent standalone SQLite image to a logical runtime-storage path.
-    fn snapshotDatabase(&mut self, _destination: &str) -> HostResult<()> {
-        Err(HostError::new("SQLite Host does not implement database snapshots"))
-    }
     fn executeBatch(&mut self, sql: &str) -> HostResult<()>;
     fn execute(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<usize>;
     fn query(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<Vec<SqliteRow>>;
@@ -3336,13 +3332,22 @@ where
 }
 
 /// Owns application-independent floating surfaces requested by authenticated plugins.
+#[async_trait(?Send)]
 pub trait FloatingWindowHost: Send + Sync {
-    fn command(&self, request: Value) -> HostResult<Value>;
+    /// Awaits the application owner's response without blocking its event loop.
+    async fn command(&self, request: Value) -> HostResult<Value>;
 }
 
-impl<F> FloatingWindowHost for F
-where F: Fn(Value) -> HostResult<Value> + Send + Sync {
-    fn command(&self, request: Value) -> HostResult<Value> { self(request) }
+#[async_trait(?Send)]
+impl<F, Output> FloatingWindowHost for F
+where
+    F: Fn(Value) -> Output + Send + Sync,
+    Output: Future<Output = HostResult<Value>>,
+{
+    /// Forwards the command to an asynchronous host adapter.
+    async fn command(&self, request: Value) -> HostResult<Value> {
+        self(request).await
+    }
 }
 
 /// Identifies the native package that can update this running application.
@@ -3401,12 +3406,15 @@ pub enum ApplicationUpdateTransform {
 
 pub trait SystemOperationHost: Send + Sync {
     /// Transcodes a package into a disposable VFS target without installing or executing it.
+    /// Reports completed and total work bytes synchronously; zero total means unknown work.
+    /// Hosts may report completed independent compression units rather than encoder-internal progress.
     fn transformApplicationUpdate(
         &self,
         _source: &dyn FileSource,
         _target: &dyn FileTarget,
         _transform: ApplicationUpdateTransform,
         _control: &HttpDownloadControl,
+        _onProgress: &(dyn Fn(u64, u64) + Send + Sync),
     ) -> HostResult<()> {
         Err(HostError::new("Installer transformation is not supported by this host"))
     }

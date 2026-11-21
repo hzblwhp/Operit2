@@ -9,11 +9,13 @@
 
 ## 插件与宿主的分工
 
-插件在前台计算时间、抽取概率并生成内容，随后统一调用 `Tools.Chat.scheduleMessage`。插件没有平台探测、平台分支或发送定时器，也不使用 `exec`。到点投递、持久化、取消、重启恢复、系统通知和 iOS 恢复同步全部由宿主处理。
+插件在前台计算时间、抽取概率，通过 `Tools.Chat.scheduleMessage` 提交生成指令。宿主复用正式聊天的输入处理、角色配置、提示词、模型请求与用量统计流程准备消息，随后持久化预约。插件不自行拼接历史、不直接调用功能模型，没有平台分支或发送定时器。
 
-准备使用默认 `CHAT` 功能模型，参考目标对话最近 20 条消息和已准备文本。准备消耗正常模型调用额度，未命中概率不调用模型。当前不会自动解析角色卡的独立模型和角色设定，可在提示词中填写角色语气。生成内容不伪造用户发言、不切换当前对话。
+准备使用目标对话实际绑定的角色、模型、记忆输入处理和摘要后的正式历史，保留角色头像、发言者身份、模型、token 与生成耗时。准备消耗正常模型调用额度，未命中概率不调用模型。生成过程不写入用户发言、不切换当前对话，不执行工具。
 
-应用前台启动、恢复、打开设置页和分钟时钟会补充计划。准备过的正文不会在发送时重新调用模型或查询未来实时信息。计划耗尽后需要回到前台补充。
+当前规则未提供多人群聊的发言者选择；需要明确参与者的对话会停止准备并显示错误。角色配置解析失败同样停止准备，避免发送其他身份的内容。
+
+应用前台启动、恢复、打开设置页和分钟时钟会补充计划。宿主定期及投递前检查对话和角色配置；变化后撤销旧计划并返回 `invalidated`，插件在前台按原预约时间重新准备，已过期的计划跳过。准备过程中对话变化会拒绝该结果。升级时先撤销旧版纯文本预约。后台无法调用模型时，需要回到前台补充。
 
 ## 统一正式接口
 
@@ -24,7 +26,8 @@ await Tools.Chat.scheduleMessage({
   id: "unique-message-id",
   chatId,
   title: "Operit",
-  text: preparedText,
+  text: "",
+  generation: { instruction: "根据最近对话自然地延续话题，只输出主动消息正文。" },
   timestamp: dueAt, // Unix 毫秒，未来 1 秒至 30 天
 });
 
@@ -32,7 +35,7 @@ const { messages } = await Tools.Chat.listScheduledMessages();
 await Tools.Chat.cancelScheduledMessage("unique-message-id");
 ```
 
-`scheduleMessage` 返回 `{ message: { id, chatId, timestamp, status, error } }`。`listScheduledMessages` 只列出调用插件自己的预约及结果。状态为 `scheduled`、`delivered`、`cancelled`、`skipped` 或 `failed`，`error` 为字符串或 `null`。`cancelScheduledMessage` 返回 `{ id, cancelled: true }`，重复撤销安全。
+`scheduleMessage` 返回 `{ message: { id, chatId, timestamp, status, error, text } }`，`text` 是宿主实际准备的正文。传入 `generation` 时要求 `text` 为空；已有纯文本调用仍使用非空 `text`。`listScheduledMessages` 只列出调用插件自己的预约及结果。终态包括 `delivered`、`cancelled`、`skipped`、`invalidated` 和 `failed`，`error` 为字符串或 `null`。`cancelScheduledMessage` 返回 `{ id, cancelled: true }`，重复撤销安全。
 
 ID 自动按已认证的插件身份隔离。相同 ID 和相同参数可安全重试，即使调用响应丢失或预约已到期；相同 ID 与不同内容冲突时拒绝。需要新计划时使用新 ID。宿主保留最多 60 条待处理消息和最近 256 条结果。
 
@@ -42,7 +45,7 @@ ID 自动按已认证的插件身份隔离。相同 ID 和相同参数可安全�
 
 Android、HarmonyOS、Windows、macOS、Linux、Web 使用宿主调度器，在可执行时将内容写入指定对话，并通过已有的平台通知实现展示通知。对话忙时宿主自动延后；恢复后同一对话的多条过期消息仅投递最近一条，超过一天的旧消息跳过。
 
-iOS 在预约时将已生成内容提交系统本地通知，到点由系统展示。宿主在应用恢复前台后自动把同一内容同步到对话，不再次通知。这个过程不依赖插件恢复执行，也不要求插件作者针对 iOS 编写代码。iOS 的通知权限交互和实际展示仍受系统设置约束。
+iOS 在预约时将已生成内容提交系统本地通知，到点由系统展示。宿主在应用恢复前台后检查上下文并同步有效消息，不再次通知。应用挂起期间不能更新或撤回已经展示的系统通知，恢复后检测到上下文变化的正文不会再写入对话。iOS 的通知权限交互和实际展示仍受系统设置约束。
 
 所有平台的预约均保存在宿主设备本地存储中，宿主重启后自动恢复。应用退出、设备休眠、浏览器后台节流等会影响非 iOS 的实际投递时间；iOS 的系统通知不会唤醒插件调用 AI。接口不承诺绕过操作系统的执行限制。
 
@@ -52,6 +55,8 @@ iOS 在预约时将已生成内容提交系统本地通知，到点由系统展�
 
 插件的规则和准备记录通过 `Tools.Storage.dataStore` 保存。宿主的已接受预约单独保存在设备本地 `runtime/scheduled_chat_messages.json` 中，不要求插件运行时保持存活。插件不跨设备同步发送状态。
 
+`DataStore.data().get("state")` 返回深度只读快照。插件校验后复制为自己持有的可修改运行状态，再通过 `DataStore.edit` 显式保存。0.1.3 修复了旧版直接修改只读快照导致的重启、重新打开设置、旧数据升级和计划恢复报错；保留原有规则和预约 ID，无需清除插件数据。
+
 插件写入成功后才提交预约；宿主先原子保存预约身份，再调用系统。iOS 预约结果未知时保留身份，宿主在前台使用相同 ID 重试。撤销意图先持久化，失败可恢复。聊天文本提交使用真实数据库的完成消息，重试不会重复写入；通知失败在结果中单独记录。
 
 ## 构建与测试
@@ -59,8 +64,9 @@ iOS 在预约时将已生成内容提交系统本地通知，到点由系统展�
 该插件需要包含这些正式 SDK 和宿主实现的应用版本，不能单独安装到旧应用中。由仓库既有的 `plugins/tools/sync_plugin_packages.py` 编译和打包，无额外前端依赖。
 
 ```sh
-plugins/packages/buildin/workflow/node_modules/.bin/tsc --project plugins/packages/external/proactive_messages/tsconfig.json
+node plugins/packages/buildin/workflow/node_modules/typescript/bin/tsc --project plugins/packages/external/proactive_messages/tsconfig.json --noEmit
 node --test plugins/packages/external/proactive_messages/tests/*.test.mjs
+node --test core/crates/plugin/javascript-bridge/tests/storage-preferences.test.mjs
 node --test core/crates/plugin/javascript-bridge/tests/chat-prepared-delivery.test.mjs
 cargo test --manifest-path core/Cargo.toml -p operit-plugin-sdk prepared_delivery_tests
 cargo test --manifest-path core/Cargo.toml -p operit-runtime --test prepared_chat_delivery --features operit-host-native-scheduler/javascript
@@ -68,4 +74,6 @@ cargo check --manifest-path core/Cargo.toml -p operit-runtime --target aarch64-a
 cargo check --manifest-path core/Cargo.toml -p operit-runtime --target wasm32-unknown-unknown
 ```
 
-插件测试使用不提供任何平台查询的宿主模拟，验证相同调用链、概率与间隔、存储失败、预约响应丢失、前后台切换、撤销、重启和计划上限。SDK 测试验证实际生成绑定和错误传播；原生集成测试验证真实数据库、去重、预约持久化、隔离、恢复投递和撤销。iOS 实际通知展示、权限交互与点击跳转需真机验证。
+插件测试直接读取当前 TypeScript 源码，在内存中转译执行，无需预先生成 `dist`。存储使用生产 SDK 的 DataStore facade，保留深度只读快照和显式编辑语义；仅模拟宿主持久化和聊天预约。设置页测试运行实际 Compose 渲染、动作分发和 `withContext`，覆盖重启后的页面加载、编辑保存、删除及预约撤销。其他用例验证概率与间隔、存储失败、预约响应丢失、前后台切换、撤销、升级、重启和计划上限。
+
+SDK 测试验证实际生成绑定和错误传播；原生集成测试验证真实数据库、去重、预约持久化、隔离、恢复投递和撤销。iOS 实际通知展示、权限交互与点击跳转需真机验证。

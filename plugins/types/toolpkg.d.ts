@@ -3988,9 +3988,24 @@ export namespace ToolPkg {
   }
 
   /**
-   * Window geometry in logical pixels; position uses the host desktop's top-left origin.
+   * Bounds returned by a native accessibility provider in screen coordinates.
+   */
+  export interface FloatingScreenBounds {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+  }
+
+  /**
+   * Window geometry in logical pixels, or an explicit native screen rectangle.
    */
   export interface FloatingWindowOptions {
+    /**
+     * Native accessibility bounds; takes precedence over logical geometry.
+     * Pixels on Windows/Android, screen points on macOS, AT-SPI desktop units on X11. System scope only.
+     */
+    screenBounds?: FloatingScreenBounds;
     /**
      * Sets the left coordinate, when positioning is supported.
      */
@@ -4041,6 +4056,10 @@ export namespace ToolPkg {
      * Supplies the UI session's initial state.
      */
     state?: JsonObject;
+    /**
+     * Fills the current scope: primary display for system windows, full view for application windows.
+     */
+    fill?: boolean;
     /**
      * Configures geometry and interaction flags.
      */

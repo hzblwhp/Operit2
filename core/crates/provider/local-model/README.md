@@ -154,8 +154,15 @@ See `core/CRATE_BOUNDARIES.md` for the full dependency direction.
 
 ## Local chat inference and routing
 
-In Settings > Local models, download a chat model, open **Inference & settings**,
-set CPU threads and (for llama.cpp) context/batch sizes, and run a prompt.
+In Settings > Local models, **Import from device** accepts one complete GGUF
+chat model for llama.cpp or the files of an extracted, flat MNN text model bundle.
+Select the MNN configuration, tokenizer, weights, and any external embeddings
+together. Import copies and checks the files in runtime storage on this device.
+Deleting the installed copy removes its catalog entry and leaves the selected
+original files on the device.
+
+After importing or downloading a chat model, open **Run and configure**, set
+CPU threads and (for llama.cpp) context/batch sizes, and run a prompt.
 **Use for chat** saves its runtime settings and selects it for the CHAT function.
 **Release model memory** frees cached weights. Only one LLM is cached at a time;
 inference is serialized and runs off the runtime event loop.
@@ -184,7 +191,9 @@ GPU backends, multimodal inputs, and split GGUF files are not supported.
 
 The platform Host's default `native-llm` feature builds CPU backends with CMake 3.22+,
 a C++17 compiler, and Ninja for Android/OpenHarmony cross builds. The first native build downloads SHA-256 checked source archives
-for llama.cpp `b11829` and MNN `3.6.1`. Set `OPERIT_LLAMA_SOURCE` and
+for llama.cpp `v1.0.0` and MNN `3.6.1`. Existing GGUF installations keep their
+model files and use the updated embedded engine when the app reads the registry.
+Set `OPERIT_LLAMA_SOURCE` and
 `OPERIT_MNN_SOURCE` to pre-extracted source directories for offline builds.
 Android builds require `ANDROID_NDK_HOME` (or `ANDROID_NDK_ROOT`/`ANDROID_NDK`);
 OpenHarmony builds require `OHOS_NATIVE_HOME`. Their SDK CMake toolchains are

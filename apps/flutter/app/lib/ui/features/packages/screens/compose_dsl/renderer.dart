@@ -245,14 +245,17 @@ class _ComposeProgramExecutorState extends State<_ComposeProgramExecutor> {
   Widget build(BuildContext context) {
     _clearDependencies();
     return _trackBuild(() {
-      final content = _withModifier(
-        context,
-        _executeInstruction(context),
-        props,
-        onAction,
-        nodeType: node.type,
-        modifierScope: modifierScope,
-      );
+      final instruction = _executeInstruction(context);
+      final content = _isControlledDropdown(node.type, props)
+          ? instruction
+          : _withModifier(
+              context,
+              instruction,
+              props,
+              onAction,
+              nodeType: node.type,
+              modifierScope: modifierScope,
+            );
       _dispatchOnLoad();
       return operitDesignBridgeEnabled
           ? OperitDesignSource(source: {
@@ -311,6 +314,29 @@ class _ComposeProgramExecutorState extends State<_ComposeProgramExecutor> {
         );
       case 'ActivityDots':
         return _ComposeActivityDots(props: props);
+      case 'GlowBorder':
+        final colors = (props['colors'] as List? ?? const [])
+            .map((value) => _color(context, value))
+            .whereType<Color>()
+            .toList();
+        return ComposeGlowBorder(
+          colors: colors.length < 2
+              ? [
+                  Theme.of(context).colorScheme.primary,
+                  Theme.of(context).colorScheme.tertiary,
+                ]
+              : colors,
+          cornerRadius: (_number(props['cornerRadius']) ?? 0).clamp(0, 200),
+          strokeWidth: (_number(props['strokeWidth']) ?? 3).clamp(0.5, 12),
+          glowWidth: (_number(props['glowWidth']) ?? 56).clamp(1, 80),
+          duration: Duration(
+            milliseconds: (_int(props['durationMillis']) ?? 6000).clamp(
+              1000,
+              60000,
+            ),
+          ),
+          running: _boolOrDefault(props['running'], true),
+        );
       case 'Draggable':
         return _ComposeDraggable(
           props: props,
@@ -736,7 +762,7 @@ class _ComposeProgramExecutorState extends State<_ComposeProgramExecutor> {
       case 'PullToRefreshBox':
         return _pullToRefreshBox(context);
       case 'DropdownMenu':
-        return _dropdownMenu(context);
+        return _dropdownMenu();
       case 'TimePickerDialog':
         return _timePickerDialog(context);
       case 'VerticalDragHandle':

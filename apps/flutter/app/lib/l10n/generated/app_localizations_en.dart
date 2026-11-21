@@ -1623,7 +1623,57 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get localModelsAddModel => 'Add model';
+  String get localModelsAddModel => 'Browse online';
+
+  @override
+  String get localModelsImportFromDevice => 'Import from device';
+
+  @override
+  String get localModelsImportGgufHint =>
+      'Choose one complete GGUF chat model for llama.cpp.';
+
+  @override
+  String get localModelsImportMnnHint =>
+      'Select the extracted MNN model files together, including config.json and the weights.';
+
+  @override
+  String get localModelsImportInvalidGguf => 'Select a single .gguf file.';
+
+  @override
+  String get localModelsImportMissingConfig =>
+      'The selected files are missing config.json.';
+
+  @override
+  String get localModelsImportFileSizeRequired =>
+      'Each selected file must be non-empty and report its size.';
+
+  @override
+  String get localModelsImportChangeFiles => 'Choose again';
+
+  @override
+  String localModelsImportFileCount(int count) {
+    return '$count files selected';
+  }
+
+  @override
+  String get localModelsImportName => 'Model name';
+
+  @override
+  String get localModelsImportCopyNotice =>
+      'The files are copied into app storage and stay on this device.';
+
+  @override
+  String get localModelsImportCopying => 'Copying model files…';
+
+  @override
+  String get localModelsImportFinishing => 'Checking and registering model…';
+
+  @override
+  String get localModelsImportComplete =>
+      'Model imported. Open Run and configure to try it.';
+
+  @override
+  String get localModelsImportedFile => 'Device import';
 
   @override
   String get localModelsFilterDownloads => 'Downloads';
@@ -3256,11 +3306,14 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsAppearanceBubbleImageAdjustAi => 'Adjust AI bubble image';
 
   @override
-  String get settingsAppearanceBubbleImagePreview => 'Preview';
+  String get settingsAppearanceBubbleImagePreview => 'Live preview';
 
   @override
   String get settingsAppearanceBubbleImagePreviewText =>
       'This is a bubble preview message.\nCheck the corners, edges, and center at their rendered size.';
+
+  @override
+  String get settingsAppearanceBubbleImageSource => 'Original';
 
   @override
   String get settingsAppearanceBubbleImageSourceHint =>
@@ -3768,14 +3821,89 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsDataSnapshotBackupTitle => 'Full snapshot';
 
   @override
-  String get settingsDataExportRawSnapshot => 'Export snapshot';
+  String get settingsDataExportRawSnapshot => 'Export full snapshot';
 
   @override
-  String get settingsDataImportRawSnapshot => 'Restore snapshot';
+  String get settingsDataImportRawSnapshot => 'Restore a full snapshot';
 
   @override
   String get settingsDataExportRawSnapshotDescription =>
-      'Pack chats, plugin data, model settings, and local files into one backup file. Restoring replaces current data with the backup.';
+      'Package chats, plugin data, model settings, and local files as an .opsnapshot file.';
+
+  @override
+  String get settingsDataDatabaseBackup => 'Database backup';
+
+  @override
+  String get settingsDataDatabaseBackupDescription =>
+      'Save a copy of the database daily and keep the 10 most recent automatic backups. Attachments and workspace files are stored separately.';
+
+  @override
+  String get settingsDataBackupScheduled => 'Daily backup is on';
+
+  @override
+  String get settingsDataBackupUnavailable =>
+      'Choose an accessible folder to turn on daily backups';
+
+  @override
+  String get settingsDataBackupNow => 'Back up now';
+
+  @override
+  String get settingsDataBackupSaved => 'Database backup saved.';
+
+  @override
+  String get settingsDataRecoverySection => 'Restore data';
+
+  @override
+  String get settingsDataRestoreDatabaseDescription =>
+      'Choose a dated database backup. The restored data becomes the source of truth for sync with other devices.';
+
+  @override
+  String get settingsDataRestoreArchiveDescription =>
+      'Replace current runtime data with an Operit2 full snapshot and restart the app.';
+
+  @override
+  String get settingsDataImportSection => 'Import data';
+
+  @override
+  String get settingsDataImportOperit1Description =>
+      'Preview an Operit1 snapshot before migrating chats, model settings, and files.';
+
+  @override
+  String get settingsDataImportChatJson => 'Import chat JSON';
+
+  @override
+  String get settingsDataImportChatJsonDescription =>
+      'Add chats and update existing chats with matching IDs.';
+
+  @override
+  String get settingsDataImportModelJson => 'Import model settings JSON';
+
+  @override
+  String get settingsDataImportModelJsonDescription =>
+      'Add model provider settings and update existing providers with matching IDs.';
+
+  @override
+  String get settingsDataImportAction => 'Import';
+
+  @override
+  String get settingsDataReadingSnapshot => 'Reading snapshot';
+
+  @override
+  String get settingsDataPreparingPreview => 'Preparing preview';
+
+  @override
+  String settingsDataOperit1ImportResult(int chatCount, int messageCount) {
+    return 'Imported $chatCount chats and $messageCount messages.';
+  }
+
+  @override
+  String get settingsDataExportSection => 'Export files';
+
+  @override
+  String get settingsDataExportChatJson => 'Export chat JSON';
+
+  @override
+  String get settingsDataExportModelJson => 'Export model settings JSON';
 
   @override
   String settingsDataSnapshotBytes(int bytes) {
@@ -5190,20 +5318,23 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get chatBackupDescription =>
-      'Save a SQLite chat database snapshot daily while the app is running and keep the latest 10 automatic backups. Includes conversations and messages only, excluding attachment files, workspaces, characters, memories and app settings.';
+      'Copy the complete SQLite database file daily while the app is running and keep the latest 10 automatic backups. Includes all data stored in this database. External attachments, workspaces and separate configuration files are not copied.';
 
   @override
-  String get chatRestoreTitle => 'Restore chat records';
+  String get chatRestoreTitle => 'Restore from a database backup';
 
   @override
   String get chatRestoreDescription =>
-      'Select the external folder containing your previous backups, then choose a dated chat database snapshot. After reinstalling, select the original backup folder again to recover your chats.';
+      'Open the folder containing your backups and choose the date you want to restore from.';
 
   @override
-  String get chatRestoreChooseFolder => 'Choose existing backup folder';
+  String get chatRestoreChooseFolder => 'Choose backup source';
 
   @override
-  String get chatRestoreRefresh => 'Refresh snapshots';
+  String get chatRestoreRefresh => 'Refresh list';
+
+  @override
+  String get chatRestoreSelected => 'Restore selected backup';
 
   @override
   String get chatRestoreAction => 'Restore';
@@ -5212,24 +5343,19 @@ class AppLocalizationsEn extends AppLocalizations {
   String get chatRestoreCancel => 'Cancel';
 
   @override
-  String get chatRestoreEmpty =>
-      'This folder contains no restorable chat database snapshots.';
+  String get chatRestoreEmpty => 'This folder contains no database backups.';
 
   @override
-  String chatRestoreCounts(int chats, int messages) {
-    return '$chats conversations · $messages messages';
-  }
-
-  @override
-  String get chatRestoreConfirmTitle => 'Restore this chat snapshot?';
+  String get chatRestoreConfirmTitle => 'Restore this database backup?';
 
   @override
   String chatRestoreConfirmDescription(String name) {
-    return 'Replace all current chat records with $name. Current chats will first be saved as a separate snapshot; restoration stops if that save fails. Stop running conversations first. Other settings are preserved.';
+    return 'Replace the current database file with $name. This replaces all data stored in this database. Stop running conversations first. Restoring establishes a new synchronization baseline that replaces older data on other devices.';
   }
 
   @override
-  String get chatRestoreSuccess => 'Chat records restored.';
+  String get chatRestoreSuccess =>
+      'Database restored. The next sync will use this copy as the source of truth.';
 
   @override
   String get chatRestoreOnboardingTitle => 'Restore from a previous backup';
@@ -5254,6 +5380,10 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get chatBackupMissing =>
       'The backup directory is not configured, no longer exists or cannot be accessed. Select a directory to enable daily chat backups.';
+
+  @override
+  String get chatBackupDirectoryUnavailable =>
+      'The selected folder cannot be used. Create a new directory inside an accessible folder, such as Documents or Downloads, and select that directory.';
 
   @override
   String get chatBackupReady =>

@@ -1561,7 +1561,52 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get localModelsAddModel => '添加模型';
+  String get localModelsAddModel => '在线找模型';
+
+  @override
+  String get localModelsImportFromDevice => '从设备导入';
+
+  @override
+  String get localModelsImportGgufHint => '选择一个适用于 llama.cpp 的完整 GGUF 聊天模型。';
+
+  @override
+  String get localModelsImportMnnHint =>
+      '一次选中解压后的 MNN 模型文件，包括 config.json 和权重。';
+
+  @override
+  String get localModelsImportInvalidGguf => '请只选择一个 .gguf 文件。';
+
+  @override
+  String get localModelsImportMissingConfig => '所选文件中缺少 config.json。';
+
+  @override
+  String get localModelsImportFileSizeRequired => '所选文件必须非空，并且能读取文件大小。';
+
+  @override
+  String get localModelsImportChangeFiles => '重新选择';
+
+  @override
+  String localModelsImportFileCount(int count) {
+    return '已选择 $count 个文件';
+  }
+
+  @override
+  String get localModelsImportName => '模型名称';
+
+  @override
+  String get localModelsImportCopyNotice => '文件将复制到应用存储，并保留在当前设备。';
+
+  @override
+  String get localModelsImportCopying => '正在复制模型文件…';
+
+  @override
+  String get localModelsImportFinishing => '正在校验并登记模型…';
+
+  @override
+  String get localModelsImportComplete => '模型已导入，打开「推理与设置」即可试跑。';
+
+  @override
+  String get localModelsImportedFile => '设备导入';
 
   @override
   String get localModelsFilterDownloads => '下载任务';
@@ -3126,11 +3171,14 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceBubbleImageAdjustAi => '调整 AI 气泡图片';
 
   @override
-  String get settingsAppearanceBubbleImagePreview => '预览';
+  String get settingsAppearanceBubbleImagePreview => '实时预览';
 
   @override
   String get settingsAppearanceBubbleImagePreviewText =>
       '这是一条气泡预览消息。\n可以查看边角和中间区域的实际效果。';
+
+  @override
+  String get settingsAppearanceBubbleImageSource => '原图';
 
   @override
   String get settingsAppearanceBubbleImageSourceHint =>
@@ -3616,14 +3664,87 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsDataSnapshotBackupTitle => '完整快照';
 
   @override
-  String get settingsDataExportRawSnapshot => '导出快照';
+  String get settingsDataExportRawSnapshot => '导出完整快照';
 
   @override
-  String get settingsDataImportRawSnapshot => '恢复快照';
+  String get settingsDataImportRawSnapshot => '恢复完整快照';
 
   @override
   String get settingsDataExportRawSnapshotDescription =>
-      '把聊天、插件数据、模型设置和本地文件打包成一个备份文件。恢复时会用备份里的数据覆盖当前数据。';
+      '将聊天、插件数据、模型设置和本地文件打包为 .opsnapshot 文件。';
+
+  @override
+  String get settingsDataDatabaseBackup => '数据库备份';
+
+  @override
+  String get settingsDataDatabaseBackupDescription =>
+      '每天保存一份数据库文件，保留最近 10 份自动备份。附件和工作区文件单独存放。';
+
+  @override
+  String get settingsDataBackupScheduled => '每日备份已开启';
+
+  @override
+  String get settingsDataBackupUnavailable => '请选择可用的文件夹以开启每日备份';
+
+  @override
+  String get settingsDataBackupNow => '立即备份';
+
+  @override
+  String get settingsDataBackupSaved => '数据库备份已保存。';
+
+  @override
+  String get settingsDataRecoverySection => '恢复数据';
+
+  @override
+  String get settingsDataRestoreDatabaseDescription =>
+      '从备份目录按日期选择一份数据库，恢复后以这份数据为准同步到其他设备。';
+
+  @override
+  String get settingsDataRestoreArchiveDescription =>
+      '用 Operit2 的完整快照替换当前运行数据，恢复后会重启应用。';
+
+  @override
+  String get settingsDataImportSection => '导入数据';
+
+  @override
+  String get settingsDataImportOperit1Description =>
+      '选择 Operit1 快照，预览后迁移聊天、模型配置和资源。';
+
+  @override
+  String get settingsDataImportChatJson => '导入聊天 JSON';
+
+  @override
+  String get settingsDataImportChatJsonDescription => '新增聊天，已有相同 ID 的聊天会更新。';
+
+  @override
+  String get settingsDataImportModelJson => '导入模型配置 JSON';
+
+  @override
+  String get settingsDataImportModelJsonDescription =>
+      '新增模型服务商配置，已有相同 ID 的配置会更新。';
+
+  @override
+  String get settingsDataImportAction => '确认导入';
+
+  @override
+  String get settingsDataReadingSnapshot => '正在读取快照';
+
+  @override
+  String get settingsDataPreparingPreview => '正在生成预览';
+
+  @override
+  String settingsDataOperit1ImportResult(int chatCount, int messageCount) {
+    return '已导入 $chatCount 个聊天、$messageCount 条消息。';
+  }
+
+  @override
+  String get settingsDataExportSection => '导出文件';
+
+  @override
+  String get settingsDataExportChatJson => '导出聊天 JSON';
+
+  @override
+  String get settingsDataExportModelJson => '导出模型配置 JSON';
 
   @override
   String settingsDataSnapshotBytes(int bytes) {
@@ -4965,20 +5086,22 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get chatBackupDescription =>
-      '应用运行时每天自动保存聊天数据库的 SQLite 快照，保留最近 10 份自动备份。只包含对话和消息，不包含附件文件、工作区、角色、记忆和应用配置。';
+      '应用运行时每天直接复制整个 SQLite 数据库文件，保留最近 10 份自动备份。包含数据库中的全部数据；附件文件、工作区和单独存储的配置文件不随之复制。';
 
   @override
-  String get chatRestoreTitle => '恢复聊天记录';
+  String get chatRestoreTitle => '从数据库备份恢复';
 
   @override
-  String get chatRestoreDescription =>
-      '选择以前保存备份的外部文件夹，按日期选择聊天数据库快照进行恢复。重装或卸载后也可重新选择原备份目录。';
+  String get chatRestoreDescription => '打开存有备份的文件夹，选择要恢复的日期。';
 
   @override
-  String get chatRestoreChooseFolder => '选择已有备份目录';
+  String get chatRestoreChooseFolder => '选择恢复来源';
 
   @override
-  String get chatRestoreRefresh => '刷新快照';
+  String get chatRestoreRefresh => '刷新列表';
+
+  @override
+  String get chatRestoreSelected => '恢复所选备份';
 
   @override
   String get chatRestoreAction => '恢复';
@@ -4987,23 +5110,18 @@ class AppLocalizationsZh extends AppLocalizations {
   String get chatRestoreCancel => '取消';
 
   @override
-  String get chatRestoreEmpty => '此目录中没有可恢复的聊天数据库快照。';
+  String get chatRestoreEmpty => '此文件夹中没有数据库备份。';
 
   @override
-  String chatRestoreCounts(int chats, int messages) {
-    return '$chats 个对话 · $messages 条消息';
-  }
-
-  @override
-  String get chatRestoreConfirmTitle => '恢复这份聊天快照？';
+  String get chatRestoreConfirmTitle => '恢复这份数据库备份？';
 
   @override
   String chatRestoreConfirmDescription(String name) {
-    return '将用 $name 替换当前所有聊天记录。恢复前会先将当前聊天保存为独立快照；保存失败则停止恢复。请先停止正在运行的对话。其他设置不受影响。';
+    return '将用 $name 直接覆盖当前数据库文件，数据库中的全部数据都会被替换。请先停止正在运行的对话。恢复后将以这份数据库建立新的同步基线，覆盖其他设备的旧数据。';
   }
 
   @override
-  String get chatRestoreSuccess => '聊天记录已恢复。';
+  String get chatRestoreSuccess => '数据库已恢复。下次同步将以这份数据为准。';
 
   @override
   String get chatRestoreOnboardingTitle => '从以前的备份恢复';
@@ -5026,6 +5144,10 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get chatBackupMissing => '尚未设置备份目录，或原目录已不存在、无法访问。请选择目录以开启每日聊天备份。';
+
+  @override
+  String get chatBackupDirectoryUnavailable =>
+      '无法使用所选文件夹。请在可用的文件夹（如“文档”或“下载”）下新建目录，并选择该目录。';
 
   @override
   String get chatBackupReady => '备份目录已就绪。应用启动、回到前台及运行期间会检查每日备份。';

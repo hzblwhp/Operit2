@@ -11,6 +11,8 @@ import type { ChatModelBinding } from "./api";
 import type { ChatConfigurationService } from "./domain";
 import { uiRequest } from "./ui-controls";
 import { createChatInput } from "./chat-lifecycle";
+import { traceCharacterLoad } from "./diagnostics";
+import { groupAvatarUri } from "./group-avatar-image";
 
 /** Describes every possible sender's model without choosing a group executor. */
 export interface ModelSelection { participants: { id: string; name: string; binding: ChatModelBinding; followsGlobal: boolean }[] }
@@ -98,7 +100,8 @@ export function parseDomainMessage(value: unknown): DomainMessage {
 /** Calls the same main-runtime owner rather than constructing a Compose-runtime repository. */
 export function callMainDomain<K extends DomainOperation>(operation: K, input: DomainInput<K>): Promise<DomainOutput<K>> {
   const checked = parseDomainPayload(operation, input);
-  return ToolPkg.ipc.call<DomainMessage<K>, DomainOutput<K>>("character-memory.domain", { operation, input: checked }, { targetRuntime: "main" });
+  return traceCharacterLoad(3, "ipc.domain." + operation,
+    () => ToolPkg.ipc.call<DomainMessage<K>, DomainOutput<K>>("character-memory.domain", { operation, input: checked }, { targetRuntime: "main" }));
 }
 
 /** Requires a nonblank generic identity without normalizing or inferring another chat. */
@@ -175,7 +178,7 @@ export function decodeSelection(selection: string, directory: Pick<Snapshot, "ca
         group => group.id === id,
       );
       if (groups.length !== 1) throw new Error("Selection does not identify exactly one group: " + id);
-      return { entity: "group", id, prompt: { CharacterGroup: { id } }, title: groups[0].name, avatarUri: null };
+      return { entity: "group", id, prompt: { CharacterGroup: { id } }, title: groups[0].name, avatarUri: groups[0].avatarUri ?? null };
     }
     default: throw new Error("Invalid plugin selection entity");
   }
@@ -214,7 +217,7 @@ export function listSections(routeId: string, directory: Snapshot, bindings: rea
   }
   for (const group of directory.groups) {
     const selection = "group:" + group.id;
-    sections.push({ id: selection, title: group.name, avatarUri: null, selection, preview: previewAction(routeId, "group", group.id), chatIds: boundChats(selection) });
+    sections.push({ id: selection, title: group.name, avatarUri: group.avatarUri ?? null, selection, preview: previewAction(routeId, "group", group.id), chatIds: boundChats(selection) });
   }
   /** Selects only the caller's actual chats that have this exact stored opaque selection. */
   function boundChats(selection: string): string[] {
@@ -232,22 +235,24 @@ export async function chatContextActionsApi(event: ToolPkg.PublicApiEvent<{ chat
   requireUiCaller(event.callerPackage);
   const input = parseChatRequest(event.payload), service = await getService();
   const directory = await service.snapshot();
-  if (input.chatId === null) {
-    const active = await service.dispatchDomain("activePrompt.get", {});
-    return contextActions(chatUiRoutes, { chatId: null, selection: encodeSelection(active) }, directory);
+  const binding = input.chatId === null ? null : await findChatBinding(input.chatId);
+  const selection = input.chatId === null ? encodeSelection(await service.dispatchDomain("activePrompt.get", {})) : binding?.selection ?? null;
+  const actions = contextActions(chatUiRoutes, { chatId: input.chatId, selection }, directory);
+  if (selection !== null && actions.identity !== null) {
+    const selected = decodeSelection(selection, directory);
+    if (selected.entity === "group") actions.identity.avatarUri = await groupAvatarUri(directory.groups.find(group => group.id === selected.id)!, directory.cards);
   }
-  const binding = await findChatBinding(input.chatId);
-  const selection = binding === null ? null : binding.selection;
-  return contextActions(chatUiRoutes, { chatId: input.chatId, selection }, directory);
+  return actions;
 }
 
 /** Projects actual chat bindings into owner-defined sections instead of reading old Flutter character fields. */
 export async function chatListSectionsApi(event: ToolPkg.PublicApiEvent<{ chats: ChatSummary[] }>): Promise<ListSections> {
   requireUiCaller(event.callerPackage);
   const input = parseSectionsRequest(event.payload), service = await getService(), directory = await service.snapshot();
+  const groups = await Promise.all(directory.groups.map(async group => ({ ...group, avatarUri: await groupAvatarUri(group, directory.cards) })));
   const bindings = [];
   for (const [chatId, selection] of await bindingsForChats(input.chats.map(chat => chat.id))) bindings.push({ chatId, selection });
-  return listSections(chatUiRoutes.editor, directory, bindings, input.chats.map(
+  return listSections(chatUiRoutes.editor, { ...directory, groups }, bindings, input.chats.map(
     /** Preserves the host's actual chat ordering in each section. */
     chat => chat.id,
   ));

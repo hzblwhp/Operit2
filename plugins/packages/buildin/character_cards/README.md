@@ -23,6 +23,23 @@ This is a recoverable multi-owner operation, not a transaction spanning JSON,
 SQLite and files. Concurrent edits fail explicitly. The space-owned plan declares
 its card references for normal identity remapping during space merges.
 
+## Avatar storage
+
+Selected image bytes are stored under `ToolPkg.getSpaceDataDir()/avatars`, alongside
+the shared character records. The generic Files write/copy path publishes their
+Space file snapshots. Avatar ownership is independent of whether the plugin itself
+is installed in device or Space scope; picker temporary paths are never saved.
+
+On repository startup, avatars referencing the current installation's old
+`getConfigDir()/avatars` directory are copied to shared data before their character
+references are updated. Original files remain intact. An existing target must have
+identical bytes, and concurrent avatar changes reject the migration. Interrupted
+reference publication reuses the verified shared copy on the next initialization.
+Missing originals retain their saved reference and emit an explicit diagnostic;
+their image bytes must be recovered on the device that still has them, restored
+from a backup containing the image, or selected again. A diagnostic log cannot
+recover missing image bytes.
+
 For an old interrupted installation without a plan, open character management in
 the plugin and select **检查初始化数据**. Inspection shows the actual saved card
 and does not adopt it automatically. After reviewing the preservation notice,
@@ -128,8 +145,9 @@ Management lists, shared-library controls, USER.md, memory editors, imports,
 exports, attachment selection and owner settings are ordinary Compose DSL in
 `src/ui-management.ts` and `src/ui-memory-*.ts`. The original sections, separate
 owner graph/profile/settings entries, modal forms and graph inspector are retained.
-The character toolbar combines creation and import in the compact “添加” native
-menu beside “绑定对话”. Management reuses the same native entity editor and refreshes
+The character and group toolbars each combine creation and import in a compact “添加”
+native menu. A shared “绑定对话” action above both sections opens the picker for either
+characters or groups. Management reuses the same native entity editor and refreshes
 canonical records when a local transaction completes.
 
 Only the memory graph canvas uses an offline WebView. Its display-only bridge has
@@ -454,7 +472,38 @@ ANN 是近似检索，文件夹、时间和排除条件传入 WASM 过滤器；�
 ## Runtime diagnostics
 
 `[character_cards]` prints short send checks/decisions, group takeover, native
-send starts and group completion. Normal storage, role validation and UI reads
-are silent. Completed operations taking at least one second report their duration.
+send starts and group completion. Completed send operations taking at least one
+second report their duration.
 Failures include the await stage, short chat ID and task ID; the same error is
 printed once, without JSON payloads, message text or full stacks.
+
+Startup loading also records paired `load` events through the existing plugin
+console. V1 covers the retained repository opener, each preference store, memory
+database opening, metadata migration, import completion, initialization and
+handle cleanup after a failure. V3
+covers UI domain/sidebar IPC submission and main-runtime request handling. Each
+boundary records `id`, `operation`, `phase=start|complete|error` and elapsed time
+on settlement. These events contain no card, chat or storage payloads. They
+observe the original await; they do not introduce deadlines, retries or change
+the retained initializer after a failure. File logs retain verbose events even
+when the default console only shows Info and above.
+
+When a startup hangs, preserve both `/operitapp/data/logs/toolpkg.log` and
+`/operitapp/data/logs/operit.log` (current runtime VFS paths) before restarting,
+together with app/package versions,
+platform and the exact loading surface. Compare starts with settlements for the
+same operation and ID. A pending `storage.open.*` or `storage.initialize` locates
+the initialization dependency. A client `ipc.*` start with no main handler start
+points to an earlier IPC/runtime boundary. A completed main handler with a
+pending client call points to return delivery; a completed client call with a
+loading UI requires the Compose/render logs. An outstanding boundary narrows
+the wait; it does not by itself establish a deadlock. Also distinguish reopening
+only the page from restarting the process: reopening a page normally reuses the
+main-runtime repository Promise, whereas a process restart recreates it.
+
+`node --test tests/startup-loading.test.mjs` pauses every actual storage-open
+boundary while lifecycle, domain and sidebar calls overlap. It checks one opener,
+pending-phase visibility, completion after release, and propagation of the same
+failure without an implicit reopen. The file/SQLite harness does not exercise
+native Rust thread scheduling, host locks or device IPC; passing it does not
+reproduce or rule out the reported device hang.

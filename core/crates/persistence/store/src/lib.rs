@@ -45,9 +45,6 @@ pub mod RuntimeStorePaths;
 #[cfg(feature = "full")]
 #[path = "SqliteStore.rs"]
 pub mod SqliteStore;
-#[cfg(feature = "full")]
-#[path = "ChatDatabaseSnapshot.rs"]
-pub mod ChatDatabaseSnapshot;
 #[path = "LegacyTransactionImport.rs"]
 mod LegacyTransactionImport;
 #[path = "SyncOperationStore.rs"]

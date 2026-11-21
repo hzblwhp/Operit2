@@ -14,8 +14,9 @@ import 'package:operit2/core/proxy/generated/CoreProxyClients.g.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart';
 import 'package:operit2/core/runtime/RuntimeBootstrapManager.dart';
 import 'package:operit2/l10n/generated/app_localizations.dart';
+import 'package:operit2/ui/theme/OperitTheme.dart';
 import 'package:operit2/ui/common/ChatBackupDirectoryPanel.dart';
-import 'package:operit2/ui/common/ChatBackupRestorePanel.dart';
+import 'package:operit2/ui/features/settings/data/DataSettingsPanel.dart';
 
 /// Exercises upgrade prompting, directory loss, daily deduplication and safe retention.
 void main() {
@@ -193,8 +194,116 @@ void main() {
     },
   );
 
+  for (final operation in ['selection', 'access']) {
+    test(
+      'failed directory $operation rejects selection and preserves the saved destination',
+      () async {
+        final storage = _DirectoryStorage()
+          ..selectFailure = operation == 'selection'
+              ? StateError('Directory selection denied')
+              : null
+          ..checkFailure = operation == 'access'
+              ? StateError('Directory access denied')
+              : null;
+        final service = ChatBackupService(storage: storage);
+        expect(await service.selectDirectory(), isFalse);
+        expect(manager.config.chatBackupDirectory, isNull);
+        expect(service.directory, isNull);
+        expect(service.needsDirectory, isTrue);
+        expect(service.directorySelectionFailed, isTrue);
+        expect(storage.creates, 0);
+
+        storage.checkFailure = null;
+        storage.selectFailure = null;
+        expect(await service.selectDirectory(), isTrue);
+        expect(service.directorySelectionFailed, isFalse);
+        expect(service.error, isNull);
+        final saved = manager.config.chatBackupDirectory;
+        final original = service.directory;
+        storage.selection = const PersistentDirectory(
+          path: '/virtual/local/folders/unusable',
+          label: 'Unusable folder',
+        );
+        storage.selectFailure = operation == 'selection'
+            ? StateError('Directory selection denied')
+            : null;
+        storage.checkFailure = operation == 'access'
+            ? StateError('Directory access denied')
+            : null;
+        expect(await service.selectDirectory(), isFalse);
+        expect(manager.config.chatBackupDirectory, saved);
+        expect(service.directory, same(original));
+        expect(service.needsDirectory, isFalse);
+        expect(service.directorySelectionFailed, isTrue);
+        service.dispose();
+      },
+    );
+  }
+
+  testWidgets(
+    'unusable backup selection shows actionable folder guidance and stays on setup',
+    (tester) async {
+      final storage = _DirectoryStorage()
+        ..checkFailure = StateError('Directory access denied');
+      final service = ChatBackupService(storage: storage);
+      var selections = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          locale: const Locale('zh'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: ChatBackupDirectoryPanel(
+              service: service,
+              onSelected: () => selections++,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('选择备份目录'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('无法使用所选文件夹。请在可用的文件夹（如“文档”或“下载”）下新建目录，并选择该目录。'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Directory access denied'), findsNothing);
+      expect(selections, 0);
+      expect(manager.config.chatBackupDirectory, isNull);
+      expect(find.text('选择备份目录'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+      service.dispose();
+    },
+  );
+
   test(
-    'retention follows successful publication and never deletes manual or foreign backups',
+    'lost write access is reported even after a successful backup today',
+    () async {
+      final storage = _DirectoryStorage();
+      final service = ChatBackupService(storage: storage);
+      expect(await service.selectDirectory(), isTrue);
+      await service.checkAndBackup();
+      expect(storage.creates, 1);
+      final saved = manager.config.chatBackupDirectory;
+      storage.checkFailure = StateError('Probe file write denied');
+      await service.checkAndBackup();
+      expect(service.needsDirectory, isTrue);
+      expect(service.error, contains('Probe file write denied'));
+      expect(manager.config.chatBackupDirectory, saved);
+      expect(storage.creates, 1);
+      expect(storage.files, hasLength(1));
+
+      storage.checkFailure = null;
+      await service.checkAndBackup();
+      expect(service.needsDirectory, isFalse);
+      expect(service.error, isNull);
+      expect(storage.creates, 1);
+      service.dispose();
+    },
+  );
+
+  test(
+    'retention keeps ten current-identity backups including legacy manual files',
     () async {
       final storage = _DirectoryStorage();
       final bridge = _ChatBridge();
@@ -219,96 +328,218 @@ void main() {
       expect(storage.removed, isEmpty);
       storage.failWrite = false;
       await service.checkAndBackup();
-      expect(storage.files, hasLength(12));
-      expect(storage.files, contains(manual));
+      expect(storage.files, hasLength(11));
+      expect(storage.files, isNot(contains(manual)));
       expect(storage.files, contains(foreign));
+      expect(storage.removed, [
+        '${prefix}2000-01-01-1.sqlite',
+        manual,
+        '${prefix}2000-01-02-1.sqlite',
+        '${prefix}2000-01-03-1.sqlite',
+      ]);
+      service.dispose();
+    },
+  );
+
+  test('daily checks use filenames without opening backup contents', () async {
+    final storage = _DirectoryStorage();
+    final service = ChatBackupService(storage: storage);
+    await service.selectDirectory();
+    final now = DateTime.now();
+    final day =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    final name = 'operit-chats-${manager.activeIdentity.id}-$day-1.sqlite';
+    storage.files[name] = null;
+    await service.checkAndBackup();
+    await service.checkAndBackup();
+    expect(storage.creates, 0);
+    expect(storage.files, hasLength(1));
+    expect(service.lastSuccess, DateTime.fromMillisecondsSinceEpoch(1));
+    service.dispose();
+  });
+
+  test(
+    'restarts and repeated checks create only one backup per local day',
+    () async {
+      final storage = _DirectoryStorage();
+      var now = DateTime(2026, 11, 20, 0, 1);
+      final first = ChatBackupService(storage: storage, now: () => now);
+      await first.selectDirectory();
+      await first.checkAndBackup();
+      expect(storage.creates, 1);
+      expect(first.lastSuccess, now);
+      first.dispose();
+
+      now = DateTime(2026, 11, 20, 23, 59);
+      final restarted = ChatBackupService(storage: storage, now: () => now);
+      await restarted.checkAndBackup();
+      await restarted.checkAndBackup();
+      expect(storage.creates, 1);
+      expect(restarted.lastSuccess, DateTime(2026, 11, 20, 0, 1));
+
+      now = DateTime(2026, 11, 21, 0, 1);
+      await restarted.checkAndBackup();
+      await restarted.checkAndBackup();
+      expect(storage.creates, 2);
+      expect(storage.files, hasLength(2));
+      expect(restarted.lastSuccess, now);
+      restarted.dispose();
+    },
+  );
+
+  test('a legacy manual backup counts toward the daily limit', () async {
+    final storage = _DirectoryStorage();
+    final now = DateTime(2026, 11, 20, 12);
+    final service = ChatBackupService(storage: storage, now: () => now);
+    await service.selectDirectory();
+    final created = DateTime(2026, 11, 20, 8);
+    final name =
+        'operit-chats-${manager.activeIdentity.id}-'
+        'manual-2026-11-20-${created.millisecondsSinceEpoch}.sqlite';
+    storage.files[name] = null;
+    await service.checkAndBackup();
+    expect(storage.creates, 0);
+    expect(service.lastSuccess, created);
+    service.dispose();
+  });
+
+  test(
+    'startup prunes oldest backups even when today already exists',
+    () async {
+      final storage = _DirectoryStorage();
+      final now = DateTime(2026, 11, 20, 12);
+      final service = ChatBackupService(storage: storage, now: () => now);
+      await service.selectDirectory();
+      final prefix = 'operit-chats-${manager.activeIdentity.id}-';
+      final names = <String>[];
+      for (var day = 8; day <= 20; day++) {
+        final date = DateTime(2026, 11, day, 8);
+        final name =
+            '${prefix}2026-11-${day.toString().padLeft(2, '0')}-'
+            '${date.millisecondsSinceEpoch}.sqlite';
+        names.add(name);
+        storage.files[name] = null;
+      }
+      storage.files['unrelated.txt'] = null;
+      await service.checkAndBackup();
+      expect(storage.creates, 0);
+      expect(storage.files, hasLength(11));
+      expect(storage.removed, names.take(3).toList());
+      expect(storage.files, contains('unrelated.txt'));
+      expect(service.lastSuccess, DateTime(2026, 11, 20, 8));
       service.dispose();
     },
   );
 
   test(
-    'partial daily files do not suppress a complete backup; empty chats never prune',
+    'failed retention is retried without creating another backup today',
     () async {
       final storage = _DirectoryStorage();
-      final bridge = _ChatBridge();
-      storage.empty = true;
-      final service = ChatBackupService(
-        storage: storage,
-        clients: GeneratedCoreProxyClients(bridge),
-      );
+      var now = DateTime(2026, 11, 10, 12);
+      final service = ChatBackupService(storage: storage, now: () => now);
       await service.selectDirectory();
-      final now = DateTime.now();
-      final day =
-          '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-      final broken = 'operit-chats-${manager.activeIdentity.id}-$day-1.sqlite';
-      storage.files[broken] = null;
+      for (var day = 10; day < 20; day++) {
+        now = DateTime(2026, 11, day, 12);
+        await service.checkAndBackup();
+      }
+      expect(storage.files, hasLength(10));
+      now = DateTime(2026, 11, 20, 12);
+      storage.failRemove = true;
       await service.checkAndBackup();
-      expect(storage.files, hasLength(1));
-      expect(storage.removed, isEmpty);
-      storage.empty = false;
+      expect(storage.files, hasLength(11));
+      expect(service.error, contains('Deletion denied'));
+      storage.failRemove = false;
       await service.checkAndBackup();
-      expect(storage.files, hasLength(2));
-      expect(service.lastSuccess, isNotNull);
+      expect(storage.files, hasLength(10));
+      expect(storage.creates, 11);
+      expect(storage.removed.single, contains('2026-11-10-'));
+      expect(service.error, isNull);
       service.dispose();
     },
   );
 
   testWidgets(
-    'restore page shows dated snapshots and requires replacement confirmation',
+    'settings only lists backups on request and restores from an independent folder',
     (tester) async {
       final storage = _DirectoryStorage();
       final service = ChatBackupService(storage: storage);
       await tester.runAsync(service.selectDirectory);
-      const name = 'operit-chats-previous-install-2026-01-01-1.sqlite';
-      storage.files[name] = _snapshot(name);
-      var restored = false;
+      final configured = manager.config.chatBackupDirectory;
+      final source = const PersistentDirectory(
+        path: '/virtual/local/folders/another',
+        label: 'Another folder',
+      );
+      storage.selection = source;
+      const name =
+          'operit-chats-previous-install-2026-01-01-1767268800000.sqlite';
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
       await tester.pumpWidget(
-        MaterialApp(
-          locale: const Locale('zh'),
-          localizationsDelegates: AppLocalizations.localizationsDelegates,
-          supportedLocales: AppLocalizations.supportedLocales,
-          home: Scaffold(
-            body: SingleChildScrollView(
-              child: ChatBackupRestorePanel(
-                service: service,
-                onRestored: () => restored = true,
-              ),
+        OperitTheme(
+          initialThemePreferenceSnapshot: ThemePreferenceDefaults.snapshot,
+          initialThemeIsReady: false,
+          unconfiguredChildEnabled: true,
+          hostInteractionHostsEnabled: false,
+          child: Scaffold(
+            body: DataSettingsPanel(
+              clients: GeneratedCoreProxyClients(_ChatBridge()),
+              backupService: service,
             ),
           ),
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.textContaining(name), findsOneWidget);
-      expect(find.textContaining('1 个对话 · 3 条消息'), findsOneWidget);
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(DataSettingsPanel)),
+      )!;
+      expect(storage.lists, isEmpty);
       expect(storage.creates, 0);
-      await tester.tap(find.text('恢复'));
+      await tester.tap(find.text(l10n.chatRestoreTitle));
       await tester.pumpAndSettle();
-      expect(find.text('恢复这份聊天快照？'), findsOneWidget);
+      expect(find.text(l10n.chatRestoreEmpty), findsOneWidget);
+      storage.files[name] = _snapshot(name);
+      await tester.tap(find.text(l10n.chatRestoreChooseFolder));
+      await tester.pumpAndSettle();
+      expect(manager.config.chatBackupDirectory, configured);
+      expect(storage.lists.last, source.path);
+      expect(find.text('Another folder'), findsOneWidget);
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.widgetWithText(FilledButton, l10n.chatRestoreSelected),
+            )
+            .onPressed,
+        isNull,
+      );
+      await tester.ensureVisible(find.text(name));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(name));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(l10n.chatRestoreSelected));
+      await tester.pumpAndSettle();
+      expect(
+        find.text(l10n.chatRestoreConfirmDescription(name)),
+        findsOneWidget,
+      );
       expect(storage.restored, isEmpty);
-      await tester.tap(find.text('取消'));
+      await tester.tap(find.widgetWithText(TextButton, l10n.cancel).last);
       await tester.pumpAndSettle();
-      expect(storage.creates, 0);
-      await tester.tap(find.text('恢复'));
+      expect(storage.restored, isEmpty);
+      await tester.tap(find.text(l10n.chatRestoreSelected));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, '恢复'));
+      await tester.tap(
+        find.widgetWithText(FilledButton, l10n.chatRestoreAction),
+      );
       await tester.pumpAndSettle();
       expect(storage.restored, [name]);
-      expect(restored, isTrue);
-      expect(find.text('聊天记录已恢复。'), findsOneWidget);
-      storage.files.clear();
-      storage.selection = const PersistentDirectory(
-        path: '/virtual/local/folders/another',
-        label: 'Another folder',
-      );
-      await tester.runAsync(() async {
-        await service.selectDirectory();
-        // Drain the directory observer's real-zone snapshot load before advancing fake frames.
-        await Future<void>.delayed(Duration.zero);
-      });
+      expect(storage.restoreSource, source.path);
+      expect(storage.creates, 0);
+      expect(find.text(l10n.chatRestoreSuccess), findsOneWidget);
+      await tester.tap(find.text(l10n.ok));
       await tester.pumpAndSettle();
-      expect(find.textContaining(name), findsNothing);
-      expect(find.text('此目录中没有可恢复的聊天数据库快照。'), findsOneWidget);
-      expect(find.text('Another folder'), findsOneWidget);
+      expect(manager.config.chatBackupDirectory, configured);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       service.dispose();
@@ -316,32 +547,27 @@ void main() {
   );
 
   test(
-    'previous-install snapshots are listed and restoration saves current chats first',
+    'listing reads filenames and restoring copies only the selected backup',
     () async {
       final storage = _DirectoryStorage();
       final service = ChatBackupService(storage: storage);
       await service.selectDirectory();
       const old = 'operit-chats-old-install-2026-01-01-1.sqlite';
-      const broken = 'operit-chats-old-install-2026-01-02-2.sqlite';
+      const another = 'operit-chats-old-install-2026-01-02-2.sqlite';
       storage.files[old] = _snapshot(old);
-      storage.files[broken] = null;
-      expect((await service.listSnapshots()).map((s) => s.name), [old]);
-      expect(service.error, contains(broken));
+      storage.files[another] = null;
+      storage.files['unrelated.txt'] = null;
+      final source = service.configuredDirectory!;
+      expect((await service.listSnapshots(source)).map((s) => s.name), [
+        another,
+        old,
+      ]);
+      expect(service.error, isNull);
       storage.failWrite = true;
-      expect(await service.restoreSnapshot(old), isFalse);
-      expect(storage.restored, isEmpty);
-      storage.failWrite = false;
-      expect(await service.restoreSnapshot(old), isTrue);
+      await service.restoreSnapshot(source, old);
       expect(storage.restored, [old]);
-      expect(
-        storage.files.keys.where(
-          (name) => name.startsWith(
-            'operit-chats-${manager.activeIdentity.id}-before-restore-',
-          ),
-        ),
-        hasLength(1),
-      );
-      expect(storage.files[old]!.createdAt, 1);
+      expect(storage.creates, 0);
+      expect(storage.files, hasLength(3));
       service.dispose();
     },
   );
@@ -349,12 +575,7 @@ void main() {
 
 /// Supplies metadata for a valid physical database without a native runtime in service tests.
 ChatBackupSnapshot _snapshot(String name, {int createdAt = 1}) =>
-    ChatBackupSnapshot(
-      name: name,
-      createdAt: createdAt,
-      chatCount: 1,
-      messageCount: 3,
-    );
+    ChatBackupSnapshot(name: name, createdAt: createdAt);
 
 /// Models a durable external directory independently of application storage.
 class _DirectoryStorage implements PersistentDirectoryStorage {
@@ -363,35 +584,44 @@ class _DirectoryStorage implements PersistentDirectoryStorage {
     label: 'User backups',
   );
   bool available = true;
+  Object? selectFailure;
+  Object? checkFailure;
   bool failWrite = false;
-  bool empty = false;
+  bool failRemove = false;
   int creates = 0;
   final files = <String, ChatBackupSnapshot?>{};
   final removed = <String>[];
   final restored = <String>[];
+  final lists = <String>[];
+  String? restoreSource;
 
   /// Returns the explicit selection or user cancellation.
   @override
-  Future<PersistentDirectory?> select() async => selection;
+  Future<PersistentDirectory?> select() async {
+    final failure = selectFailure;
+    if (failure != null) throw failure;
+    return selection;
+  }
 
   /// Models revocation without removing retained backup bytes.
   @override
   Future<void> check(PersistentDirectory directory) async {
     if (!available) throw StateError('Directory authorization revoked');
+    final failure = checkFailure;
+    if (failure != null) throw failure;
   }
 
   /// Exposes partial-write failure before reporting success.
   @override
-  Future<ChatBackupSnapshot?> create(
+  Future<ChatBackupSnapshot> create(
     PersistentDirectory directory,
     String name,
   ) async {
     if (failWrite) throw StateError('Disk full');
     creates++;
-    if (empty) return null;
     final value = _snapshot(
       name,
-      createdAt: DateTime.now().millisecondsSinceEpoch,
+      createdAt: int.parse(name.split('-').last.split('.').first),
     );
     files[name] = value;
     return value;
@@ -399,33 +629,26 @@ class _DirectoryStorage implements PersistentDirectoryStorage {
 
   /// Lists every user file so retention must filter its ownership.
   @override
-  Future<List<String>> list(PersistentDirectory directory) async =>
-      files.keys.toList();
-
-  /// Reads existing bytes for daily archive verification.
-  @override
-  Future<ChatBackupSnapshot> inspect(
-    PersistentDirectory directory,
-    String name,
-  ) async {
-    final value = files[name];
-    if (value == null) throw StateError('Invalid SQLite database');
-    return value;
+  Future<List<String>> list(PersistentDirectory directory) async {
+    lists.add(directory.path);
+    return files.keys.toList();
   }
 
-  /// Records restoration only after the caller has saved its safety snapshot.
+  /// Records exactly one restore without creating another backup.
   @override
   Future<ChatBackupSnapshot> restore(
     PersistentDirectory directory,
     String name,
   ) async {
     restored.add(name);
-    return inspect(directory, name);
+    restoreSource = directory.path;
+    return files[name]!;
   }
 
   /// Records only explicit retention deletions.
   @override
   Future<void> remove(PersistentDirectory directory, String name) async {
+    if (failRemove) throw StateError('Deletion denied');
     removed.add(name);
     files.remove(name);
   }
